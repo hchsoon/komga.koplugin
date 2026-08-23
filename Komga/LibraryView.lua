@@ -20,6 +20,15 @@ local Backend = require("Komga/Backend")
 local MessageBox = require("Komga/MessageBox")
 local H = require("Komga/Helper")
 
+-- 临时调试: 记录点击打开流程 (诊断完成后删除)
+local function debug_log(...)
+    local ok, file = pcall(io.open, "/Users/hchsoon/Library/Application Support/koreader/komga_ui_debug.log", "a")
+    if ok and file then
+        file:write(os.date("[%H:%M:%S] ") .. table.concat({...}, " ") .. "\n")
+        file:close()
+    end
+end
+
 local LibraryView = {
     disk_available = nil,
     -- record the current reading items
@@ -28,6 +37,7 @@ local LibraryView = {
     ui_refresh_time = os.time(),
     displayed_chapter = nil,
     readerui_is_showing = nil,
+    volume_reading = nil, -- 当前阅读是否为分卷快捷方式进入的 EPUB（用于 TOC 决策）
     chapter_call_event = nil,
     -- menu mode
     book_menu = nil,
@@ -212,6 +222,14 @@ end
 function LibraryView:openBrowserMenu(file)
     self:getInstance()
     self:getBrowserWidget()
+    -- 分卷快捷方式分流到卷级菜单（此入口仅对 /Komga漫画/ 下的文件触发）
+    if H.is_str(file) and file:find("\u{200B}.html", 1, true) then
+        local customedata = self.book_browser:getCustomMateData(file)
+        if H.is_tbl(customedata) and customedata.type == 'volume' then
+            self:openVolumeBrowserMenu(file, customedata)
+            return
+        end
+    end
     local dialog
     local buttons = {{{
         text = "清空书籍快捷方式",
@@ -431,21 +449,368 @@ end
 -- exit readerUI,  closing the at readerUI、FileManager the same time app will exit
 -- readerUI -> ReturnKomgaChapterListing event -> show ChapterListing -> close ->show LibraryView ->close -> ? 
 function LibraryView:openKomgaFolder(path, focused_file, selected_files, done_callback)
+    debug_log("OPENKOMGAFOLDER entry path:", tostring(path))
     UIManager:nextTick(function()
         if ReaderUI.instance then
             ReaderUI.instance:onClose()
             self.readerui_is_showing = false
         end
+        debug_log("OPENKOMGAFOLDER before reinit t=", os.time())
         if FileManager.instance then
             FileManager.instance:reinit(path, focused_file, selected_files)
         else
             FileManager:showFiles(path, focused_file, selected_files)
         end
+        debug_log("OPENKOMGAFOLDER after reinit t=", os.time())
         if FileManager.instance and path then
             FileManager.instance:updateTitleBarPath(path)
         end
         if H.is_func(done_callback) then
             done_callback()
+        end
+    end)
+end
+
+-- 系列快捷方式点击: 进入该系列的分卷目录（数据缺失时先同步分卷）
+function LibraryView:openSeriesVolumesFolder(book_cache_id, serie_file)
+    self:getInstance()
+    self:getBrowserWidget()
+    if not H.is_str(book_cache_id) then
+        MessageBox:notice("openSeriesVolumesFolder parameter error")
+        return
+    end
+    local bookinfo = Backend:getBookInfoCache(book_cache_id)
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name)) then
+        MessageBox:notice("书籍不存在于书架,请刷新同步")
+        return
+    end
+    local chapters = Backend:getBookChapterCache(book_cache_id)
+    debug_log("OPENSERIE chapters:", tostring(H.is_tbl(chapters) and #chapters or 0))
+    if H.is_tbl(chapters) and #chapters > 0 then
+        debug_log("OPENSERIE direct->doOpenSeriesVolumesFolder")
+        self:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
+        return
+    end
+    debug_log("OPENSERIE -> sync 分卷目录")
+    -- 分卷未同步, 先刷新目录
+    if not NetworkMgr:isConnected() then
+        MessageBox:notice("分卷数据未同步且当前无网络连接")
+        return
+    end
+    Backend:closeDbManager()
+    MessageBox:loading("正在同步分卷目录", function()
+        -- 子进程内任务必须返回可序列化的值, 否则 Trapper 反序列化失败回调会拿到 nil(显示"Response is nil")
+        local ok, err_or_res = pcall(function()
+            return Backend:refreshChaptersCache({
+                bookUrl = bookinfo.bookUrl,
+                cache_id = book_cache_id,
+                name = bookinfo.name,
+                author = bookinfo.author,
+                cacheExt = bookinfo.cacheExt
+            })
+        end)
+        if not ok then
+            -- 记录真实错误到日志文件, 便于排查
+            self:logSyncError(tostring(err_or_res))
+            return { type = 'ERROR', message = '同步异常: ' .. tostring(err_or_res) }
+        end
+        return err_or_res
+    end, function(state, response)
+        if state ~= true then
+            return
+        end
+        if response == nil then
+            -- 子进程 fork 后无输出(在 macOS 上 fork 后的子进程网络/数据库状态可能异常):
+            -- 记录痕迹并回退到本进程内同步, 保证能完成
+            self:logSyncError("<nil response: subprocess produced no output, falling back to in-process sync>")
+            self:syncChaptersInProcess(book_cache_id, bookinfo)
+            return
+        end
+        Backend:HandleResponse(response, function(data)
+            self:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
+        end, function(err_msg)
+            MessageBox:error('同步分卷失败: ' .. tostring(err_msg))
+        end)
+    end)
+end
+
+-- 记录同步错误/痕迹到日志文件, 便于排查
+function LibraryView:logSyncError(err_str)
+    pcall(function()
+        local f = io.open(H.getTempDirectory() .. "/sync_err.log", "a")
+        if f then
+            f:write(os.date("%Y-%m-%d %H:%M:%S") .. " " .. tostring(err_str) .. "\n")
+            f:close()
+        end
+    end)
+end
+
+-- 本进程内直接同步分卷(不走 MessageBox:loading 的子进程 fork)。
+-- 在 macOS 上 fork 后的子进程内网络/数据库状态可能异常, 导致回调拿到 nil;
+-- 本进程内同步已验证可用。
+function LibraryView:syncChaptersInProcess(book_cache_id, bookinfo)
+    local dialog = MessageBox:custom({
+        text = "正在同步分卷目录...",
+        icon = "notice-info"
+    })
+    local ok, err_or_res = pcall(function()
+        return Backend:refreshChaptersCache({
+            bookUrl = bookinfo.bookUrl,
+            cache_id = book_cache_id,
+            name = bookinfo.name,
+            author = bookinfo.author,
+            cacheExt = bookinfo.cacheExt
+        })
+    end)
+    UIManager:close(dialog)
+    if not ok then
+        self:logSyncError(tostring(err_or_res))
+        MessageBox:error('同步分卷失败: 同步异常: ' .. tostring(err_or_res))
+        return
+    end
+    Backend:HandleResponse(err_or_res, function(data)
+        self:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
+    end, function(err_msg)
+        MessageBox:error('同步分卷失败: ' .. tostring(err_msg))
+    end)
+end
+
+function LibraryView:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
+    self:getInstance()
+    self:getBrowserWidget()
+    if not (H.is_str(book_cache_id) and H.is_tbl(bookinfo)) then
+        return
+    end
+    local volume_folder = self.book_browser:ensureVolumeFolder(book_cache_id, bookinfo)
+    if not volume_folder then
+        MessageBox:notice("创建分卷目录失败")
+        return
+    end
+    self.book_browser:syncSeriesVolumes(book_cache_id, bookinfo, volume_folder)
+    debug_log("DOOPENSERIE volume_folder:", tostring(volume_folder))
+    self:openKomgaFolder(volume_folder)
+end
+
+-- 分卷快捷方式点击: 镜像 ChapterListing:onMenuChoice 的流式/缓存分流
+function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
+    self:getInstance()
+    self:getBrowserWidget()
+    if not (H.is_str(book_cache_id) and H.is_num(chapters_index)) then
+        MessageBox:notice("openVolumeShortcut parameter error")
+        return
+    end
+    local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+    debug_log("OPENVOLUME idx:", tostring(chapters_index), "mediaType:", tostring(chapter and chapter.mediaType),
+        "cacheFilePath:", tostring(chapter and chapter.cacheFilePath))
+    if not (H.is_tbl(chapter) and H.is_num(chapter.chapters_index)) then
+        MessageBox:notice("分卷数据不存在,请返回书架刷新同步")
+        return
+    end
+    -- 分卷快捷方式进入的 EPUB 阅读: 标记为分卷阅读, 目录按钮显示 EPUB 原生目录而非系列目录
+    if chapter.mediaType == "EPUB" then
+        chapter.volume_read = true
+    end
+    -- 刷新该卷快捷方式的进度显示
+    if H.is_str(lnk_path) and util.fileExists(lnk_path) then
+        self:refreshVolumeShortcutProgress(book_cache_id, chapters_index, lnk_path)
+    end
+
+    if Backend:getSettings().stream_image_view == true and chapter.mediaType ~= "EPUB" then
+        local bookinfo = Backend:getBookInfoCache(book_cache_id)
+        if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
+            MessageBox:notice("书籍数据缺失")
+            return
+        end
+        local volume_dir = H.is_str(lnk_path) and select(1, util.splitFilePathName(lnk_path)) or nil
+        NetworkMgr:runWhenOnline(function()
+            UIManager:nextTick(function()
+                local StreamImageView = require("Komga/StreamImageView")
+                StreamImageView:fetchAndShow({
+                    bookinfo = bookinfo,
+                    chapter = chapter,
+                    on_return_callback = function()
+                        if H.is_str(volume_dir) then
+                            self:openKomgaFolder(volume_dir)
+                        end
+                    end
+                })
+            end)
+        end)
+        Backend:show_notice("流式漫画开启")
+    else
+        self:loadAndRenderChapter(chapter)
+    end
+end
+
+-- 读完返回文件浏览器时, 刷新当前分卷快捷方式的进度显示
+function LibraryView:refreshReadVolumeShortcut(book_cache_id, chapters_index)
+    self:getBrowserWidget()
+    if not (H.is_str(book_cache_id) and H.is_num(chapters_index)) then
+        return
+    end
+    local file_manager = FileManager.instance
+    local dir = file_manager and file_manager.file_chooser and file_manager.file_chooser.path
+    if not (H.is_str(dir) and dir:find("/Komga\u{200B}漫画/", 1, true)) then
+        return
+    end
+    local found
+    util.findFiles(dir, function(fullpath, name)
+        if found then
+            return
+        end
+        if util.fileExists(fullpath) and name:find("\u{200B}.html", 1, true) then
+            local customedata = self.book_browser:getCustomMateData(fullpath)
+            if H.is_tbl(customedata) and customedata.type == 'volume' and
+                customedata.chapters_index == chapters_index then
+                local doc_settings = DocSettings:open(fullpath)
+                if doc_settings:readSetting("book_cache_id") == book_cache_id then
+                    found = fullpath
+                end
+            end
+        end
+    end, false)
+    if found then
+        self.book_browser:refreshVolumeMetadata(nil, found, book_cache_id, chapters_index)
+    end
+end
+
+-- 轻量刷新分卷快捷方式进度（doc_props）
+function LibraryView:refreshVolumeShortcutProgress(book_cache_id, chapters_index, lnk_path)
+    self:getBrowserWidget()
+    if not (H.is_str(book_cache_id) and H.is_num(chapters_index) and H.is_str(lnk_path) and
+        util.fileExists(lnk_path)) then
+        return
+    end
+    self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, chapters_index)
+end
+
+-- 分卷快捷方式右键菜单
+function LibraryView:openVolumeBrowserMenu(file, customedata)
+    self:getInstance()
+    self:getBrowserWidget()
+    local lnk_path = file
+    if not H.is_str(lnk_path) then
+        return
+    end
+    local book_cache_id = customedata and customedata.book_cache_id
+    if not H.is_str(book_cache_id) then
+        book_cache_id = DocSettings:open(lnk_path):readSetting("book_cache_id")
+    end
+    local chapters_index = customedata and customedata.chapters_index
+    if not H.is_num(chapters_index) then
+        chapters_index = DocSettings:open(lnk_path):readSetting("chapters_index")
+    end
+    if not (H.is_str(book_cache_id) and H.is_num(chapters_index)) then
+        MessageBox:notice("分卷快捷方式数据不完整")
+        return
+    end
+    local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+    local is_read = H.is_tbl(chapter) and chapter.isRead == true
+    local isDownLoaded = H.is_tbl(chapter) and chapter.isDownLoaded == true
+    local dialog
+    local buttons = {{{
+        text = table.concat({Icons.FA_CHECK_CIRCLE, (is_read and ' 取消' or ' 标记'), "已读"}),
+        callback = function()
+            UIManager:close(dialog)
+            Backend:HandleResponse(Backend:MarkReadChapter({
+                chapters_index = chapters_index,
+                chapter_page = 0,
+                isRead = is_read,
+                book_cache_id = book_cache_id
+            }), function(data)
+                self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, chapters_index)
+                self.book_browser:refreshItems()
+            end, function(err_msg)
+                MessageBox:error('标记失败 ', err_msg)
+            end)
+        end
+    }}, {{
+        text = table.concat({Icons.FA_DOWNLOAD, (isDownLoaded and ' 刷新' or ' 下载'), '分卷'}),
+        callback = function()
+            UIManager:close(dialog)
+            Backend:HandleResponse(Backend:ChangeChapterCache({
+                chapters_index = chapters_index,
+                cacheFilePath = chapter.cacheFilePath,
+                book_cache_id = book_cache_id,
+                isDownLoaded = isDownLoaded,
+                bookUrl = chapter.bookUrl,
+                title = chapter
+            }), function(data)
+                self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, chapters_index)
+                self.book_browser:refreshItems()
+                if isDownLoaded == true then
+                    Backend:show_notice('删除成功')
+                else
+                    MessageBox:success('后台下载分卷任务已添加，请稍后下拉刷新')
+                end
+            end, function(err_msg)
+                MessageBox:error('失败:', err_msg)
+            end)
+        end
+    }}, {{
+        text = table.concat({Icons.FA_THUMB_TACK, " 上传进度"}),
+        callback = function()
+            UIManager:close(dialog)
+            self:syncVolumeProgressShow(book_cache_id, chapters_index)
+        end
+    }}, {{
+        text = "删除快捷方式",
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:confirm("确定删除该分卷快捷方式? (不影响已缓存的分卷)", function(result)
+                if result then
+                    self:deleteFile(lnk_path, true)
+                end
+            end, {
+                ok_text = "删除",
+                cancel_text = "取消"
+            })
+        end
+    }}}
+
+    dialog = require("ui/widget/buttondialog"):new{
+        title = "分卷快捷方式",
+        title_align = "center",
+        info_face = Font:getFace("tfont"),
+        buttons = buttons
+    }
+    UIManager:show(dialog)
+end
+
+-- 上传分卷阅读进度到服务器（尽力读取本地缓存文件进度）
+function LibraryView:syncVolumeProgressShow(book_cache_id, chapters_index)
+    self:getBrowserWidget()
+    local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+    if not (H.is_tbl(chapter) and H.is_num(chapter.pages)) then
+        MessageBox:notice("分卷数据不存在")
+        return
+    end
+    local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+    chapter.current_page = 0
+    if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
+        local cache_doc_settings = DocSettings:open(cache_chapter.cacheFilePath)
+        chapter.current_page = tonumber(cache_doc_settings:readSetting("last_page")) or 0
+    end
+    Backend:closeDbManager()
+    MessageBox:loading("同步中 ", function()
+        local response = Backend:saveBookProgress(chapter)
+        if not (type(response) == 'table' and response.type == 'SUCCESS') then
+            local message = (type(response) == 'table' and response.message) or
+                "进度上传失败，请稍后重试"
+            return {
+                type = 'ERROR',
+                message = message
+            }
+        end
+        return Backend:refreshLibraryCache()
+    end, function(state, response)
+        if state == true then
+            Backend:HandleResponse(response, function(data)
+                self.book_browser:refreshItems()
+                Backend:show_notice('同步完成')
+            end, function(err_msg)
+                MessageBox:error('同步失败：' .. tostring(err_msg))
+            end)
         end
     end)
 end
@@ -456,19 +821,30 @@ function LibraryView:loadAndRenderChapter(chapter)
 
     print("Index is ...", chapter.chapters_index)
     print("Cache chapter is ...", cache_chapter.cacheFilePath)
+    print("LOADRENDER cachehit:", tostring(cache_chapter.cacheFilePath))
+    debug_log("LOADRENDER idx:", tostring(chapter.chapters_index), "bookId:", tostring(chapter.bookId),
+        "cachehit:", tostring(cache_chapter and cache_chapter.cacheFilePath))
     if (H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)) then
+        -- 缓存命中分支也要传递分卷阅读标记, 否则目录按钮会退回系列目录而非 EPUB 原生目录
+        cache_chapter.volume_read = chapter.volume_read
         self:showReaderUI(cache_chapter)
     else
         -- Backend:closeDbManager()
+        -- dismissable=true: 下载中可取消, 避免慢下载/挂起时卡住界面无法点击其他分卷
         return MessageBox:loading("正在下载正文", function()
             return Backend:downloadChapter(chapter)
         end, function(state, response)
+            if state == false then
+                Backend:show_notice("已取消下载")
+                return
+            end
             if state == true then
                 Backend:HandleResponse(response, function(data)
                     if not H.is_tbl(data) or not H.is_str(data.cacheFilePath) then
                         MessageBox:error('下载失败')
                         return
                     end
+                    data.volume_read = chapter.volume_read
                     self:showReaderUI(data)
                 end, function(err_msg)
                     Backend:show_notice("请检查并刷新书架")
@@ -476,7 +852,7 @@ function LibraryView:loadAndRenderChapter(chapter)
                 end)
             end
 
-        end)
+        end, {dismissable = true})
     end
 end
 
@@ -497,8 +873,17 @@ function LibraryView:ReaderUIEventCallback(chapter_call_event)
     })
 
     if H.is_tbl(nextChapter) then
+        -- 翻页/跨章节时 findNextEpubChapterInfo 返回的内部章节缺少 bookId/mediaType/volume_read
+        -- 等字段, 必须从当前章节补齐, 否则缓存路径解析失败(TOC 按钮也会退回系列目录)
         nextChapter.bookId = chapter.bookId
         nextChapter.call_event = chapter.call_event
+        nextChapter.mediaType = chapter.mediaType
+        nextChapter.volume_read = chapter.volume_read
+        nextChapter.book_cache_id = chapter.book_cache_id
+        nextChapter.name = chapter.name
+        nextChapter.author = chapter.author
+        nextChapter.cacheExt = chapter.cacheExt
+        nextChapter.totalChapterNum = chapter.totalChapterNum
         self:loadAndRenderChapter(nextChapter)
     else
         -- print("No more pages")
@@ -516,21 +901,92 @@ function LibraryView:showReaderUI(chapter)
     end
     -- print("Cache file path...", chapter.cacheFilePath)
     chapter.totalChapterNum = Backend:getEpubChapterCount(chapter.bookId)
+    -- 兜底: 分卷类型可能因翻页/换章节而丢失, 由缓存文件扩展名推断 EPUB
+    if chapter.mediaType == nil and H.is_str(chapter.cacheFilePath) then
+        local _, ext = util.splitFileNameSuffix(chapter.cacheFilePath)
+        if ext and ext:lower() == "xhtml" then
+            chapter.mediaType = "EPUB"
+        end
+    end
     self.displayed_chapter = chapter
+    -- 记录当前阅读是否为分卷快捷方式进入（TOC 决策依据）
+    self.volume_reading = chapter.volume_read == true
     local book_path = chapter.cacheFilePath
     if not util.fileExists(book_path) then
         return MessageBox:error(book_path, "不存在")
     end
+    print("SHOWREADER path:", book_path, "ReaderUI.instance:", tostring(ReaderUI.instance))
+    debug_log("SHOWREADER path:", tostring(book_path), "ReaderUI.instance:", tostring(ReaderUI.instance))
     if self.book_toc then
         UIManager:close(self.book_toc)
     end
     if ReaderUI.instance then
+        debug_log("SHOWREADER -> switchDocument")
         ReaderUI.instance:switchDocument(book_path, true)
     else
+        debug_log("SHOWREADER -> ReaderUI:showReader")
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
         ReaderUI:showReader(book_path, nil, true)
     end
     Backend:after_reader_chapter_show(chapter)
+end
+
+-- 分卷内部目录: 阅读 EPUB 分卷时, 目录按钮展示该分卷自身的章节列表(epubchapters)
+-- 分卷在缓存中是单页 xhtml, KOReader 无原生 TOC, 因此用数据库里的内部章节构建目录
+function LibraryView:showVolumeEpubToc(chapter)
+    if not (H.is_tbl(chapter) and H.is_str(chapter.bookId)) then
+        MessageBox:notice("分卷信息缺失")
+        return
+    end
+    local epub_chapters = Backend:getAllEpubChapters(chapter)
+    if not (H.is_tbl(epub_chapters) and #epub_chapters > 0) then
+        MessageBox:error('无法获取 epub 内部目录')
+        return
+    end
+    local item_table = {}
+    for _, epub_chapter in ipairs(epub_chapters) do
+        table.insert(item_table, {
+            chapters_index = epub_chapter.chapters_index,
+            text = epub_chapter.title or string.format('章节 %d', epub_chapter.chapters_index),
+            mandatory = "  "
+        })
+    end
+    local items_per_page = G_reader_settings:readSetting("toc_items_per_page") or 14
+    local items_font_size = G_reader_settings:readSetting("toc_items_font_size") or
+        Menu.getItemFontSize(items_per_page)
+    local volume_title = (H.is_str(chapter.title) and chapter.title ~= "") and chapter.title or
+        (H.is_str(chapter.volumename) and chapter.volumename) or "分卷"
+    local volume_toc_menu = Menu:new{
+        title = volume_title .. " - 内部目录",
+        subtitle = "epub 章节导航",
+        is_popout = false,
+        item_table = item_table,
+        width = Device.screen:getWidth(),
+        height = Device.screen:getHeight(),
+        single_line = true,
+        with_dots = true,
+        items_per_page = items_per_page,
+        items_font_size = items_font_size,
+        close_callback = function()
+            Backend:closeDbManager()
+        end,
+    }
+    volume_toc_menu.onMenuChoice = function(_, item)
+        if item.chapters_index then
+            print("TOCJUMP tap index:", item.chapters_index)
+            print("TOCJUMP chapter fields:", chapter.book_cache_id, chapter.bookId,
+                tostring(chapter.name), "cur_cache:", tostring(chapter.cacheFilePath))
+            volume_toc_menu:onClose()
+            chapter.chapters_index = item.chapters_index
+            self:loadAndRenderChapter(chapter)
+        end
+    end
+    volume_toc_menu.paths = {{
+        callback = function()
+            UIManager:close(volume_toc_menu)
+        end
+    }}
+    UIManager:show(volume_toc_menu)
 end
 
 function LibraryView:initializeRegisterEvent(parent_ref)
@@ -695,6 +1151,22 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         else
             fetch_show_chapter()
         end
+        return true
+    end
+
+    -- 阅读 EPUB 分卷时, 目录按钮显示分卷自身的内部目录(epubchapters)
+    function parent_ref:onShowKomgaVolumeToc()
+        library_view_ref:getInstance()
+        if not library_view_ref.instance then
+            logger.warn("ShowKomgaVolumeToc LibraryView instance not loaded")
+            return true
+        end
+        local chapter = library_view_ref.instance.displayed_chapter
+        if not (H.is_tbl(chapter) and H.is_str(chapter.bookId)) then
+            logger.warn("ShowKomgaVolumeToc displayed_chapter not available")
+            return true
+        end
+        library_view_ref.instance:showVolumeEpubToc(chapter)
         return true
     end
 
@@ -873,6 +1345,13 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if is_komga_path(nil, self.ui) then
             if library_view_ref.instance then
                 library_view_ref.instance.readerui_is_showing = false
+                -- 读完返回时刷新该分卷快捷方式的进度显示
+                local displayed_chapter = library_view_ref.instance.displayed_chapter
+                if H.is_tbl(displayed_chapter) and H.is_str(displayed_chapter.book_cache_id) and
+                    H.is_num(displayed_chapter.chapters_index) then
+                    library_view_ref.instance:refreshReadVolumeShortcut(
+                        displayed_chapter.book_cache_id, displayed_chapter.chapters_index)
+                end
             end
             if not self.patches_ok then
                 require("readhistory"):removeItemByPath(self.document.file)
@@ -921,6 +1400,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
     table.insert(parent_ref.ui, 3, parent_ref)
 
     function parent_ref:openFile(file)
+        debug_log("OPENFILE file:", tostring(file))
         if not H.is_str(file) then
             return
         end
@@ -942,11 +1422,8 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         local doc_settings = DocSettings:open(file)
         local book_cache_id = doc_settings:readSetting("book_cache_id")
         local customedata = getCustomMetaData(file)
-        local booktype = customedata.type
-
-        if booktype == 'serie' then
-            
-        end
+        local booktype = customedata and customedata.type
+        debug_log("OPENFILE book_cache_id:", tostring(book_cache_id), "booktype:", tostring(booktype))
 
         if not book_cache_id then
             local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, file)
@@ -954,7 +1431,27 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 book_cache_id = lnk_config:readSetting("book_cache_id")
             end
         end
+
+        -- 分卷快捷方式: 点击后直接打开该分卷阅读（必须在通用分支之前）
+        if booktype == 'volume' and book_cache_id then
+            local chapters_index = (customedata and customedata.chapters_index) or
+                doc_settings:readSetting("chapters_index")
+            debug_log("OPENFILE branch=volume chapters_index:", tostring(chapters_index))
+            if H.is_num(chapters_index) then
+                library_view_ref:openVolumeShortcut(book_cache_id, chapters_index, file)
+                return true
+            end
+        end
+
+        -- 系列快捷方式: 点击后进入该系列的分卷目录
+        if booktype == 'serie' and book_cache_id then
+            debug_log("OPENFILE branch=serie -> openSeriesVolumesFolder")
+            library_view_ref:openSeriesVolumesFolder(book_cache_id, file)
+            return true
+        end
+
         if book_cache_id then
+            debug_log("OPENFILE branch=fallback openLastReadChapter")
             local ok, err = pcall(function()
                 return self:openLastReadChapter(book_cache_id)
             end)
@@ -963,6 +1460,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end
             return true
         else
+            debug_log("OPENFILE branch=open_regular_file")
             open_regular_file(file)
         end
     end
@@ -1046,7 +1544,14 @@ local function init_book_browser(parent)
                 goto continue
             end
 
-            self:refreshBookMetadata(nil, fullpath, bookinfo)
+            -- 分卷快捷方式走卷级元数据修复，避免被重写为系列
+            local customedata = self:getCustomMateData(fullpath)
+            local chapters_index = H.is_tbl(customedata) and customedata.chapters_index or nil
+            if H.is_tbl(customedata) and customedata.type == 'volume' and H.is_num(chapters_index) then
+                self:refreshVolumeMetadata(nil, fullpath, book_cache_id, chapters_index, bookinfo)
+            else
+                self:refreshBookMetadata(nil, fullpath, bookinfo)
+            end
             ::continue::
         end, true)
     end
@@ -1129,47 +1634,210 @@ local function init_book_browser(parent)
     end
 
     function book_browser:addVolumeShortcut(bookinfo, seriename)
-        local home_dir = self.parent:getBrowserHomeDir() .. seriename .. "\u{200B}.sdr"
-        if not (home_dir and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id and bookinfo.coverUrl) then
-            logger.err("addBookShortcut: parameter error")
+        -- 生成该系列分卷目录并同步各分卷快捷方式（不再写入 .sdr 隐藏目录）
+        if not (H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id) then
+            logger.err("addVolumeShortcut: parameter error")
             return
         end
+        local volume_folder = self:ensureVolumeFolder(bookinfo.cache_id, bookinfo)
+        if volume_folder then
+            self:syncSeriesVolumes(bookinfo.cache_id, bookinfo, volume_folder)
+        end
+    end
 
-        local book_lnk_path, book_lnk_name = self:wirteLnk(bookinfo, home_dir)
-        if not (book_lnk_path and util.fileExists(book_lnk_path)) then
-            logger.err("addBookShortcut: failed to create lnk")
+    function book_browser:wirteVolLnk(chapter, volume_folder, book_cache_id)
+        if not (volume_folder and H.is_tbl(chapter) and H.is_num(chapter.chapters_index) and H.is_str(book_cache_id)) then
+            logger.err("book_browser.wirteVolLnk: parameter error")
             return
         end
+        local chapters_index = chapter.chapters_index
+        local chapter_title = (H.is_str(chapter.title) and chapter.title ~= "") and chapter.title or
+            "卷" .. tostring(chapters_index)
+        -- 卷号补零到 3 位, 避免文件浏览器按文件名排序时 2,10,11... 乱序
+        local volume_lnk_name = string.format("%03d-%s\u{200B}.html", chapters_index, chapter_title)
+        volume_lnk_name = util.getSafeFilename(volume_lnk_name)
+        if not volume_lnk_name then
+            logger.err("book_browser.wirteVolLnk: getSafeFilename error")
+            return
+        end
+        local volume_lnk_path = H.joinPath(volume_folder, volume_lnk_name)
+        if util.fileExists(volume_lnk_path) then
+            return volume_lnk_path, volume_lnk_name
+        end
+        local volume_lnk_config = Backend:getLuaConfig(volume_lnk_path)
+        volume_lnk_config:saveSetting("book_cache_id", book_cache_id):flush()
+        return volume_lnk_path, volume_lnk_name
+    end
 
-        if not self:getCustomMateData(book_lnk_path) then
-            self:refreshBookMetadata(book_lnk_name, book_lnk_path, bookinfo)
+    function book_browser:refreshVolumeMetadata(lnk_name, lnk_path, book_cache_id, chapters_index, bookinfo)
+        lnk_name = lnk_name or (H.is_str(lnk_path) and select(2, util.splitFilePathName(lnk_path)))
+        if not (util.fileExists(lnk_path) and H.is_str(lnk_name) and H.is_str(book_cache_id) and
+            H.is_num(chapters_index)) then
+            logger.err("browser.refreshVolumeMetadata parameter error")
+            return
+        end
+        local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+        if not (H.is_tbl(chapter) and H.is_num(chapter.chapters_index)) then
+            logger.err("browser.refreshVolumeMetadata no chapter data:", book_cache_id, chapters_index)
+            return
+        end
+        debug_log("REFRESHVOL idx:", tostring(chapters_index), "t=", os.time())
+        bookinfo = bookinfo or Backend:getBookInfoCache(book_cache_id)
+        -- pages 缺失时按 0 处理, 仍写入卷级元数据, 保证点击可打开
+        local pages = H.is_num(chapter.pages) and chapter.pages or 0
+        -- pageno: 已读 -> 满进度; 未读 -> 尽力读缓存文件 last_page
+        local pageno = 0
+        if chapter.isRead == true then
+            pageno = pages
         else
-            self:bind_provider(book_lnk_path)
+            local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+            if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
+                local last_page = DocSettings:open(cache_chapter.cacheFilePath):readSetting("last_page")
+                if H.is_num(last_page) and last_page > 0 and last_page <= pages then
+                    pageno = last_page
+                end
+            end
         end
-
-        if DocSettings:findCustomCoverFile(book_lnk_path) then
+        local volume_title = (H.is_str(chapter.title) and chapter.title ~= "") and chapter.title or
+            (H.is_tbl(bookinfo) and bookinfo.name) or "卷" .. tostring(chapters_index)
+        -- 无变化则跳过写入，避免每次进入目录都重写并广播事件
+        local custom = nil
+        local custom_metadata_file = DocSettings:findCustomMetadataFile(lnk_path)
+        if custom_metadata_file then
+            local custom_settings = DocSettings.openSettingsFile(custom_metadata_file)
+            custom = {
+                custom_props = custom_settings:readSetting("custom_props"),
+                book_cache_id = custom_settings:readSetting("book_cache_id"),
+                chapters_index = custom_settings:readSetting("chapters_index"),
+                doc_props = custom_settings:readSetting("doc_props")
+            }
+        end
+        if H.is_tbl(custom) and H.is_tbl(custom.custom_props) and custom.custom_props.type == 'volume' and
+            custom.custom_props.chapters_index == chapters_index and
+            H.is_tbl(custom.doc_props) and custom.doc_props.pages == pages and custom.doc_props.pageno == pageno and
+            custom.book_cache_id == book_cache_id and custom.chapters_index == chapters_index then
             return
         end
+        local doc_settings = self:bind_provider(lnk_path)
+        if doc_settings and doc_settings.data then
+            doc_settings.data = {}
+            doc_settings:saveSetting("custom_props", {
+                authors = (H.is_tbl(bookinfo) and bookinfo.author) or chapter.author,
+                title = volume_title,
+                description = (H.is_tbl(bookinfo) and bookinfo.intro) or nil,
+                type = "volume",
+                chapters_index = chapters_index,
+                bookId = chapter.bookId
+            })
+            doc_settings:saveSetting("book_cache_id", book_cache_id)
+            doc_settings:saveSetting("chapters_index", chapters_index)
+            doc_settings:saveSetting("doc_props", {
+                pages = pages,
+                pageno = pageno
+            }):flushCustomMetadata(lnk_path)
+        end
+        -- 主 sidecar 也写入 chapters_index, 便于 openFile 读取
+        local lnk_config = Backend:getLuaConfig(lnk_path)
+        if lnk_config and lnk_config.readSetting then
+            local old_index = lnk_config:readSetting("chapters_index")
+            if old_index ~= chapters_index then
+                lnk_config:saveSetting("chapters_index", chapters_index):flush()
+            end
+        end
+        self:emitMetadataChanged(lnk_path)
+    end
 
+    function book_browser:asyncDownloadVolumeCover(book_cache_id, chapter, lnk_path)
+        if not (H.is_str(book_cache_id) and H.is_tbl(chapter) and H.is_str(lnk_path)) then
+            return
+        end
+        if DocSettings:findCustomCoverFile(lnk_path) then
+            return
+        end
         if not NetworkMgr:isConnected() then
             return
         end
-        local book_cache_id = bookinfo.cache_id
-        local cover_url =  bookinfo.coverUrl
-        if cover_url then
-            Backend:runTaskWithRetry(function()
-                if DocSettings:findCustomCoverFile(book_lnk_path) then
-                    self:emitMetadataChanged(book_lnk_path)
-                    return true
-                end
-            end, 12000, 2000)
-            Backend:launchProcess(function()
-                local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url)
-                if cover_path and util.fileExists(cover_path) then
-                    DocSettings:flushCustomCover(book_lnk_path, cover_path)
-                end
-            end)
+        local cover_url = Backend:getVolumeCoverUrl(chapter.bookId)
+        if not cover_url then
+            return
         end
+        debug_log("ASYNCCOVER start idx:", tostring(chapter.chapters_index), "t=", os.time())
+        Backend:runTaskWithRetry(function()
+            if DocSettings:findCustomCoverFile(lnk_path) then
+                self:emitMetadataChanged(lnk_path)
+                return true
+            end
+        end, 12000, 2000)
+        debug_log("ASYNCCOVER before launchProcess idx:", tostring(chapter.chapters_index), "t=", os.time())
+        Backend:launchProcess(function()
+            local cover_path_no_ext = Backend:getVolumeCoverCachePath(book_cache_id, chapter.chapters_index)
+            local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
+            if cover_path and util.fileExists(cover_path) then
+                DocSettings:flushCustomCover(lnk_path, cover_path)
+            end
+        end)
+        debug_log("ASYNCCOVER after launchProcess idx:", tostring(chapter.chapters_index), "t=", os.time())
+    end
+
+    function book_browser:ensureVolumeFolder(book_cache_id, bookinfo)
+        if not (H.is_str(book_cache_id) and H.is_tbl(bookinfo) and H.is_str(bookinfo.name)) then
+            return nil
+        end
+        local home_dir = self.parent:getBrowserHomeDir()
+        if not home_dir then
+            return nil
+        end
+        local author = (H.is_str(bookinfo.author) and bookinfo.author ~= "") and bookinfo.author or "未知作者"
+        -- 目录以 .sdr 结尾, 文件浏览器会将其隐藏, 避免与系列快捷方式(.html)同时显示造成重复。
+        -- 注意: 不能直接用 <系列名>-<作者>\u{200B}.sdr, 那是系列快捷方式的封面 sidecar 目录。
+        local folder_name = string.format("%s-%s-vol.sdr", bookinfo.name, author)
+        folder_name = util.getSafeFilename(folder_name)
+        if not folder_name then
+            logger.err("ensureVolumeFolder: getSafeFilename error")
+            return nil
+        end
+        local volume_folder = H.joinPath(home_dir, folder_name)
+        -- 旧版目录名(<系列名>-<作者>\u{200B}, 无 -vol.sdr 后缀)在浏览器中可见, 迁移到新隐藏命名
+        local legacy_folder = H.joinPath(home_dir, util.getSafeFilename(string.format("%s-%s\u{200B}", bookinfo.name, author)))
+        if not util.directoryExists(volume_folder) and util.directoryExists(legacy_folder) then
+            local ok, err = pcall(os.rename, legacy_folder, volume_folder)
+            if not ok then
+                logger.err("ensureVolumeFolder: failed to rename legacy folder - " .. tostring(err or "unknown error"))
+                return nil
+            end
+        end
+        if not util.directoryExists(volume_folder) then
+            local ok, err = pcall(H.checkAndCreateFolder, volume_folder)
+            if not (ok and util.directoryExists(volume_folder)) then
+                logger.err("ensureVolumeFolder: failed to create folder - " .. tostring(err or "unknown error"))
+                return nil
+            end
+        end
+        return volume_folder
+    end
+
+    function book_browser:syncSeriesVolumes(book_cache_id, bookinfo, volume_folder)
+        if not (H.is_str(book_cache_id) and H.is_tbl(bookinfo) and H.is_str(volume_folder)) then
+            logger.err("syncSeriesVolumes parameter error")
+            return
+        end
+        local chapters = Backend:getBookChapterCache(book_cache_id)
+        if not (H.is_tbl(chapters) and #chapters > 0) then
+            return
+        end
+        debug_log("SYNCSERIES start chapters:", tostring(#chapters), "t=", os.time())
+        for _, chapter in ipairs(chapters) do
+            if H.is_num(chapter.chapters_index) then
+                local lnk_path, lnk_name = self:wirteVolLnk(chapter, volume_folder, book_cache_id)
+                if lnk_path and util.fileExists(lnk_path) then
+                    self:refreshVolumeMetadata(lnk_name, lnk_path, book_cache_id, chapter.chapters_index, bookinfo)
+                    if not DocSettings:findCustomCoverFile(lnk_path) then
+                        self:asyncDownloadVolumeCover(book_cache_id, chapter, lnk_path)
+                    end
+                end
+            end
+        end
+        debug_log("SYNCSERIES end t=", os.time())
     end
 
 
@@ -1340,7 +2008,8 @@ local function init_book_menu(parent)
                         self:refreshItems()
                         self.parent_ref.ui_refresh_time = os.time()
                     end, function(err_msg)
-                        MessageBox:notice(response.message or '同步失败')
+                        print('同步失败', err_msg)
+                        MessageBox:notice('同步失败', err_msg)
                     end)
                 end
             end)

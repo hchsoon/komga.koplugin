@@ -247,7 +247,7 @@ function M:loadSpore()
         return  function (res)
                     local header = res.headers and res.headers['content-type']
                     local body = res.body
-                    if header and (find(header, 'application/json', 1, true) or find(header, 'application/webpub+json', 1, true))and type(body) == 'string' then
+                    if header and (find(header, 'application/json', 1, true) or find(header, 'application/webpub+json', 1, true))and type(body) == 'string' and body ~= '' then
                         local r, _, msg = decode(body)
                         if r then
                             res.body = r
@@ -395,8 +395,21 @@ function M:komgaSporeApi(requestFunc, callback, opts, logName)
     local status, res = pcall(requestFunc)
     socketutil:reset_timeout()
 
-    if not status or not H.is_tbl(res.body) then
+    if not status then
+        local err_msg = H.errorHandler(res)
+        if err_msg == "wantread" then
+            err_msg = '连接超时'
+        end
+        logger.err(logName, 'requestFunc err:', tostring(res))
+        return wrap_response(nil, 'requestFunc: ' .. err_msg)
+    end
 
+    -- 204 No Content（如 saveBookProgress）: 服务器确认成功但无响应体，视为成功
+    if H.is_tbl(res) and res.status == 204 then
+        return wrap_response({})
+    end
+
+    if not H.is_tbl(res.body) then
         local err_msg = H.errorHandler(res)
         if err_msg == "wantread" then
             err_msg = '连接超时'
@@ -1481,8 +1494,13 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
 
     local url = nil
     -- print("Download Chapter Response is ...",#response.body.readingOrder)
+    -- 分卷章节(chapters 表)没有 chapterUrl 列, 以前每下载一个未缓存章节都会先调
+    -- pGetChapterContent 拉取整个 manifest(getEpubManifest, 超时 18-25s), 导致下载卡住数秒到数十秒。
+    -- 内部章节 URL(epubchapters.chapterUrl)通常已在库中, 直接使用即可跳过该慢请求。
     local epubchapter = self.dbManager:getEpubChapterInfo(chapter.bookId,down_chapters_index)
-    if H.is_tbl(epubchapter) and chapter.chapterUrl then
+    if H.is_tbl(epubchapter) and H.is_str(epubchapter.chapterUrl) and epubchapter.chapterUrl ~= "" then
+        url = epubchapter.chapterUrl
+    elseif H.is_tbl(epubchapter) and chapter.chapterUrl then
         -- print("EpubChapterInfo: ok", chapter.chapters_index, chapter.chapterUrl)
         url = chapter.chapterUrl
     else
@@ -2175,6 +2193,24 @@ function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
     end
 
     checkTask()
+end
+
+-- 分卷封面 URL（Komga: GET /api/v1/books/:bookId/thumbnail）
+function M:getVolumeCoverUrl(bookId)
+    local server_address = self.settings_data and self.settings_data.data and self.settings_data.data['server_address']
+    if not (H.is_str(server_address) and H.is_str(bookId)) then
+        return nil
+    end
+    return string.format("%s/api/v1/books/%s/thumbnail", server_address, bookId)
+end
+
+-- 分卷封面本地缓存路径（无扩展名，download_cover_img 会自动附加扩展名）
+function M:getVolumeCoverCachePath(book_cache_id, chapters_index)
+    if not (H.is_str(book_cache_id) and H.is_num(chapters_index)) then
+        return nil
+    end
+    local resources_path = H.joinPath(H.getBookCachePath(book_cache_id), 'resources')
+    return H.joinPath(resources_path, 'cover_v' .. tostring(chapters_index))
 end
 
 function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)

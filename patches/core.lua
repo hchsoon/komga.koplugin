@@ -94,9 +94,36 @@ M.install = function()
     end
     local ReaderToc = require("apps/reader/modules/readertoc")
     local original_onShowToc = ReaderToc.onShowToc
+    -- Komga 阅读时目录按钮的决策:
+    --   EPUB 分卷(缓存为单页 xhtml, KOReader 无原生 TOC) -> 显示分卷内部目录 ShowKomgaVolumeToc
+    --   漫画/其他                                       -> 显示系列目录 ShowKomgaToc
+    --   非 Komga 文件                                   -> KOReader 原生目录
+    local function get_komga_displayed_chapter()
+        local ok, LibraryView = pcall(require, "Komga/LibraryView")
+        local inst = ok and LibraryView and LibraryView.instance
+        return inst and inst.displayed_chapter
+    end
+    local function is_komga_epub_reading()
+        local chapter = get_komga_displayed_chapter()
+        if chapter and chapter.mediaType == "EPUB" then
+            return true
+        end
+        -- 兜底: 缓存为单页 xhtml 的即为 EPUB 内部章节(mediaType 可能因翻页/换章节丢失)
+        if chapter and type(chapter.cacheFilePath) == 'string' then
+            local ext = chapter.cacheFilePath:lower():match("%.([^.]+)$")
+            if ext == "xhtml" then
+                return true
+            end
+        end
+        return false
+    end
     function ReaderToc:onShowToc()
         if is_komga_path(nil, self.ui) then
-            self.ui:handleEvent(Event:new("ShowKomgaToc"))
+            if is_komga_epub_reading() then
+                self.ui:handleEvent(Event:new("ShowKomgaVolumeToc"))
+            else
+                self.ui:handleEvent(Event:new("ShowKomgaToc"))
+            end
             return true
         else
             return original_onShowToc(self)
@@ -163,6 +190,27 @@ M.install = function()
             return original_updateFooterPage(self, force_repaint, full_repaint)
         end
         return
+    end
+    -- 临时调试: 记录所有 Reader 打开调用, 判断"正在打开/opening"来源 (诊断完成后删除)
+    local ReaderUI = require("apps/reader/readerui")
+    local dbg_file = "/Users/hchsoon/Library/Application Support/koreader/komga_ui_debug.log"
+    local function dbg_log(...)
+        local ok, f = pcall(io.open, dbg_file, "a")
+        if ok and f then
+            f:write(os.date("[%H:%M:%S] ") .. table.concat({...}, " ") .. "\n")
+            f:close()
+        end
+    end
+    local showReader_orig = ReaderUI.showReader
+    function ReaderUI:showReader(file, provider, seamless, ...)
+        dbg_log("READERUI.showReader file:", tostring(file), "seamless:", tostring(seamless),
+            "provider:", tostring(provider and provider.provider))
+        return showReader_orig(self, file, provider, seamless, ...)
+    end
+    local switchDocument_orig = ReaderUI.switchDocument
+    function ReaderUI:switchDocument(new_file, ...)
+        dbg_log("READERUI.switchDocument file:", tostring(new_file))
+        return switchDocument_orig(self, new_file, ...)
     end
 end
 
