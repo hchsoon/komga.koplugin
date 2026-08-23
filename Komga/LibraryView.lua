@@ -20,15 +20,6 @@ local Backend = require("Komga/Backend")
 local MessageBox = require("Komga/MessageBox")
 local H = require("Komga/Helper")
 
--- 临时调试: 记录点击打开流程 (诊断完成后删除)
-local function debug_log(...)
-    local ok, file = pcall(io.open, "/Users/hchsoon/Library/Application Support/koreader/komga_ui_debug.log", "a")
-    if ok and file then
-        file:write(os.date("[%H:%M:%S] ") .. table.concat({...}, " ") .. "\n")
-        file:close()
-    end
-end
-
 local LibraryView = {
     disk_available = nil,
     -- record the current reading items
@@ -449,21 +440,26 @@ end
 -- exit readerUI,  closing the at readerUI、FileManager the same time app will exit
 -- readerUI -> ReturnKomgaChapterListing event -> show ChapterListing -> close ->show LibraryView ->close -> ? 
 function LibraryView:openKomgaFolder(path, focused_file, selected_files, done_callback)
-    debug_log("OPENKOMGAFOLDER entry path:", tostring(path))
     UIManager:nextTick(function()
         if ReaderUI.instance then
             ReaderUI.instance:onClose()
             self.readerui_is_showing = false
         end
-        debug_log("OPENKOMGAFOLDER before reinit t=", os.time())
-        if FileManager.instance then
-            FileManager.instance:reinit(path, focused_file, selected_files)
+        local fm = FileManager.instance
+        local fc = fm and fm.file_chooser
+        if H.is_str(path) and fc and fc.changeToPath then
+            -- 轻量导航: 直接驱动当前 FileChooser 切换到目标目录。
+            -- 这与用户点击文件夹走同一条代码路径, 比 FileManager:reinit 重建整个
+            -- FileChooser/TitleBar widget 更稳; 部分设备(Android)上 reinit 重建后
+            -- 界面不刷新或点击无响应, 换成 changeToPath 可规避。
+            fc:changeToPath(path, focused_file)
+        elseif fm then
+            fm:reinit(path, focused_file, selected_files)
         else
             FileManager:showFiles(path, focused_file, selected_files)
         end
-        debug_log("OPENKOMGAFOLDER after reinit t=", os.time())
-        if FileManager.instance and path then
-            FileManager.instance:updateTitleBarPath(path)
+        if fm and H.is_str(path) then
+            fm:updateTitleBarPath(path)
         end
         if H.is_func(done_callback) then
             done_callback()
@@ -485,53 +481,21 @@ function LibraryView:openSeriesVolumesFolder(book_cache_id, serie_file)
         return
     end
     local chapters = Backend:getBookChapterCache(book_cache_id)
-    debug_log("OPENSERIE chapters:", tostring(H.is_tbl(chapters) and #chapters or 0))
     if H.is_tbl(chapters) and #chapters > 0 then
-        debug_log("OPENSERIE direct->doOpenSeriesVolumesFolder")
         self:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
         return
     end
-    debug_log("OPENSERIE -> sync 分卷目录")
     -- 分卷未同步, 先刷新目录
     if not NetworkMgr:isConnected() then
         MessageBox:notice("分卷数据未同步且当前无网络连接")
         return
     end
-    Backend:closeDbManager()
-    MessageBox:loading("正在同步分卷目录", function()
-        -- 子进程内任务必须返回可序列化的值, 否则 Trapper 反序列化失败回调会拿到 nil(显示"Response is nil")
-        local ok, err_or_res = pcall(function()
-            return Backend:refreshChaptersCache({
-                bookUrl = bookinfo.bookUrl,
-                cache_id = book_cache_id,
-                name = bookinfo.name,
-                author = bookinfo.author,
-                cacheExt = bookinfo.cacheExt
-            })
-        end)
-        if not ok then
-            -- 记录真实错误到日志文件, 便于排查
-            self:logSyncError(tostring(err_or_res))
-            return { type = 'ERROR', message = '同步异常: ' .. tostring(err_or_res) }
-        end
-        return err_or_res
-    end, function(state, response)
-        if state ~= true then
-            return
-        end
-        if response == nil then
-            -- 子进程 fork 后无输出(在 macOS 上 fork 后的子进程网络/数据库状态可能异常):
-            -- 记录痕迹并回退到本进程内同步, 保证能完成
-            self:logSyncError("<nil response: subprocess produced no output, falling back to in-process sync>")
-            self:syncChaptersInProcess(book_cache_id, bookinfo)
-            return
-        end
-        Backend:HandleResponse(response, function(data)
-            self:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
-        end, function(err_msg)
-            MessageBox:error('同步分卷失败: ' .. tostring(err_msg))
-        end)
-    end)
+    -- 本进程内同步分卷目录。不使用 MessageBox:loading + fork 子进程:
+    -- fork 后的子进程内网络请求在部分设备(Android/macOS)上会挂起,
+    -- 而 MessageBox:loading 的对话框 dismissable=false 无法点击取消,
+    -- 导致模态对话框永久显示、后续点击全部失效("重新点击没有反应")。
+    -- refreshChaptersCache 内部 socketutil 有 10s/12s 超时, 本进程内可靠返回。
+    self:syncChaptersInProcess(book_cache_id, bookinfo)
 end
 
 -- 记录同步错误/痕迹到日志文件, 便于排查
@@ -587,7 +551,6 @@ function LibraryView:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
         return
     end
     self.book_browser:syncSeriesVolumes(book_cache_id, bookinfo, volume_folder)
-    debug_log("DOOPENSERIE volume_folder:", tostring(volume_folder))
     self:openKomgaFolder(volume_folder)
 end
 
@@ -600,8 +563,6 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
         return
     end
     local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
-    debug_log("OPENVOLUME idx:", tostring(chapters_index), "mediaType:", tostring(chapter and chapter.mediaType),
-        "cacheFilePath:", tostring(chapter and chapter.cacheFilePath))
     if not (H.is_tbl(chapter) and H.is_num(chapter.chapters_index)) then
         MessageBox:notice("分卷数据不存在,请返回书架刷新同步")
         return
@@ -822,8 +783,6 @@ function LibraryView:loadAndRenderChapter(chapter)
     print("Index is ...", chapter.chapters_index)
     print("Cache chapter is ...", cache_chapter.cacheFilePath)
     print("LOADRENDER cachehit:", tostring(cache_chapter.cacheFilePath))
-    debug_log("LOADRENDER idx:", tostring(chapter.chapters_index), "bookId:", tostring(chapter.bookId),
-        "cachehit:", tostring(cache_chapter and cache_chapter.cacheFilePath))
     if (H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)) then
         -- 缓存命中分支也要传递分卷阅读标记, 否则目录按钮会退回系列目录而非 EPUB 原生目录
         cache_chapter.volume_read = chapter.volume_read
@@ -916,15 +875,12 @@ function LibraryView:showReaderUI(chapter)
         return MessageBox:error(book_path, "不存在")
     end
     print("SHOWREADER path:", book_path, "ReaderUI.instance:", tostring(ReaderUI.instance))
-    debug_log("SHOWREADER path:", tostring(book_path), "ReaderUI.instance:", tostring(ReaderUI.instance))
     if self.book_toc then
         UIManager:close(self.book_toc)
     end
     if ReaderUI.instance then
-        debug_log("SHOWREADER -> switchDocument")
         ReaderUI.instance:switchDocument(book_path, true)
     else
-        debug_log("SHOWREADER -> ReaderUI:showReader")
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
         ReaderUI:showReader(book_path, nil, true)
     end
@@ -1400,7 +1356,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
     table.insert(parent_ref.ui, 3, parent_ref)
 
     function parent_ref:openFile(file)
-        debug_log("OPENFILE file:", tostring(file))
         if not H.is_str(file) then
             return
         end
@@ -1423,7 +1378,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         local book_cache_id = doc_settings:readSetting("book_cache_id")
         local customedata = getCustomMetaData(file)
         local booktype = customedata and customedata.type
-        debug_log("OPENFILE book_cache_id:", tostring(book_cache_id), "booktype:", tostring(booktype))
 
         if not book_cache_id then
             local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, file)
@@ -1436,7 +1390,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if booktype == 'volume' and book_cache_id then
             local chapters_index = (customedata and customedata.chapters_index) or
                 doc_settings:readSetting("chapters_index")
-            debug_log("OPENFILE branch=volume chapters_index:", tostring(chapters_index))
             if H.is_num(chapters_index) then
                 library_view_ref:openVolumeShortcut(book_cache_id, chapters_index, file)
                 return true
@@ -1445,13 +1398,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
         -- 系列快捷方式: 点击后进入该系列的分卷目录
         if booktype == 'serie' and book_cache_id then
-            debug_log("OPENFILE branch=serie -> openSeriesVolumesFolder")
             library_view_ref:openSeriesVolumesFolder(book_cache_id, file)
             return true
         end
 
         if book_cache_id then
-            debug_log("OPENFILE branch=fallback openLastReadChapter")
             local ok, err = pcall(function()
                 return self:openLastReadChapter(book_cache_id)
             end)
@@ -1460,7 +1411,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end
             return true
         else
-            debug_log("OPENFILE branch=open_regular_file")
             open_regular_file(file)
         end
     end
@@ -1681,7 +1631,6 @@ local function init_book_browser(parent)
             logger.err("browser.refreshVolumeMetadata no chapter data:", book_cache_id, chapters_index)
             return
         end
-        debug_log("REFRESHVOL idx:", tostring(chapters_index), "t=", os.time())
         bookinfo = bookinfo or Backend:getBookInfoCache(book_cache_id)
         -- pages 缺失时按 0 处理, 仍写入卷级元数据, 保证点击可打开
         local pages = H.is_num(chapter.pages) and chapter.pages or 0
@@ -1761,14 +1710,12 @@ local function init_book_browser(parent)
         if not cover_url then
             return
         end
-        debug_log("ASYNCCOVER start idx:", tostring(chapter.chapters_index), "t=", os.time())
         Backend:runTaskWithRetry(function()
             if DocSettings:findCustomCoverFile(lnk_path) then
                 self:emitMetadataChanged(lnk_path)
                 return true
             end
         end, 12000, 2000)
-        debug_log("ASYNCCOVER before launchProcess idx:", tostring(chapter.chapters_index), "t=", os.time())
         Backend:launchProcess(function()
             local cover_path_no_ext = Backend:getVolumeCoverCachePath(book_cache_id, chapter.chapters_index)
             local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
@@ -1776,7 +1723,6 @@ local function init_book_browser(parent)
                 DocSettings:flushCustomCover(lnk_path, cover_path)
             end
         end)
-        debug_log("ASYNCCOVER after launchProcess idx:", tostring(chapter.chapters_index), "t=", os.time())
     end
 
     function book_browser:ensureVolumeFolder(book_cache_id, bookinfo)
@@ -1825,7 +1771,6 @@ local function init_book_browser(parent)
         if not (H.is_tbl(chapters) and #chapters > 0) then
             return
         end
-        debug_log("SYNCSERIES start chapters:", tostring(#chapters), "t=", os.time())
         for _, chapter in ipairs(chapters) do
             if H.is_num(chapter.chapters_index) then
                 local lnk_path, lnk_name = self:wirteVolLnk(chapter, volume_folder, book_cache_id)
@@ -1837,7 +1782,6 @@ local function init_book_browser(parent)
                 end
             end
         end
-        debug_log("SYNCSERIES end t=", os.time())
     end
 
 

@@ -191,27 +191,6 @@ M.install = function()
         end
         return
     end
-    -- 临时调试: 记录所有 Reader 打开调用, 判断"正在打开/opening"来源 (诊断完成后删除)
-    local ReaderUI = require("apps/reader/readerui")
-    local dbg_file = "/Users/hchsoon/Library/Application Support/koreader/komga_ui_debug.log"
-    local function dbg_log(...)
-        local ok, f = pcall(io.open, dbg_file, "a")
-        if ok and f then
-            f:write(os.date("[%H:%M:%S] ") .. table.concat({...}, " ") .. "\n")
-            f:close()
-        end
-    end
-    local showReader_orig = ReaderUI.showReader
-    function ReaderUI:showReader(file, provider, seamless, ...)
-        dbg_log("READERUI.showReader file:", tostring(file), "seamless:", tostring(seamless),
-            "provider:", tostring(provider and provider.provider))
-        return showReader_orig(self, file, provider, seamless, ...)
-    end
-    local switchDocument_orig = ReaderUI.switchDocument
-    function ReaderUI:switchDocument(new_file, ...)
-        dbg_log("READERUI.switchDocument file:", tostring(new_file))
-        return switchDocument_orig(self, new_file, ...)
-    end
 end
 
 return M
