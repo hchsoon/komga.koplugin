@@ -2505,6 +2505,12 @@ function M:after_reader_chapter_show(chapter)
     local chapters_index = chapter.chapters_index
     local cache_file_path = chapter.cacheFilePath
     local book_cache_id = chapter.book_cache_id
+    -- EPUB 分卷打开不标记已读: isRead 在 refreshVolumeMetadata 被当作"整卷满进度 100%"。
+    -- 打开即标已读会把"没读完的卷"显示成 100%(用户反馈)。EPUB 整卷读完才标记,
+    -- 由 saveBookProgression 按服务器空间整卷比例(totalProgression)>=99.9% 统一处理。
+    -- 漫画单文件卷保持原"打开即已读"行为。
+    local is_epub = chapter.mediaType == "EPUB"
+        or (H.is_str(chapter.cacheFilePath) and chapter.cacheFilePath:match("%.xhtml$") ~= nil)
 
     local status, err = pcall(function()
 
@@ -2515,16 +2521,19 @@ function M:after_reader_chapter_show(chapter)
             update_state.cacheFilePath = cache_file_path
         end
 
-        if chapter.isRead ~= true then
+        if not is_epub and chapter.isRead ~= true then
             update_state.isRead = true
             update_state.lastUpdated = {
                 _set = "= strftime('%s', 'now')"
             }
         end
 
-        self.dbManager:transaction(function()
-            self.dbManager:dynamicUpdateChapters(chapter, update_state)
-        end)()
+        -- update_state 可能为空(EPUB 且已下载), 空更新直接跳过
+        if next(update_state) then
+            self.dbManager:transaction(function()
+                self.dbManager:dynamicUpdateChapters(chapter, update_state)
+            end)()
+        end
 
     end)
 
@@ -2568,7 +2577,9 @@ function M:after_reader_chapter_show(chapter)
         end
     end
 
-    chapter.isRead = true
+    if not is_epub then
+        chapter.isRead = true
+    end
     chapter.isDownLoaded = true
 end
 

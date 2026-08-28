@@ -920,7 +920,9 @@ function LibraryView:uploadCurrentProgress()
         current_page = math.max(math.min(math.ceil(frac * pages), pages), 1)
         -- EPUB 进度必须走 /progression: 服务器对 EPUB 拒绝 page 格式 read-progress(400 "not Divina compatible")
         -- locator 已构造好, scheduleProgressUpload 直接使用
-        epub_frac = frac
+        -- 整卷比例(服务器空间)取 locator 的 totalProgression, 不能用章内比例(frac):
+        -- 单章读完 != 整卷读完, 否则 saveBookProgression 的 frac>=0.999 会把卷误标已读(显示 100%)
+        epub_frac = (loc and loc.locations and loc.locations.totalProgression) or nil
         -- 把最近一次服务器空间进度落盘到当前卷快捷方式 sidecar, 修正文件夹/Reading History 显示的整卷百分比
         self:persistKomgaProgressToShortcut()
     else
