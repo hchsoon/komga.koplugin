@@ -17,6 +17,7 @@ local FileManager = require("apps/filemanager/filemanager")
 local DocSettings = require("docsettings")
 local Icons = require("Komga/Icons")
 local Backend = require("Komga/Backend")
+local KomgaModel = require("Komga/KomgaModel")
 local MessageBox = require("Komga/MessageBox")
 local H = require("Komga/Helper")
 
@@ -484,12 +485,13 @@ function LibraryView:openSeriesVolumesFolder(book_cache_id, serie_file)
         MessageBox:notice("openSeriesVolumesFolder parameter error")
         return
     end
-    local bookinfo = Backend:getBookInfoCache(book_cache_id)
+    local model = KomgaModel:new(book_cache_id)
+    local bookinfo = model:getSeries() -- Komga Series
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name)) then
         MessageBox:notice("书籍不存在于书架,请刷新同步")
         return
     end
-    local chapters = Backend:getBookChapterCache(book_cache_id)
+    local chapters = model:getVolumes() -- Komga Book 列表(分卷)
     if H.is_tbl(chapters) and #chapters > 0 then
         self:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
         return
@@ -1142,7 +1144,7 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
         MessageBox:notice("openVolumeShortcut parameter error")
         return
     end
-    local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+    local chapter = KomgaModel:new(book_cache_id):getVolume(chapters_index) -- Komga Book(分卷)
     if not (H.is_tbl(chapter) and H.is_num(chapter.chapters_index)) then
         MessageBox:notice("分卷数据不存在,请返回书架刷新同步")
         return
@@ -1183,7 +1185,7 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
     end
 
     if Backend:getSettings().stream_image_view == true and chapter.mediaType ~= "EPUB" then
-        local bookinfo = Backend:getBookInfoCache(book_cache_id)
+        local bookinfo = KomgaModel:new(book_cache_id):getSeries() -- Komga Series
         if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
             MessageBox:notice("书籍数据缺失")
             return
@@ -1346,7 +1348,8 @@ function LibraryView:ensureVolumeShortcutForReading()
     if not (H.is_num(vol_index) and vol_index > 0) then
         return nil
     end
-    local bookinfo = Backend:getBookInfoCache(book_cache_id)
+    local model = KomgaModel:new(book_cache_id)
+    local bookinfo = model:getSeries() -- Komga Series
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name)) then
         return nil
     end
@@ -1355,7 +1358,7 @@ function LibraryView:ensureVolumeShortcutForReading()
         return nil
     end
     -- 用与 syncSeriesVolumes 同源的卷数据构造快捷方式, 保证文件名一致(已存在则复用, 不会重复创建)
-    local vol = Backend:getChapterInfoCache(book_cache_id, vol_index)
+    local vol = model:getVolume(vol_index) -- Komga Book(分卷)
     if not (H.is_tbl(vol) and H.is_num(vol.chapters_index)) then
         return nil
     end
@@ -2589,7 +2592,7 @@ local function init_book_browser(parent)
             logger.err("syncSeriesVolumes parameter error")
             return
         end
-        local chapters = Backend:getBookChapterCache(book_cache_id)
+        local chapters = KomgaModel:new(book_cache_id):getVolumes() -- Komga Book 列表(分卷)
         if not (H.is_tbl(chapters) and #chapters > 0) then
             return
         end
