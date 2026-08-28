@@ -66,6 +66,34 @@ function KomgaModel:getVolumeCount()
     return volumes and #volumes or 0
 end
 
+-- 按 Komga Book(卷)的 bookId 反查卷号(volume.chapters_index)。
+-- EPUB 翻章后拿到的内部章节对象 chapters_index 是内部 index, 上传/刷新必须用卷号。
+function KomgaModel:getVolumeIndexByBookId(bookId)
+    if not H.is_str(bookId) then
+        return nil
+    end
+    for _, vol in ipairs(self:getVolumes() or {}) do
+        if H.is_tbl(vol) and vol.bookId == bookId and H.is_num(vol.chapters_index) then
+            return vol.chapters_index
+        end
+    end
+    return nil
+end
+
+-- 按 Komga Book(卷)的 bookId 取卷总页数(服务器口径)。
+-- EPUB 翻章后 chapter.pages 可能丢失, 用于兜底。
+function KomgaModel:getVolumePages(bookId)
+    if not H.is_str(bookId) then
+        return nil
+    end
+    for _, vol in ipairs(self:getVolumes() or {}) do
+        if H.is_tbl(vol) and vol.bookId == bookId and H.is_num(vol.pages) and vol.pages > 0 then
+            return vol.pages
+        end
+    end
+    return nil
+end
+
 -- 单个分卷完整信息(含 pages/mediaType/bookId/cacheFilePath/title/isRead)
 -- chapter_index 为该卷在系列内的序号(1..N)，对应快捷方式文件名里的卷号
 function KomgaModel:getVolume(chapter_index)
