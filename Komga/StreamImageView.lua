@@ -43,6 +43,22 @@ function M:onClose()
     Backend:closeDbManager()
     if H.is_tbl(self.chapter) and H.is_num(self.chapter_imglist_cur) then
         Backend:saveBookProgress(self.chapter)
+        -- 与 ReaderUI 关闭路径一致: 把流式阅读的整卷比例落盘到快捷方式 sidecar 并刷新文件夹显示
+        local okLV, LibraryView = pcall(require, "Komga/LibraryView")
+        local inst = okLV and LibraryView and LibraryView.instance
+        if inst and inst.persistStreamComicProgress then
+            inst:persistStreamComicProgress(self.chapter, self.chapter_imglist_cur)
+        end
+        -- 阅读记录: 流式漫画关闭时把该分卷快捷方式写入 KOReader 历史(与 ReaderUI 缓存路径一致)
+        if inst and inst.ensureVolumeShortcutForReading then
+            pcall(function()
+                local okRH, ReadHistory = pcall(require, "readhistory")
+                local shortcut = inst:ensureVolumeShortcutForReading()
+                if okRH and ReadHistory and ReadHistory.addItem and type(shortcut) == "string" then
+                    ReadHistory:addItem(shortcut)
+                end
+            end)
+        end
         -- if not (type(response) == 'table' and response.type == 'SUCCESS') then
         --     local message = (type(response) == 'table' and response.message) or
         --                         "进度上传失败，请稍后重试"
@@ -113,7 +129,6 @@ function M:loadChatperInitImage(chapter)
             else
                 start_id = response.body.readProgress.page
             end
-            print("Start at...",start_id)
         end
         local img_src = self.chapter_imglist[start_id]
         local img_data = downloadImage(img_src)
@@ -174,7 +189,6 @@ function M:getTurnPageNextImage(call_event_type, image_num)
 
     -- 需要加载新章节内容的情况
     if not is_success then
-        print("即将切换到章节 ...",current_chapter_index)
         -- 更新章节索引并获取新章节的图片列表
         -- self.chapter.chapters_index = current_chapter_index
         self.chapter.current_page = self.chapter_imglist_cur
@@ -252,7 +266,6 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
 
             local direction = call_event_type == 'next' and 1 or -1
             current_chapter_index = current_chapter_index + direction
-            print('已到达章节边界，切换到新章节')
             logger.dbg("已到达章节边界，切换到新章节:", current_chapter_index)
         end
     end

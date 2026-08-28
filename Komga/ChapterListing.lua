@@ -189,7 +189,6 @@ function ChapterListing:onMenuChoice(item)
     end
     local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
 
-    print("Choose Menu", chapter, chapter.mediaType)
     if Backend:getSettings().stream_image_view == true and chapter.mediaType ~= "EPUB" then
         ChapterListing.onReturnCallback = function()
             self:gotoLastReadChapter()
@@ -247,7 +246,6 @@ function ChapterListing:onMenuHold(item)
         text = "打开目录",
         callback = function()
             UIManager:close(dialog)
-            print(item.chapterId,item.chapters_index)
             -- local chapter = Backend:getEpubChapterInfoCache(item.chapterId, item.chapters_index)
             local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
             -- chapter.bookId = item.chapterId
@@ -495,7 +493,6 @@ function ChapterListing:showEpubToc(chapter)
     -- 设置目录项点击事件
     epub_toc_menu.onMenuChoice = function(_, item)
         if item.chapters_index then
-            print("Clicking ...",item.chapters_index)
             -- 设置章节索引并打开阅读器
             chapter.chapters_index = item.chapters_index
             epub_toc_menu:onClose()

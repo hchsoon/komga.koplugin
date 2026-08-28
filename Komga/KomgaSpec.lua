@@ -50,6 +50,26 @@ return {
             payload = {"completed","page"},
             expected_status = {204}
         },
+        getBookProgression = {
+            path = "/api/v1/books/:bookId/progression",
+            method = "GET",
+            required_params = {"bookId"},
+            expected_status = {200}
+        },
+        updateBookProgression = {
+            path = "/api/v1/books/:bookId/progression",
+            method = "PUT",
+            required_params = {"bookId"},
+            optional_params = {"modified","device","locator"},
+            payload = {"modified","device","locator"},
+            expected_status = {204}
+        },
+        getBookPositions = {
+            path = "/api/v1/books/:bookId/positions",
+            method = "GET",
+            required_params = {"bookId"},
+            expected_status = {200}
+        },
          getEpubManifest = {
              path = "/api/v1/books/:bookId/manifest/epub",
              method = "GET",

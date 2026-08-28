@@ -30,6 +30,15 @@ local LibraryView = {
     readerui_is_showing = nil,
     volume_reading = nil, -- 当前阅读是否为分卷快捷方式进入的 EPUB（用于 TOC 决策）
     chapter_call_event = nil,
+    volume_reading_index = nil, -- 当前正读的分卷卷号（openVolumeShortcut 记录, 翻章后仍指向卷）
+    volume_pages = nil,         -- 当前卷总页数快照（showReaderUI 记录）
+    volume_bookId = nil,        -- 当前卷 bookId（翻章后 displayed_chapter 可能丢失）
+    progress_sync_busy = nil,   -- 进度上传锁
+    progress_sync_pending = nil,-- 待上传的合并进度（仅保留最新一条）
+    resume_goto_frac = nil,     -- 自动续读目标(漫画:整卷比例 0..1; EPUB:目标章内比例 0..1), 打开后跳转
+    _last_epub_pos = nil,       -- 最近一次 EPUB 阅读位置 {bookId, chapters_index=内部章节, frac=章内比例}(本地断点)
+    volume_lnk_path = nil,      -- 当前卷快捷方式路径(openVolumeShortcut 记录; 上传/续读时把服务器进度落盘到其 sidecar)
+    _last_epub_server_frac = nil, -- 最近一次服务器空间整卷比例 {bookId, frac 0..1}(供快捷方式显示正确百分比)
     -- menu mode
     book_menu = nil,
     -- file browser mode
@@ -554,6 +563,577 @@ function LibraryView:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
     self:openKomgaFolder(volume_folder)
 end
 
+-- 章节内进度分数(0..1): 优先 KOReader 写入的 percent_finished, 否则 last_page/doc_pages
+function LibraryView:getChapterFraction(doc_settings)
+    if not (doc_settings and doc_settings.readSetting) then
+        return 0
+    end
+    local pct = doc_settings:readSetting("percent_finished")
+    if H.is_num(pct) and pct >= 0 and pct <= 1 then
+        return pct
+    end
+    local last_page = tonumber(doc_settings:readSetting("last_page")) or 0
+    local doc_pages = tonumber(doc_settings:readSetting("doc_pages")) or 0
+    if last_page >= 99999 or (doc_pages > 0 and last_page >= doc_pages) then
+        return 1.0
+    end
+    if doc_pages > 0 then
+        return math.min(math.max(last_page / doc_pages, 0), 1)
+    end
+    return 0
+end
+
+-- EPUB 全书位置查找表(按 bookId 缓存): 服务器 /positions 的 totalProgression 单调递增, 用于 frac→locator 映射
+function LibraryView:getEpubPositions(bookId)
+    if not H.is_str(bookId) then
+        return nil
+    end
+    if self._positions_cache and self._positions_cache[bookId] then
+        return self._positions_cache[bookId]
+    end
+    local resp = Backend:getBookPositions(bookId)
+    if not (H.is_tbl(resp) and resp.type == "SUCCESS" and H.is_tbl(resp.body)
+        and H.is_tbl(resp.body.positions) and #resp.body.positions > 0) then
+        return nil
+    end
+    self._positions_cache = self._positions_cache or {}
+    self._positions_cache[bookId] = resp.body
+    return resp.body
+end
+
+-- EPUB: 整卷比例(0..1) → Komga Readium locator
+-- 服务器按 locator 的 href + progression 线性插值重算 totalProgression, 故用 positions 查找表选最近位置并插值,
+-- 使服务器重算的 totalProgression ≈ 目标比例。progression 必须 < 1(服务器对 1.0 返回 400 "Invalid progression")
+function LibraryView:epubFractionToLocator(bookId, frac)
+    if not (H.is_str(bookId) and H.is_num(frac)) then
+        return nil
+    end
+    local positions = self:getEpubPositions(bookId)
+    local list = positions and positions.positions
+    if not (H.is_tbl(list) and #list > 0) then
+        return nil
+    end
+    frac = math.min(math.max(frac, 0), 1)
+    -- 二分找第一个 totalProgression >= frac 的位置
+    local lo, hi = 1, #list
+    while lo < hi do
+        local mid = math.floor((lo + hi) / 2)
+        local tp = list[mid].locations and list[mid].locations.totalProgression
+        if H.is_num(tp) and tp < frac then
+            lo = mid + 1
+        else
+            hi = mid
+        end
+    end
+    local idx = math.min(math.max(lo, 1), #list)
+    local cur = list[idx]
+    local cur_tp = cur.locations and cur.locations.totalProgression
+    if not H.is_num(cur_tp) then
+        return nil
+    end
+    -- 同一资源内线性插值; 跨资源时取当前位置起点
+    local progression = cur.locations.progression or 0
+    local prev = idx > 1 and list[idx - 1] or nil
+    local prev_tp = prev and prev.locations and prev.locations.totalProgression or nil
+    if prev and prev.href == cur.href and H.is_num(prev_tp) and cur_tp > prev_tp then
+        local prev_p = prev.locations.progression or 0
+        local cur_p = cur.locations.progression or 0
+        progression = prev_p + (frac - prev_tp) / (cur_tp - prev_tp) * (cur_p - prev_p)
+    end
+    progression = math.min(math.max(progression, 0), 0.999)
+    return {
+        href = cur.href,
+        type = cur.type or "application/xhtml+xml",
+        locations = {
+            progression = progression,
+            position = cur.locations.position,
+            totalProgression = frac,
+        }
+    }
+end
+
+-- EPUB: 内部章节 index ↔ 相对 href 双向映射(以 basename 为键, 卷内唯一)
+-- 上传用 idx→href 构造 locator; 续读用服务器 locator.href→idx 定位内部章节
+function LibraryView:epubChapterHrefMap(bookId)
+    local map, rev = {}, {}
+    if not H.is_str(bookId) then
+        return map, rev
+    end
+    local all = Backend.dbManager and Backend.dbManager:getAllEpubChapterUrls(bookId)
+    if H.is_tbl(all) then
+        for _, item in ipairs(all) do
+            local idx = item and item.chapters_index
+            local url = item and item.chapterUrl
+            if H.is_num(idx) and H.is_str(url) then
+                -- chapterUrl 形如 .../resource/OEBPS/Text/Section000.xhtml, 取其相对路径
+                local rel = url:match("resource/([^?#]+)") or url
+                rel = rel:gsub("^%./", "")
+                local key = (rel:match("([^/]+)$") or rel):lower()
+                map[idx] = rel
+                rev[key] = idx
+            end
+        end
+    end
+    return map, rev
+end
+
+-- EPUB: 内部章节 + 章内比例 → 服务器整卷比例(0..1)
+-- 用 positions 表中同一资源(href)的条目插值, 得到该位置的服务器总进度, 用于构造 locator。
+-- 与上传方向一致: 服务器按 locator 重算的 totalProgression ≈ 该比例, 续读再按 href 反查回同一章节。
+function LibraryView:epubChapterFracToServerFrac(bookId, chapters_index, frac)
+    if not (H.is_str(bookId) and H.is_num(chapters_index) and H.is_num(frac)) then
+        return nil
+    end
+    local map, _ = self:epubChapterHrefMap(bookId)
+    local href = map[chapters_index]
+    if not href then
+        return nil
+    end
+    local positions = self:getEpubPositions(bookId)
+    local list = positions and positions.positions
+    if not (H.is_tbl(list) and #list > 0) then
+        return nil
+    end
+    frac = math.min(math.max(frac, 0), 1)
+    local hkey = (href:match("([^/]+)$") or href):lower()
+    local prev_tp, prev_p
+    for _, pos in ipairs(list) do
+        local ph = pos.href and (pos.href:match("([^/]+)$") or pos.href):lower()
+        if ph == hkey then
+            local ptp = pos.locations and pos.locations.totalProgression
+            local pp = pos.locations and pos.locations.progression
+            if H.is_num(ptp) and H.is_num(pp) then
+                if pp >= frac then
+                    if prev_tp and prev_p and prev_p < pp and frac > prev_p then
+                        return prev_tp + (frac - prev_p) / (pp - prev_p) * (ptp - prev_tp)
+                    end
+                    return ptp
+                end
+                prev_tp, prev_p = ptp, pp
+            end
+        end
+    end
+    return prev_tp
+end
+
+-- EPUB 章节级映射: 内部章节 index + 章节内分数 → 服务器全书页码(近似)
+-- KOReader 与 Komga 分页规则不同且 manifest 无每章页数, 页级精确不可行, 只能按章节数比例换算
+-- 按 bookId 从卷列表兜底取卷总页数(翻章后 chapter.pages 可能丢失)
+function LibraryView:getVolumePages(book_cache_id, bookId)
+    if not (H.is_str(book_cache_id) and H.is_str(bookId)) then
+        return nil
+    end
+    local chapters = Backend:getBookChapterCache(book_cache_id)
+    if H.is_tbl(chapters) then
+        for _, row in ipairs(chapters) do
+            if H.is_tbl(row) and row.bookId == bookId and H.is_num(row.pages) and row.pages > 0 then
+                return row.pages
+            end
+        end
+    end
+    return nil
+end
+
+-- 按 bookId 反查卷号: EPUB 翻章后 chapters_index 是内部章节 index, 上传/刷新必须用卷号
+function LibraryView:getVolumeIndexByBookId(book_cache_id, bookId)
+    if not (H.is_str(book_cache_id) and H.is_str(bookId)) then
+        return nil
+    end
+    local chapters = Backend:getBookChapterCache(book_cache_id)
+    if H.is_tbl(chapters) then
+        for _, row in ipairs(chapters) do
+            if H.is_tbl(row) and row.bookId == bookId and H.is_num(row.chapters_index) then
+                return row.chapters_index
+            end
+        end
+    end
+    return nil
+end
+
+-- EPUB: 扫描卷内全部内部章节的已缓存文件, 返回 (order, data)
+-- order = 按章节序的 idx 数组; data[idx] = {cp=KOReader页数, frac=已读比例}
+-- 每章独立缓存为 <safe书名>-<bookId>-<内部章节idx>.xhtml, 侧车记录该章页数与进度。
+-- current_override={chapters_index=当前章, frac=实时比例} 时, 当前章用实时比例, 其余读侧车。
+function LibraryView:scanEpubVolumeChapters(book_cache_id, bookId, book_name, current_override)
+    local order, data = {}, {}
+    if not (H.is_str(book_cache_id) and H.is_str(bookId)) then
+        return order, data
+    end
+    local cur_idx = current_override and current_override.chapters_index
+    local cur_frac = current_override and current_override.frac
+    local all = Backend.dbManager and Backend.dbManager:getAllEpubChapterUrls(bookId)
+    if H.is_tbl(all) then
+        for _, item in ipairs(all) do
+            local idx = item and item.chapters_index
+            if H.is_num(idx) then
+                local cp = 1
+                local frac = 0
+                local path = H.getChapterCacheFilePath(book_cache_id, bookId, idx, book_name or "") .. ".xhtml"
+                if util.fileExists(path) then
+                    local ds = DocSettings:open(path)
+                    if ds and ds.readSetting then
+                        local p = tonumber(ds:readSetting("doc_pages")) or 0
+                        if p > 0 then
+                            cp = p
+                        end
+                    end
+                    if H.is_num(cur_idx) and idx == cur_idx and H.is_num(cur_frac) then
+                        frac = cur_frac
+                    else
+                        frac = self:getChapterFraction(ds)
+                    end
+                elseif H.is_num(cur_idx) and idx == cur_idx and H.is_num(cur_frac) then
+                    frac = cur_frac
+                end
+                data[idx] = { cp = cp, frac = math.min(math.max(frac, 0), 1) }
+                table.insert(order, idx)
+            end
+        end
+    end
+    return order, data
+end
+
+-- EPUB: 累计该卷已读页数(跨内部章节), 每章已读 = floor(frac*cp+0.5)
+-- 上传方向与本地断点共用, 避免把单章比例当成整卷比例(整卷是多个内部章节 xhtml)
+function LibraryView:calcVolumeLocalRead(book_cache_id, bookId, book_name, current_override)
+    local order, data = self:scanEpubVolumeChapters(book_cache_id, bookId, book_name, current_override)
+    local total = 0
+    for _, idx in ipairs(order) do
+        local d = data[idx]
+        total = total + math.floor(d.frac * d.cp + 0.5)
+    end
+    return total
+end
+
+-- EPUB: 累计该卷已读页数换算为全局页码(显示用近似), 第2返回值当前内部章节
+function LibraryView:calcVolumeGlobalPage(book_cache_id, chapter, pages)
+    if not (H.is_str(book_cache_id) and H.is_tbl(chapter) and H.is_str(chapter.bookId)
+        and H.is_num(pages) and pages > 0) then
+        return 0
+    end
+    local read_pages = self:calcVolumeLocalRead(book_cache_id, chapter.bookId, chapter.name)
+    local p = math.max(math.floor(read_pages + 0.5), 1)
+    if p > pages then
+        p = pages
+    end
+    if p > 0 then
+        return p, chapter.chapters_index
+    end
+    return 0, nil
+end
+
+-- 上传当前阅读进度到服务器(关闭/翻章时调用, 锁+延迟, 失败静默不影响本地)
+function LibraryView:uploadCurrentProgress()
+    if not NetworkMgr:isConnected() then
+        return
+    end
+    local chapter = self.displayed_chapter
+    local reader = ReaderUI.instance
+    if not (H.is_tbl(chapter) and H.is_str(chapter.bookId) and reader and reader.document) then
+        return
+    end
+    local file = reader.document.file
+    if not (H.is_str(file) and file:find('/cache/komga.cache/', 1, true)) then
+        return
+    end
+    -- 翻章后内部章节可能丢失 name/bookUrl, 从卷数据兜底补回(saveBookProgress 强依赖这两项)
+    if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
+        local vol_idx = self.volume_reading_index or chapter.chapters_index
+        local vol = Backend:getChapterInfoCache(chapter.book_cache_id, vol_idx)
+        if H.is_tbl(vol) then
+            chapter.name = chapter.name or vol.name
+            chapter.bookUrl = chapter.bookUrl or vol.bookUrl
+        end
+    end
+    if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
+        return
+    end
+    local doc_settings = DocSettings:open(file)
+    local is_epub = chapter.mediaType == "EPUB" or file:match("%.xhtml$") ~= nil
+    local current_page, pages, epub_frac, epub_locator
+    -- 实时进度优先取 ReaderFooter(翻页即时更新), sidecar 的 percent_finished 只在 onSaveSettings 落盘会滞后
+    local footer = reader.view and reader.view.footer
+    local live_pageno = footer and footer.pageno
+    local live_frac = footer and footer.percent_finished
+    if is_epub then
+        pages = self.volume_pages or self:getVolumePages(chapter.book_cache_id, chapter.bookId)
+        if not (H.is_num(pages) and pages > 0) then
+            return
+        end
+        local frac
+        if H.is_num(live_frac) and live_frac >= 0 and live_frac <= 1 then
+            frac = live_frac
+        else
+            frac = self:getChapterFraction(doc_settings)
+        end
+        -- EPUB 整卷是多个内部章节 xhtml, 每章 footer 比例只代表该章(章内比例)。
+        -- 位置定位按"当前内部章节 href + 章内比例"为准, 不能用"累计已读页数/卷页数"
+        -- (累计≠位置, 各章页数差异大会跳错章节)。
+        -- 1) 首选: 章内比例经 positions 插值为服务器整卷比例, 再用 positions 反查构造 locator
+        --    (progression<1 必须, 服务器对 1.0 返回 400 "Invalid progression");
+        -- 2) 兜底: 直接构造最小 locator(仅 href + 章内 progression);
+        -- 3) 最后: 无法确定章节时按累计页数换算整卷比例走 positions
+        local cur_idx = tonumber(file:match("%-(%d+)%.xhtml$")) or nil
+        local map, _ = self:epubChapterHrefMap(chapter.bookId)
+        local href = cur_idx and map[cur_idx]
+        local loc
+        local vol_frac = cur_idx and self:epubChapterFracToServerFrac(chapter.bookId, cur_idx, frac)
+        -- 防回退冲刷: 若本次位置几乎在卷首(整卷比例 < 2%)而服务器已知进度领先(>5%),
+        -- 说明是续读失败(未缓存卷首次打开/定位失败)落在第 1 页, 而非用户主动回到开头。
+        -- 此时跳过上传, 避免把服务器进度和本地 komga_progress 一并冲刷成 ~0。
+        if H.is_num(vol_frac) and vol_frac < 0.02 then
+            local last_server = self._last_epub_server_frac
+            if H.is_tbl(last_server) and last_server.bookId == chapter.bookId
+                and H.is_num(last_server.frac) and last_server.frac > 0.05 then
+                return
+            end
+        end
+        if H.is_num(vol_frac) then
+            loc = self:epubFractionToLocator(chapter.bookId, vol_frac)
+        elseif href then
+            loc = {
+                href = href,
+                type = "application/xhtml+xml",
+                locations = {
+                    progression = math.min(math.max(frac, 0.001), 0.999),
+                },
+            }
+        else
+            local read_pages = self:calcVolumeLocalRead(chapter.book_cache_id, chapter.bookId, chapter.name,
+                { chapters_index = cur_idx, frac = frac })
+            loc = self:epubFractionToLocator(chapter.bookId, math.min(math.max(read_pages / pages, 0), 1))
+        end
+        if H.is_tbl(loc) then
+            epub_locator = loc
+            -- 记录服务器空间整卷比例(totalProgression), 供快捷方式 sidecar 显示正确的整卷百分比
+            local tp = loc.locations and loc.locations.totalProgression
+            if H.is_num(tp) then
+                self._last_epub_server_frac = { bookId = chapter.bookId, frac = math.min(math.max(tp, 0), 1) }
+            end
+        end
+        -- 记录本地断点: 关闭/翻章后按内部章节 + 章内比例直接定位(与上传同源)
+        if cur_idx then
+            self._last_epub_pos = { bookId = chapter.bookId, chapters_index = cur_idx, frac = frac }
+        end
+        current_page = math.max(math.min(math.ceil(frac * pages), pages), 1)
+        -- EPUB 进度必须走 /progression: 服务器对 EPUB 拒绝 page 格式 read-progress(400 "not Divina compatible")
+        -- locator 已构造好, scheduleProgressUpload 直接使用
+        epub_frac = frac
+        -- 把最近一次服务器空间进度落盘到当前卷快捷方式 sidecar, 修正文件夹/Reading History 显示的整卷百分比
+        self:persistKomgaProgressToShortcut()
+    else
+        pages = chapter.pages
+        if not (H.is_num(pages) and pages > 0) then
+            return
+        end
+        if H.is_num(live_pageno) and live_pageno > 0 then
+            current_page = math.min(live_pageno, pages)
+        else
+            local last_page = tonumber(doc_settings:readSetting("last_page")) or 0
+            current_page = math.min(math.max(last_page, 1), pages)
+        end
+        -- 与 EPUB 一致: 记录服务器空间整卷比例并落盘到快捷方式 sidecar(供文件夹显示正确百分比)
+        -- 防回退冲刷: 位置几乎在卷首而服务器已知进度领先 → 跳过上传, 保住服务器进度
+        local comic_frac = current_page / pages
+        if comic_frac < 0.02 then
+            local last_server = self._last_epub_server_frac
+            if H.is_tbl(last_server) and last_server.bookId == chapter.bookId
+                and H.is_num(last_server.frac) and last_server.frac > 0.05 then
+                return
+            end
+        end
+        self._last_epub_server_frac = { bookId = chapter.bookId, frac = comic_frac }
+        self:persistKomgaProgressToShortcut()
+    end
+    -- 用卷号而非内部 index, 否则 saveBookProgress 内 MarkReadChapter 会把错误的卷标已读。
+    -- 优先按 bookId 反查(翻章后 chapters_index 是内部 index 且 volume_reading_index 可能未设置)
+    local vol_index = self:getVolumeIndexByBookId(chapter.book_cache_id, chapter.bookId)
+    if not (H.is_num(vol_index) and vol_index > 0) then
+        vol_index = self.volume_reading_index or chapter.chapters_index
+    end
+    self:scheduleProgressUpload({
+        name = chapter.name,
+        bookUrl = chapter.bookUrl,
+        bookId = chapter.bookId,
+        pages = pages,
+        current_page = current_page,
+        chapters_index = vol_index,
+        book_cache_id = chapter.book_cache_id,
+        epub = is_epub,
+        frac = epub_frac,
+        locator = epub_locator,
+    })
+end
+
+-- 进度上传: 延迟到翻页/关闭事件之后执行, 非重入锁 + 合并最新一条, 失败静默
+function LibraryView:scheduleProgressUpload(upload_chapter)
+    if self.progress_sync_busy then
+        self.progress_sync_pending = upload_chapter
+        return
+    end
+    self.progress_sync_busy = true
+    UIManager:nextTick(function()
+        -- EPUB 走 /progression(Readium locator), 漫画走 read-progress(page)
+        if upload_chapter.epub then
+            -- 优先用上传时按当前内部章节构造的 locator; 兜底再按整卷比例走 positions
+            local loc = upload_chapter.locator
+            if not loc and H.is_num(upload_chapter.frac) then
+                loc = self:epubFractionToLocator(upload_chapter.bookId, upload_chapter.frac)
+            end
+            if loc then
+                upload_chapter.locator = loc
+                local ok_save, save_resp = pcall(Backend.saveBookProgression, Backend, upload_chapter)
+            else
+                -- positions 获取失败: 跳过本次上传(失败静默, 下次翻章/关闭再传)
+            end
+        else
+            local ok_save, save_resp = pcall(Backend.saveBookProgress, Backend, upload_chapter)
+        end
+        self.progress_sync_busy = false
+        local pending = self.progress_sync_pending
+        self.progress_sync_pending = nil
+        if pending then
+            self:scheduleProgressUpload(pending)
+        end
+    end)
+end
+
+-- 自动续读: 服务器进度更新时打开对应内部章节(章节级近似), 否则保留本地断点
+function LibraryView:resumeAndOpenVolume(chapter)
+    local pages = chapter.pages
+    local is_epub = chapter.mediaType == "EPUB"
+    local server_frac, server_completed
+    local server_target -- EPUB: {chapters_index=内部章节, frac=章内比例}
+    local local_target  -- EPUB: {chapters_index=内部章节, frac=章内比例} 本地断点
+    if is_epub then
+        -- EPUB: 服务器 locator 自带 href + 章内 progression, 直接映射内部章节定位;
+        -- 不依赖 totalProgression 换算页码(各端分页规则不同, 换算会跳错章节)
+        -- 未缓存/未浏览过的卷: 数据库可能还没有内部章节清单, 服务器 locator.href 无法反查内部章节,
+        -- 续读会退化成从第 1 页打开。这里在 DB 为空时拉取一次 manifest(readingOrder) 入库, 之后 href 反查可用。
+        do
+            local _, rev = self:epubChapterHrefMap(chapter.bookId)
+            if not next(rev) then
+                local okC, list = pcall(Backend.getAllEpubChapters, Backend, chapter)
+            end
+        end
+        local prog = Backend:getBookProgression(chapter.bookId)
+        local loc = prog and prog.type == "SUCCESS" and prog.body and prog.body.locator
+        local tp = loc and loc.locations and loc.locations.totalProgression
+        local prog_in_ch = loc and loc.locations and loc.locations.progression
+        local href = loc and loc.href
+        if H.is_num(tp) then
+            server_frac = math.min(math.max(tp, 0), 1)
+            server_completed = tp >= 0.999
+            -- 打开即把服务器整卷进度落盘到快捷方式 sidecar, 修正文件夹显示的整卷百分比
+            self._last_epub_server_frac = { bookId = chapter.bookId, frac = server_frac }
+            self:persistKomgaProgressToShortcut()
+        end
+        -- 服务器 locator.href → 内部章节 + 章内比例(href 与 chapterUrl 同源, 用 basename 反查)
+        if H.is_str(href) and H.is_num(prog_in_ch) then
+            local _, rev = self:epubChapterHrefMap(chapter.bookId)
+            local s_idx = rev[(href:match("([^/]+)$") or href):lower()]
+            if H.is_num(s_idx) then
+                server_target = { chapters_index = s_idx, frac = math.min(math.max(prog_in_ch, 0), 1) }
+            end
+        end
+        if not server_target and not H.is_num(tp) then
+            -- 服务器无 Readium 进度: 回退 readProgress.page/pages(EPUB 页数单位错配, 仅作兜底)
+            local resp = Backend:getChapterInfo(chapter)
+            local rp = resp and resp.body and resp.body.readProgress
+            if H.is_tbl(rp) and H.is_num(pages) and pages > 0 then
+                server_frac = math.min(math.max((tonumber(rp.page) or 1) / pages, 0), 1)
+                server_completed = rp.completed == true
+            end
+        end
+        -- 本地断点: 关闭时记录的内部章节 + 章内比例(与上传同源)
+        local last = self._last_epub_pos
+        if H.is_tbl(last) and last.bookId == chapter.bookId
+            and H.is_num(last.chapters_index) and H.is_num(last.frac) then
+            local_target = { chapters_index = last.chapters_index, frac = last.frac }
+        end
+    else
+        local resp = Backend:getChapterInfo(chapter)
+        local rp = resp and resp.body and resp.body.readProgress
+        if H.is_tbl(rp) and H.is_num(pages) and pages > 0 then
+            server_frac = math.min(math.max((tonumber(rp.page) or 1) / pages, 0), 1)
+            server_completed = rp.completed == true
+        end
+    end
+
+    if is_epub then
+        -- EPUB 目标: 服务器更靠后 → 服务器位置; 否则本地断点
+        local target
+        if server_completed == true then
+            -- 已读完: 打开最后一章末尾并翻下卷
+            local _, rev = self:epubChapterHrefMap(chapter.bookId)
+            local last_idx
+            for _, v in pairs(rev) do
+                if not last_idx or v > last_idx then
+                    last_idx = v
+                end
+            end
+            if last_idx then
+                target = { chapters_index = last_idx, frac = 1 }
+                self.chapter_call_event = "next"
+            end
+        elseif server_target then
+            if local_target then
+                if server_target.chapters_index > local_target.chapters_index then
+                    target = server_target
+                elseif server_target.chapters_index < local_target.chapters_index then
+                    target = local_target
+                else
+                    target = (server_target.frac >= local_target.frac) and server_target or local_target
+                end
+            else
+                target = server_target
+            end
+            self.chapter_call_event = nil
+        else
+            target = local_target
+            self.chapter_call_event = nil
+        end
+        if target and H.is_num(target.chapters_index) then
+            chapter.chapters_index = target.chapters_index
+            if H.is_num(target.frac) and target.frac > 0 and target.frac < 1 then
+                self.resume_goto_frac = target.frac
+            else
+                self.resume_goto_frac = nil
+            end
+        end
+    else
+        -- 漫画: 卷级缓存文件比例即整卷进度(单文件整卷, 与 EPUB 不同)
+        if not (H.is_num(pages) and pages > 0) then
+            self:loadAndRenderChapter(chapter)
+            return
+        end
+        local local_global = self:calcVolumeGlobalPage(chapter.book_cache_id, chapter, pages)
+        local local_frac = math.min(math.max(local_global / pages, 0), 1)
+        local target_frac
+        if server_completed == true then
+            target_frac = 1.0
+            self.chapter_call_event = "next"
+        elseif H.is_num(server_frac) and server_frac > local_frac + (1 / pages) then
+            -- 服务器进度领先: 跳到服务器位置(领先至少一页)
+            target_frac = server_frac
+            self.chapter_call_event = "next"
+        else
+            -- 服务器进度不领先: 回到本地断点
+            target_frac = local_frac
+            self.chapter_call_event = nil
+        end
+        -- 与 EPUB 一致: 把服务器整卷进度落盘到快捷方式 sidecar, 修正文件夹显示的整卷百分比
+        if H.is_num(server_frac) and server_frac > 0 then
+            self._last_epub_server_frac = { bookId = chapter.bookId, frac = server_frac }
+            self:persistKomgaProgressToShortcut()
+        end
+        if target_frac and target_frac > 0 then
+            self.resume_goto_frac = target_frac
+        end
+    end
+    self:loadAndRenderChapter(chapter)
+end
+
 -- 分卷快捷方式点击: 镜像 ChapterListing:onMenuChoice 的流式/缓存分流
 function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
     self:getInstance()
@@ -567,9 +1147,35 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
         MessageBox:notice("分卷数据不存在,请返回书架刷新同步")
         return
     end
+    -- 记住当前卷快捷方式路径: 上传/续读进度时把服务器空间整卷比例落盘到该 sidecar, 供文件夹显示正确百分比
+    if H.is_str(lnk_path) then
+        self.volume_lnk_path = lnk_path
+    end
     -- 分卷快捷方式进入的 EPUB 阅读: 标记为分卷阅读, 目录按钮显示 EPUB 原生目录而非系列目录
     if chapter.mediaType == "EPUB" then
         chapter.volume_read = true
+        self.volume_reading_index = chapters_index
+        self.volume_pages = chapter.pages
+        self.volume_bookId = chapter.bookId
+        -- 自动续读: 服务器进度更新时跳到服务器位置(章节级近似); 离线或设置关闭时不查
+        if NetworkMgr:isConnected() and Backend:getSettings().auto_resume_volume ~= false then
+            return self:resumeAndOpenVolume(chapter)
+        end
+    else
+        -- 漫画(单文件整卷): 与 EPUB 一致, 打开前读取服务器进度并落盘到快捷方式 sidecar, 供文件夹显示正确百分比;
+        -- 缓存漫画: 服务器进度领先时跳到服务器位置(复用 resumeAndOpenVolume 的漫画分支);
+        -- 流式漫画: 只落盘显示用进度, 阅读位置由 StreamImageView 按 readProgress 处理
+        self.volume_reading_index = chapters_index
+        self.volume_pages = chapter.pages
+        self.volume_bookId = chapter.bookId
+        local is_stream = Backend:getSettings().stream_image_view == true
+        if NetworkMgr:isConnected() and Backend:getSettings().auto_resume_volume ~= false then
+            if is_stream then
+                self:persistComicServerProgress(chapter)
+            else
+                return self:resumeAndOpenVolume(chapter)
+            end
+        end
     end
     -- 刷新该卷快捷方式的进度显示
     if H.is_str(lnk_path) and util.fileExists(lnk_path) then
@@ -582,6 +1188,8 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
             MessageBox:notice("书籍数据缺失")
             return
         end
+        -- 流式阅读不经过 showReaderUI, 手动记录当前章节, 供关闭时写入阅读记录(History)
+        self.displayed_chapter = chapter
         local volume_dir = H.is_str(lnk_path) and select(1, util.splitFilePathName(lnk_path)) or nil
         NetworkMgr:runWhenOnline(function()
             UIManager:nextTick(function()
@@ -631,7 +1239,77 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, chapters_index)
         end
     end, false)
     if found then
+        self.volume_lnk_path = found
+        -- 关闭返回时把服务器空间进度写入该快捷方式(覆盖目录打开等无快捷方式路径的场景)
+        self:persistKomgaProgressToShortcut()
         self.book_browser:refreshVolumeMetadata(nil, found, book_cache_id, chapters_index)
+    end
+end
+
+-- 把最近一次服务器空间整卷比例(_last_epub_server_frac)写入分卷快捷方式 sidecar(komga_progress),
+-- 供 refreshVolumeMetadata 显示正确的整卷百分比; 无快捷方式/无可用比例时静默跳过。
+-- 注意: 不覆盖 custom_props, 因此需校验当前快捷方式确实属于该 bookId, 避免串卷写入。
+function LibraryView:persistKomgaProgressToShortcut()
+    local s = self._last_epub_server_frac
+    local lnk_path = self.volume_lnk_path
+    if not (H.is_tbl(s) and H.is_str(s.bookId) and H.is_num(s.frac) and s.frac > 0 and s.frac <= 1) then
+        return
+    end
+    if not (H.is_str(lnk_path) and util.fileExists(lnk_path)) then
+        return
+    end
+    local ds = DocSettings:open(lnk_path)
+    -- 快捷方式侧边已有 bookId 且与当前书不一致 -> 不是这本书的快捷方式, 跳过
+    local custom = ds:readSetting("custom_props")
+    if H.is_tbl(custom) and H.is_str(custom.bookId) and custom.bookId ~= s.bookId then
+        return
+    end
+    -- 快捷方式缺少 bookId 时, 用 self.volume_bookId 二次校验
+    if not (H.is_tbl(custom) and H.is_str(custom.bookId))
+        and H.is_str(self.volume_bookId) and self.volume_bookId ~= s.bookId then
+        return
+    end
+    local old = ds:readSetting("komga_progress")
+    if old ~= s.frac then
+        ds:saveSetting("komga_progress", s.frac):flush()
+    end
+end
+
+-- 漫画打开前: 读取服务器 readProgress.page/pages 落盘到快捷方式 sidecar(供文件夹显示正确百分比)。
+-- 只做显示, 不改变阅读位置; 服务器无进度或离线时静默跳过。
+function LibraryView:persistComicServerProgress(chapter)
+    if not (H.is_tbl(chapter) and H.is_str(chapter.bookId) and H.is_num(chapter.pages) and chapter.pages > 0) then
+        return
+    end
+    local ok, resp = pcall(Backend.getChapterInfo, Backend, chapter)
+    local rp = ok and resp and resp.body and resp.body.readProgress
+    local page = rp and tonumber(rp.page)
+    if H.is_num(page) and page > 0 then
+        local frac = math.min(math.max(page / chapter.pages, 0), 1)
+        if frac > 0 then
+            self._last_epub_server_frac = { bookId = chapter.bookId, frac = frac }
+            self:persistKomgaProgressToShortcut()
+        end
+    end
+end
+
+-- StreamImageView(流式漫画)关闭时: 把流式阅读的整卷比例落盘到快捷方式 sidecar 并刷新文件夹显示。
+-- 与 ReaderUI 关闭路径(onCloseDocument -> uploadCurrentProgress)对齐, 否则流式阅读不会写 komga_progress。
+function LibraryView:persistStreamComicProgress(chapter, page)
+    if not (H.is_tbl(chapter) and H.is_str(chapter.bookId) and H.is_num(page)) then
+        return
+    end
+    local pages = H.is_num(chapter.pages) and chapter.pages or 0
+    if not (pages > 0) then
+        return
+    end
+    local frac = math.min(math.max(page / pages, 0), 1)
+    if frac > 0 then
+        self._last_epub_server_frac = { bookId = chapter.bookId, frac = frac }
+        self:persistKomgaProgressToShortcut()
+    end
+    if H.is_num(chapter.chapters_index) then
+        self:refreshReadVolumeShortcut(chapter.book_cache_id, chapter.chapters_index)
     end
 end
 
@@ -643,6 +1321,56 @@ function LibraryView:refreshVolumeShortcutProgress(book_cache_id, chapters_index
         return
     end
     self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, chapters_index)
+end
+
+-- 阅读记录(History): 把当前正在阅读的分卷映射到其分卷快捷方式(.html)。
+-- 供 patches/core.lua 在 ReadHistory:addItem 时调用: komga 阅读打开的是缓存文件
+-- (EPUB 是内部章节 xhtml / 漫画是 cbz), 直接写进历史点开会丢失 komga 上下文,
+-- 所以统一映射为分卷快捷方式, 历史条目点击后走 komga:openFile -> openVolumeShortcut 恢复阅读。
+-- 返回快捷方式路径; 数据缺失返回 nil(此时不写入阅读记录)。
+function LibraryView:ensureVolumeShortcutForReading()
+    self:getInstance()
+    self:getBrowserWidget()
+    local chapter = self.displayed_chapter
+    if not (H.is_tbl(chapter) and H.is_str(chapter.book_cache_id) and H.is_str(chapter.bookId)) then
+        return nil
+    end
+    local book_cache_id = chapter.book_cache_id
+    -- 分卷索引: 漫画 chapters_index 即卷号; EPUB 的 displayed_chapter.chapters_index 可能是内部章节 index, 用卷号反查
+    local vol_index = chapter.chapters_index
+    if chapter.mediaType == "EPUB" then
+        vol_index = self.volume_reading_index
+            or self:getVolumeIndexByBookId(book_cache_id, chapter.bookId)
+            or chapter.chapters_index
+    end
+    if not (H.is_num(vol_index) and vol_index > 0) then
+        return nil
+    end
+    local bookinfo = Backend:getBookInfoCache(book_cache_id)
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name)) then
+        return nil
+    end
+    local volume_folder = self.book_browser:ensureVolumeFolder(book_cache_id, bookinfo)
+    if not volume_folder then
+        return nil
+    end
+    -- 用与 syncSeriesVolumes 同源的卷数据构造快捷方式, 保证文件名一致(已存在则复用, 不会重复创建)
+    local vol = Backend:getChapterInfoCache(book_cache_id, vol_index)
+    if not (H.is_tbl(vol) and H.is_num(vol.chapters_index)) then
+        return nil
+    end
+    local lnk_path = self.book_browser:wirteVolLnk(vol, volume_folder, book_cache_id)
+    if H.is_str(lnk_path) and util.fileExists(lnk_path) then
+        -- 补写 DocSettings sidecar(provider="komga" / custom_props.type="volume" / book_cache_id / chapters_index):
+        -- wirteVolLnk 只把 book_cache_id 写进 .html 内联 config, 不写 sidecar;
+        -- 而 LibraryView:openFile 点开分卷快捷方式时依赖 customedata.type=='volume' 路由到 openVolumeShortcut,
+        -- 缺了它历史条目点击会退化到 series 的 openLastReadChapter 而非该卷续读。
+        pcall(function()
+            self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, vol_index)
+        end)
+        return lnk_path
+    end
+    return nil
 end
 
 -- 分卷快捷方式右键菜单
@@ -780,9 +1508,6 @@ function LibraryView:loadAndRenderChapter(chapter)
 
     local cache_chapter = Backend:getCacheChapterFilePath(chapter)
 
-    print("Index is ...", chapter.chapters_index)
-    print("Cache chapter is ...", cache_chapter.cacheFilePath)
-    print("LOADRENDER cachehit:", tostring(cache_chapter.cacheFilePath))
     if (H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)) then
         -- 缓存命中分支也要传递分卷阅读标记, 否则目录按钮会退回系列目录而非 EPUB 原生目录
         cache_chapter.volume_read = chapter.volume_read
@@ -870,19 +1595,41 @@ function LibraryView:showReaderUI(chapter)
     self.displayed_chapter = chapter
     -- 记录当前阅读是否为分卷快捷方式进入（TOC 决策依据）
     self.volume_reading = chapter.volume_read == true
+    -- 快照卷数据: 翻章后内部章节对象可能丢失 pages/bookId, 上传与续读依赖
+    if H.is_num(chapter.pages) and chapter.pages > 0 then
+        self.volume_pages = chapter.pages
+    end
+    if H.is_str(chapter.bookId) then
+        self.volume_bookId = chapter.bookId
+    end
     local book_path = chapter.cacheFilePath
     if not util.fileExists(book_path) then
         return MessageBox:error(book_path, "不存在")
     end
-    print("SHOWREADER path:", book_path, "ReaderUI.instance:", tostring(ReaderUI.instance))
     if self.book_toc then
         UIManager:close(self.book_toc)
     end
+    -- 自动续读: reader 打开后按 resume_goto_frac 跳转。
+    -- EPUB 的 resume_goto_frac 是目标内部章节的章内比例(目标章节已通过 chapters_index 打开)
+    local goto_resume_target = function()
+        local target = self.resume_goto_frac
+        self.resume_goto_frac = nil
+        if H.is_num(target) and target > 0 then
+            local ui = ReaderUI.instance
+            if ui and ui.document then
+                local pct = target * 100
+                if pct > 100 then
+                    pct = 100
+                end
+                ui:handleEvent(Event:new("GotoPercent", pct))
+            end
+        end
+    end
     if ReaderUI.instance then
-        ReaderUI.instance:switchDocument(book_path, true)
+        ReaderUI.instance:switchDocument(book_path, true, goto_resume_target)
     else
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
-        ReaderUI:showReader(book_path, nil, true)
+        ReaderUI:showReader(book_path, nil, true, nil, goto_resume_target)
     end
     Backend:after_reader_chapter_show(chapter)
 end
@@ -929,9 +1676,6 @@ function LibraryView:showVolumeEpubToc(chapter)
     }
     volume_toc_menu.onMenuChoice = function(_, item)
         if item.chapters_index then
-            print("TOCJUMP tap index:", item.chapters_index)
-            print("TOCJUMP chapter fields:", chapter.book_cache_id, chapter.bookId,
-                tostring(chapter.name), "cur_cache:", tostring(chapter.cacheFilePath))
             volume_toc_menu:onClose()
             chapter.chapters_index = item.chapters_index
             self:loadAndRenderChapter(chapter)
@@ -1019,7 +1763,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     originOrder = bookinfo.originOrder
                 }, function()
                 end, function(chapter)
-                    print("Predownload 4.")
                     library_view_ref.instance:loadAndRenderChapter(chapter)
                 end, true, true)
             end
@@ -1032,7 +1775,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             if H.is_tbl(chapter) and chapter.chapters_index then
                 -- jump to the reading position
                 chapter.call_event = "next"
-                print("Predownload 1.")
                 library_view_ref.instance:loadAndRenderChapter(chapter)
             else
                 -- chapter does not exist, request refresh
@@ -1093,9 +1835,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 originName = bookinfo.originName,
                 originOrder = bookinfo.originOrder
             }, onReturnCallBack, function(chapter)
-                -- chapter.chapters_index = 1
-                -- chapter.durChapterIndex = 1
-                print("Predownload 2.")
                 library_view_ref.instance:loadAndRenderChapter(chapter)
             end, true)
         end
@@ -1300,13 +2039,22 @@ function LibraryView:initializeRegisterEvent(parent_ref)
     function parent_ref:onCloseDocument()
         if is_komga_path(nil, self.ui) then
             if library_view_ref.instance then
-                library_view_ref.instance.readerui_is_showing = false
-                -- 读完返回时刷新该分卷快捷方式的进度显示
-                local displayed_chapter = library_view_ref.instance.displayed_chapter
-                if H.is_tbl(displayed_chapter) and H.is_str(displayed_chapter.book_cache_id) and
-                    H.is_num(displayed_chapter.chapters_index) then
-                    library_view_ref.instance:refreshReadVolumeShortcut(
-                        displayed_chapter.book_cache_id, displayed_chapter.chapters_index)
+                local instance = library_view_ref.instance
+                instance.readerui_is_showing = false
+                local displayed_chapter = instance.displayed_chapter
+                if H.is_tbl(displayed_chapter) and H.is_str(displayed_chapter.book_cache_id) then
+                    -- 1) 自动上传进度到服务器（同步取数 + 延迟发送, 不阻塞关书）
+                    instance:uploadCurrentProgress()
+                    -- 2) 读完返回时刷新该分卷快捷方式的进度显示
+                    -- 用卷号而非 displayed_chapter.chapters_index（翻章后它是内部章节 index）
+                    local vol_idx = instance:getVolumeIndexByBookId(
+                        displayed_chapter.book_cache_id, displayed_chapter.bookId)
+                    if not (H.is_num(vol_idx) and vol_idx > 0) then
+                        vol_idx = instance.volume_reading_index or displayed_chapter.chapters_index
+                    end
+                    if H.is_num(vol_idx) then
+                        instance:refreshReadVolumeShortcut(displayed_chapter.book_cache_id, vol_idx)
+                    end
                 end
             end
             if not self.patches_ok then
@@ -1319,6 +2067,8 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if is_komga_path(nil, self.ui) then
             library_view_ref:getInstance()
             if library_view_ref.instance then
+                -- 翻章前先上传当前章进度（末页/完成状态）
+                library_view_ref.instance:uploadCurrentProgress()
                 local chapter_call_event = "next"
                 library_view_ref.instance:ReaderUIEventCallback(chapter_call_event)
             else
@@ -1332,6 +2082,8 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if is_komga_path(nil, self.ui) then
             library_view_ref:getInstance()
             if library_view_ref.instance then
+                -- 回章前先上传当前章进度
+                library_view_ref.instance:uploadCurrentProgress()
                 local chapter_call_event = "pre"
                 library_view_ref.instance:ReaderUIEventCallback(chapter_call_event)
             else
@@ -1414,6 +2166,10 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             open_regular_file(file)
         end
     end
+
+    -- FileManager.openFile 补丁(patches/core.lua)的路由目标: openFile 是定义在本插件实例(parent_ref)
+    -- 上的方法, 不是 LibraryView.instance 上的。挂一个静态引用供补丁直接调用, 避免依赖从未赋值的 self.komga。
+    LibraryView.openFileHandler = parent_ref
 end
 
 local function init_book_browser(parent)
@@ -1634,18 +2390,50 @@ local function init_book_browser(parent)
         bookinfo = bookinfo or Backend:getBookInfoCache(book_cache_id)
         -- pages 缺失时按 0 处理, 仍写入卷级元数据, 保证点击可打开
         local pages = H.is_num(chapter.pages) and chapter.pages or 0
-        -- pageno: 已读 -> 满进度; 未读 -> 尽力读缓存文件 last_page
+        -- pageno: 已读 -> 满进度; 有落盘的服务器空间进度(komga_progress) -> 按它换算(EPUB 与漫画通用);
+        -- 缺失时 EPUB 退回累计页数估算, 漫画退回缓存文件 last_page
         local pageno = 0
         if chapter.isRead == true then
             pageno = pages
-        else
-            local cache_chapter = Backend:getCacheChapterFilePath(chapter)
-            if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
-                local last_page = DocSettings:open(cache_chapter.cacheFilePath):readSetting("last_page")
-                if H.is_num(last_page) and last_page > 0 and last_page <= pages then
-                    pageno = last_page
+        elseif H.is_num(pages) and pages > 0 then
+            local ds = DocSettings:open(lnk_path)
+            local komga_prog = ds:readSetting("komga_progress")
+            if H.is_num(komga_prog) and komga_prog > 0 and komga_prog <= 1 then
+                -- 优先用上传/续读时落盘的服务器空间进度(与服务器显示一致), 避免本地累计/页数模型估算错位
+                pageno = math.max(math.min(math.floor(komga_prog * pages + 0.5), pages), 1)
+            elseif chapter.mediaType == "EPUB" then
+                -- EPUB 无服务器空间比例(komga_progress)时:
+                -- 1) 主 sidecar 已落盘 percent_finished 表示有真实进度(>第 1 页) -> 保留, 避免被回退成第 1 页 1%
+                --    (封面下载完成后 refreshVolumeMetadata 可能被再次触发, 而 komga_progress 尚未落盘, 之前正确显示会被 1% 覆盖)
+                -- 2) 否则按累计已读页数估算; 整卷无任何已读痕迹 -> 视为未读(percent=nil, 不显示进度条)
+                local existing = ds:readSetting("percent_finished")
+                if H.is_num(existing) and existing > (1 / pages) and existing < 1 then
+                    pageno = math.max(math.min(math.floor(existing * pages + 0.5), pages), 1)
+                else
+                    local read_pages = self.parent:calcVolumeLocalRead(book_cache_id, chapter.bookId, chapter.name)
+                    if H.is_num(read_pages) and read_pages > 0 then
+                        pageno = math.min(math.max(math.floor(read_pages + 0.5), 1), pages)
+                    else
+                        pageno = 0 -- 未读: 不显示进度条
+                    end
+                end
+            else
+                -- 漫画无落盘比例: 退回缓存文件 last_page
+                local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+                if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
+                    local last_page = DocSettings:open(cache_chapter.cacheFilePath):readSetting("last_page")
+                    if H.is_num(last_page) and last_page > 0 and last_page <= pages then
+                        pageno = last_page
+                    end
                 end
             end
+        end
+        -- KOReader 原生显示用进度(0..1): 已读 -> 1; 有进度 -> pageno/pages; 未读 -> nil(FileChooser 显示 "–")
+        local percent
+        if chapter.isRead == true then
+            percent = 1
+        elseif H.is_num(pages) and pages > 0 and pageno > 0 then
+            percent = math.min(pageno / pages, 1)
         end
         local volume_title = (H.is_str(chapter.title) and chapter.title ~= "") and chapter.title or
             (H.is_tbl(bookinfo) and bookinfo.name) or "卷" .. tostring(chapters_index)
@@ -1661,15 +2449,33 @@ local function init_book_browser(parent)
                 doc_props = custom_settings:readSetting("doc_props")
             }
         end
+        local lnk_ds = DocSettings:open(lnk_path)
+        local lnk_percent = lnk_ds:readSetting("percent_finished")
+        local lnk_doc_pages = lnk_ds:readSetting("doc_pages")
+        local lnk_summary = lnk_ds:readSetting("summary")
+        local lnk_status = H.is_tbl(lnk_summary) and lnk_summary.status or nil
+        -- 上传/续读落盘的服务器空间进度, 重写 sidecar 时必须保留(data={} 会清空全部设置)
+        local lnk_komga_prog = lnk_ds:readSetting("komga_progress")
+        local target_status
+        if chapter.isRead == true then
+            target_status = "complete"
+        elseif H.is_num(percent) and percent > 0 then
+            target_status = "reading"
+        end
         if H.is_tbl(custom) and H.is_tbl(custom.custom_props) and custom.custom_props.type == 'volume' and
             custom.custom_props.chapters_index == chapters_index and
             H.is_tbl(custom.doc_props) and custom.doc_props.pages == pages and custom.doc_props.pageno == pageno and
-            custom.book_cache_id == book_cache_id and custom.chapters_index == chapters_index then
+            custom.book_cache_id == book_cache_id and custom.chapters_index == chapters_index and
+            lnk_percent == percent and lnk_doc_pages == (H.is_num(pages) and pages or nil) and
+            lnk_status == target_status and lnk_ds:readSetting("provider") == "komga" then
             return
         end
         local doc_settings = self:bind_provider(lnk_path)
         if doc_settings and doc_settings.data then
             doc_settings.data = {}
+            -- bind_provider 写入的 provider 被 data={} 清空, 必须重写:
+            -- 否则点击快捷方式时 DocumentRegistry 读不到 komga provider, 会直接用 crengine 打开 html(书籍元信息)
+            doc_settings:saveSetting("provider", "komga")
             doc_settings:saveSetting("custom_props", {
                 authors = (H.is_tbl(bookinfo) and bookinfo.author) or chapter.author,
                 title = volume_title,
@@ -1683,7 +2489,22 @@ local function init_book_browser(parent)
             doc_settings:saveSetting("doc_props", {
                 pages = pages,
                 pageno = pageno
-            }):flushCustomMetadata(lnk_path)
+            })
+            if H.is_num(lnk_komga_prog) then
+                -- 保留上传/续读落盘的服务器空间进度, 避免 data={} 清空丢失
+                doc_settings:saveSetting("komga_progress", lnk_komga_prog)
+            end
+            if percent then
+                -- 主 sidecar 补写 KOReader 原生进度字段(FileChooser/CoverBrowser/Reading History 读取源)
+                doc_settings:saveSetting("percent_finished", percent)
+                doc_settings:saveSetting("doc_pages", pages)
+                local summary = doc_settings:readSetting("summary") or {}
+                summary.status = target_status
+                summary.modified = os.date("%Y-%m-%d")
+                doc_settings:saveSetting("summary", summary)
+            end
+            doc_settings:flushCustomMetadata(lnk_path)
+            doc_settings:flush()
         end
         -- 主 sidecar 也写入 chapters_index, 便于 openFile 读取
         local lnk_config = Backend:getLuaConfig(lnk_path)
@@ -1721,6 +2542,7 @@ local function init_book_browser(parent)
             local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
             if cover_path and util.fileExists(cover_path) then
                 DocSettings:flushCustomCover(lnk_path, cover_path)
+                local after = DocSettings:open(lnk_path)
             end
         end)
     end
@@ -1819,6 +2641,8 @@ local function init_book_browser(parent)
         local doc_settings = self:bind_provider(lnk_path)
         if doc_settings and doc_settings.data then
             doc_settings.data = {}
+            -- bind_provider 写入的 provider 被 data={} 清空, 必须重写, 否则点击快捷方式时 KOReader 不会分发到 komga provider
+            doc_settings:saveSetting("provider", "komga")
             doc_settings:saveSetting("custom_props", {
                 authors = bookinfo.author,
                 title = bookinfo.name,
@@ -1930,7 +2754,6 @@ local function init_book_menu(parent)
             originName = bookinfo.originName,
             originOrder = bookinfo.originOrder
         }, self.parent_ref.onReturnCallback, function(chapter)
-            print("Predownload 3.")
             self.parent_ref.instance:loadAndRenderChapter(chapter)
         end, true)
         UIManager:nextTick(function()
@@ -1952,7 +2775,6 @@ local function init_book_menu(parent)
                         self:refreshItems()
                         self.parent_ref.ui_refresh_time = os.time()
                     end, function(err_msg)
-                        print('同步失败', err_msg)
                         MessageBox:notice('同步失败', err_msg)
                     end)
                 end

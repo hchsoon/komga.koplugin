@@ -237,7 +237,11 @@ function M:loadSpore()
         local raises = require'Spore'.raises
         local spore = req.env.spore
         local payload = spore.payload
-        local contenttype = 'application/json,application/webpub+json'
+        -- 含 Readium 媒体类型: Komga 的 /positions 与 /progression 只产生
+        -- application/vnd.readium.position-list+json / application/vnd.readium.progression+json,
+        -- Accept 里没有会返回 406 Not Acceptable(EPUB 进度同步的读取/上报都会用到)
+        local contenttype = 'application/json,application/webpub+json,' ..
+            'application/vnd.readium.position-list+json,application/vnd.readium.progression+json'
         if payload and type(payload) == 'table' then
             spore.payload = encode(payload)
             req.headers['content-type'] = "application/json"
@@ -247,7 +251,9 @@ function M:loadSpore()
         return  function (res)
                     local header = res.headers and res.headers['content-type']
                     local body = res.body
-                    if header and (find(header, 'application/json', 1, true) or find(header, 'application/webpub+json', 1, true))and type(body) == 'string' and body ~= '' then
+                    if header and (find(header, 'application/json', 1, true) or find(header, 'application/webpub+json', 1, true)
+                        or find(header, 'application/vnd.readium.position-list+json', 1, true)
+                        or find(header, 'application/vnd.readium.progression+json', 1, true)) and type(body) == 'string' and body ~= '' then
                         local r, _, msg = decode(body)
                         if r then
                             res.body = r
@@ -567,7 +573,6 @@ function M:saveBookProgress(chapter)
         return wrap_response(nil, '参数错误')
     end
 
-    print(chapter.pages,chapter.current_page)
     local chapters_index = chapter.chapters_index
     local finish = (chapter.current_page == chapter.pages)
     -- print(finish)
@@ -595,6 +600,69 @@ function M:saveBookProgress(chapter)
         timeouts = {3, 5}
     }, 'saveBookProgress')
 
+end
+
+-- EPUB(非 Divina)进度走 Readium Progression API: GET /progression 返回 R2Progression
+-- {modified, device, locator{locations{progression, position, totalProgression}}}
+function M:getBookProgression(bookId)
+    if not H.is_str(bookId) then
+        return wrap_response(nil, '参数错误')
+    end
+    local r = self:komgaSporeApi(function()
+        return self.apiClient:getBookProgression({
+            bookId = bookId
+        })
+    end, nil, {
+        timeouts = {3, 5}
+    }, 'getBookProgression')
+    local loc = r and r.body and r.body.locator
+    return r
+end
+
+-- EPUB 进度上传: PUT /progression, payload 为 R2Progression(服务器按 locator 重算 totalProgression,
+-- 并换算 readProgress.page; totalProgression 到 1 时自动标 completed)
+-- upload 需含 {bookId, name, bookUrl, chapters_index, book_cache_id, locator, frac, current_page, pages}
+function M:saveBookProgression(upload)
+    if not (H.is_str(upload.bookId) and H.is_tbl(upload.locator)
+        and H.is_str(upload.name) and H.is_str(upload.bookUrl)) then
+        return wrap_response(nil, '参数错误')
+    end
+    -- 读完(整卷比例 >= 99.9%): 本地标记已读, 服务器读满(totalProgression=1)会自动标 completed
+    if H.is_num(upload.frac) and upload.frac >= 0.999 then
+        self.dbManager:updateIsRead(upload, upload.current_page, true)
+    end
+    -- modified 必须严格递增, 否则服务器 409 Conflict; 同秒内多次上传时间戳加 1 秒
+    local ts = os.time()
+    if ts <= (self._last_prog_modified_ts or 0) then
+        ts = (self._last_prog_modified_ts or 0) + 1
+    end
+    self._last_prog_modified_ts = ts
+    local r = self:komgaSporeApi(function()
+        return self.apiClient:updateBookProgression({
+            bookId = upload.bookId,
+            modified = os.date("!%Y-%m-%dT%H:%M:%SZ", ts),
+            device = { id = "koreader", name = "KOReader" },
+            locator = upload.locator,
+        })
+    end, nil, {
+        timeouts = {3, 5}
+    }, 'saveBookProgression')
+    return r
+end
+
+-- EPUB: 全书位置查找表(totalProgression 单调递增), 供 frac→locator 映射
+function M:getBookPositions(bookId)
+    if not H.is_str(bookId) then
+        return wrap_response(nil, '参数错误')
+    end
+    local r = self:komgaSporeApi(function()
+        return self.apiClient:getBookPositions({
+            bookId = bookId
+        })
+    end, nil, {
+        timeouts = {3, 5}
+    }, 'getBookPositions')
+    return r
 end
 
 function M:getBookSourcesList()
@@ -1051,6 +1119,33 @@ local chapter_writeToFile = function(chapter, filePath, resources)
     end
 end
 
+-- 生成章节链接匹配关键字: 取文件基名(去扩展名, 小写)。
+-- epub 内部章节文件通常唯一命名(如 Section0031.xhtml), 而 DB 里 chapterUrl 是
+-- 完整资源 URL、xhtml 内部 href 是相对路径, 只有基名是两边一致的, 故按基名匹配。
+local normalize_rel_href = function(href)
+    if type(href) ~= "string" or href == "" then
+        return nil
+    end
+    -- 全 URL(如 Komga /resource/ 资源地址)只取路径部分
+    local u = href:gsub("^%a[%w+.-]*://[^/]+/", "")
+    u = u:gsub("[?#].*", "")
+    local name = u:match("([^/]+)$")
+    if not name then
+        return nil
+    end
+    name = name:gsub("%.x?html?$", "")
+    if name == "" then
+        return nil
+    end
+    return name:lower()
+end
+
+-- 缓存的章节文件名: <安全书名>-<bookId>-<chapters_index>.xhtml, 与 H.getChapterCacheFilePath 生成的路径一致
+local get_cached_chapter_filename = function(bookId, chapters_index, book_name)
+    book_name = util.getSafeFilename(book_name or "")
+    return string.format("%s-%s-%s.xhtml", book_name, bookId, chapters_index)
+end
+
 local replace_css_urls = function(css_text, replace_fn)
     css_text = tostring(css_text or "")
     return (css_text:gsub("url%s*%((%s*['\"]?)(.-)(['\"]?%s*)%)", function(prefix, old_path, suffix)
@@ -1408,6 +1503,71 @@ function M:_AnalyzingChapters(chapter, content)
                     end
                     return
                 end)
+
+                -- === FIX: 重写内部章节链接与剩余相对路径 ===
+                -- KOReader 用 document_dir 解析相对 href, 原 epub 的 ../Text/xx.xhtml
+                -- 在扁平缓存目录下解析不到目标, 点击链接无反应。这里把指向其他章节的
+                -- <a href> 改写成实际缓存文件名(<安全书名>-<bookId>-<index>.xhtml),
+                -- 使其能通过 ReaderLink:openFileFromLink 打开并跳转。
+                do
+                    local href_map = {}
+                    -- 优先用 manifest readingOrder(含全部章节 href→序号 映射)。
+                    -- 注意: Lua pattern 里 '|' 是字面字符, 不能当"或"用, 故用 %.x?html$
+                    if H.is_tbl(chapter.readingOrder) then
+                        for ro_idx, ro_item in ipairs(chapter.readingOrder) do
+                            if H.is_tbl(ro_item) and H.is_str(ro_item.href) and
+                                ro_item.href:lower():match("%.x?html$") then
+                                local key = normalize_rel_href(ro_item.href)
+                                if key then
+                                    href_map[key] = ro_idx
+                                end
+                            end
+                        end
+                    end
+                    -- 再用 DB 全量行补充(含 'No title' 子章节), 已有 key 不覆盖,
+                    -- 这样即使 readingOrder 缺失/为空/过期也能构建出完整映射
+                    local all_chs = self.dbManager:getAllEpubChapterUrls(chapter.bookId)
+                    if H.is_tbl(all_chs) then
+                        for _, ch in ipairs(all_chs) do
+                            if H.is_num(ch.chapters_index) and H.is_str(ch.chapterUrl) then
+                                local key = normalize_rel_href(ch.chapterUrl)
+                                if key and not href_map[key] then
+                                    href_map[key] = ch.chapters_index
+                                end
+                            end
+                        end
+                    end
+
+                    if next(href_map) then
+                        local cached_name = util.getSafeFilename(chapter.name or "")
+                        local bookId = chapter.bookId
+                        content = content:gsub('(<[Aa][^>]-href%s*=%s*)([\'"])(.-)%2',
+                            function(open, quote, href)
+                                if not H.is_str(href) or href == "" or href:sub(1, 1) == "#" then
+                                    return open .. quote .. href .. quote
+                                end
+                                local key = normalize_rel_href(href)
+                                local target_index = key and href_map[key]
+                                if H.is_num(target_index) then
+                                    return open .. quote ..
+                                        get_cached_chapter_filename(bookId, target_index, cached_name) .. quote
+                                end
+                                return open .. quote .. href .. quote
+                            end)
+                    end
+
+                    -- 内联 <style>/style 中的 url() 相对路径重写到 resources/(如 css 里引用的图片/字体)
+                    content = content:gsub('url%s*%(%s*([\'"])?(.-)%1%s*%)', function(q, u)
+                        if not H.is_str(u) or u == "" or u:sub(1, 1) == "#" or u:lower():find("^data:") then
+                            return nil
+                        end
+                        local relpath = processLink(book_cache_id, u, html_url)
+                        if H.is_str(relpath) then
+                            return string.format("url(%s%s%s)", q or "", relpath, q or "")
+                        end
+                        return nil
+                    end)
+                end
             end
         end
 
@@ -1472,7 +1632,7 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
         chapter.bookId = chapter.book_cache_id
     end
 
-    logger.info('pDownloadChapter called',chapter)
+    -- logger.info('pDownloadChapter called',chapter)
 
     -- print(bookUrl, book_cache_id, chapter.bookId ,chapters_index, chapter_title, down_chapters_index)
     local function message_show(msg)
@@ -1493,31 +1653,30 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
     end
 
     local url = nil
-    -- print("Download Chapter Response is ...",#response.body.readingOrder)
     -- 分卷章节(chapters 表)没有 chapterUrl 列, 以前每下载一个未缓存章节都会先调
     -- pGetChapterContent 拉取整个 manifest(getEpubManifest, 超时 18-25s), 导致下载卡住数秒到数十秒。
     -- 内部章节 URL(epubchapters.chapterUrl)通常已在库中, 直接使用即可跳过该慢请求。
-    local epubchapter = self.dbManager:getEpubChapterInfo(chapter.bookId,down_chapters_index)
+    -- === FIX: 确保 chapterUrl 始终来自数据库(或 manifest 兜底), 子章节 URL 缺失时也能下载/跳转 ===
+    local epubchapter = self.dbManager:getEpubChapterInfo(chapter.bookId, down_chapters_index)
     if H.is_tbl(epubchapter) and H.is_str(epubchapter.chapterUrl) and epubchapter.chapterUrl ~= "" then
         url = epubchapter.chapterUrl
     elseif H.is_tbl(epubchapter) and chapter.chapterUrl then
-        -- print("EpubChapterInfo: ok", chapter.chapters_index, chapter.chapterUrl)
         url = chapter.chapterUrl
-    else
-        -- print("No chapterinfo get")
-        local inforesponse = self:pGetChapterContent(chapter)
-        if inforesponse.body ~= nil and inforesponse.body.toc ~= nil then
+    end
 
+    -- 兜底: 数据库没有该章节 URL 时, 强制刷新 manifest 并把内部章节回写数据库, 再取 URL。
+    -- (子章节可能因早期只遍历顶层 toc 而未入库, 这里能补上)
+    if not H.is_str(url) or url == "" then
+        local inforesponse = self:pGetChapterContent(chapter)
+        if H.is_tbl(inforesponse) and H.is_tbl(inforesponse.body) and H.is_tbl(inforesponse.body.toc) then
             chapter.toc = inforesponse.body.toc
             chapter.readingOrder = inforesponse.body.readingOrder
-            self.dbManager:upsertEpubChapters(book_cache_id,chapter)
+            self.dbManager:upsertEpubChapters(book_cache_id, chapter)
         end
-
-        epubchapter = self.dbManager:getEpubChapterInfo(chapter.bookId,down_chapters_index)
-        url = epubchapter.chapterUrl
-        -- if is_recursive ~= true and H.is_tbl(inforesponse) and inforesponse.type == 'ERROR' then
-        --     self:pDownloadChapter(inforesponse, message_dialog, true)
-        -- end
+        epubchapter = self.dbManager:getEpubChapterInfo(chapter.bookId, down_chapters_index)
+        if H.is_tbl(epubchapter) and H.is_str(epubchapter.chapterUrl) and epubchapter.chapterUrl ~= "" then
+            url = epubchapter.chapterUrl
+        end
     end
     
     if url ~= nil then
@@ -1562,7 +1721,6 @@ function M:getCacheChapterFilePath(chapter)
     local book_name = chapter.name or ""
     local cache_file_path = chapter.cacheFilePath
     local cacheExt = chapter.cacheExt
-    print("Param1 is ...",book_cache_id,chapter.bookId,chapters_index,book_name)
     local filePath = H.getChapterCacheFilePath(book_cache_id, chapter.bookId ,chapters_index, book_name)
 
     if H.is_str(cache_file_path) then
@@ -1577,8 +1735,6 @@ function M:getCacheChapterFilePath(chapter)
             chapter.cacheFilePath = nil
         end
     end
-
-    print("Param2 is ...",book_cache_id,chapter.bookId,chapters_index,book_name)
 
     local extensions = {'html', 'cbz', 'xhtml', 'txt', 'png', 'jpg'}
 
@@ -1627,8 +1783,6 @@ function M:findNextChapter(current_chapter, is_downloaded)
 
     local book_cache_id = current_chapter.book_cache_id
     local bookId = current_chapter.bookId
-    local totalChapterNum = current_chapter.totalChapterNum
-    print("TotalChapter to find is ...", totalChapterNum)
     local current_chapters_index = current_chapter.chapters_index
 
     if current_chapter.call_event == nil then
@@ -1637,7 +1791,6 @@ function M:findNextChapter(current_chapter, is_downloaded)
 
     local next_chapter = self.dbManager:findNextEpubChapterInfo(current_chapter, is_downloaded)
 
-    current_chapter.totalChapterNum = current_chapter.totalChapterNum
     if not H.is_tbl(next_chapter) or next_chapter.chapters_index == nil then
         dbg.log('not found', current_chapter.chapters_index)
         return
@@ -2214,7 +2367,6 @@ function M:getVolumeCoverCachePath(book_cache_id, chapters_index)
 end
 
 function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
-    print("Downloading cover ", cover_url)
     if not (H.is_str(book_cache_id) and H.is_str(cover_url)) then
         logger.err("download_cover_img parameter error")
         return

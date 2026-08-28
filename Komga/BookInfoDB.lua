@@ -774,10 +774,11 @@ function M:upsertEpubChapters(bookCacheId, chapters)
         INSERT INTO epubchapters (bookCacheId, chapterId ,chapterIndex, title, chapterUrl)
 VALUES (?, ?, ?, ?, ?)
 ON CONFLICT(chapterId, chapterIndex) DO UPDATE SET
-    title = CASE WHEN excluded.title != epubchapters.title THEN excluded.title ELSE epubchapters.title END;
+    title = CASE WHEN excluded.title != epubchapters.title THEN excluded.title ELSE epubchapters.title END,
+    chapterUrl = CASE WHEN excluded.chapterUrl IS NOT NULL AND excluded.chapterUrl != '' THEN excluded.chapterUrl ELSE epubchapters.chapterUrl END;
     ]]
 
-    -- TODO: 章节与xhtml不是一一对应的，有些不在内的xhtml未被入库 
+    -- TODO: 章节与xhtml不是一一对应的，有些不在内的xhtml未被入库
 
     local batch_data = {}
     for index, chapter in ipairs(chapters.readingOrder) do
@@ -790,8 +791,25 @@ ON CONFLICT(chapterId, chapterIndex) DO UPDATE SET
         table.insert(batch_data, {bookCacheId, chapters.bookId ,index, 'No title', chapter.href})
     end
 
-    for index, chapter in ipairs(chapters.toc) do
-        for index2, batch_entry in ipairs(batch_data) do
+    -- webpub+json 的 toc 是嵌套结构(卷->章->节)。只遍历顶层会漏掉子章节,
+    -- 其 title 保持 'No title' 而被目录过滤, 导致第一章下的子章节获取不到。
+    -- 这里先展平 toc, 再按 href 匹配 readingOrder, 把子章节标题写回库。
+    local function flatten_toc(toc)
+        local flat = {}
+        local function walk(items)
+            for _, item in ipairs(items or {}) do
+                table.insert(flat, item)
+                if H.is_tbl(item.children) and #item.children > 0 then
+                    walk(item.children)
+                end
+            end
+        end
+        walk(toc)
+        return flat
+    end
+
+    for _, chapter in ipairs(flatten_toc(chapters.toc)) do
+        for _, batch_entry in ipairs(batch_data) do
             if batch_entry[5] == chapter.href then
                 batch_entry[4] = chapter.title
             end
@@ -1059,6 +1077,33 @@ ORDER BY c.chapterIndex ASC;
     return chapters
 end
 
+
+-- 返回某个 epub 的全部内部章节 URL(含 'No title' 子章节), 供缓存 xhtml 内部链接映射用
+function M:getAllEpubChapterUrls(chapterId)
+    if chapterId == nil then
+        return {}
+    end
+    local sql_stmt = [[
+    SELECT c.chapterIndex, c.chapterUrl
+FROM epubchapters AS c
+WHERE c.chapterId = ?
+ORDER BY c.chapterIndex ASC;
+    ]]
+
+    local result = self:execute(sql_stmt, chapterId)
+    local items = {}
+    if result and #result > 0 then
+        for i = 1, #result, 1 do
+            local row = result[i]
+            items[i] = {
+                chapters_index = tonumber(row[1]),
+                chapterUrl = row[2]
+            }
+        end
+    end
+
+    return items
+end
 
 function M:getEpubChapterInfo(chapterId, epubChapterIndex)
     if not H.is_str(chapterId) or not H.is_num(epubChapterIndex) then
@@ -1556,6 +1601,11 @@ function M:clearBook(bookShelfId, book_cache_id)
     }, {
         bookCacheId = book_cache_id
     })
+
+    -- 同时清空 epubchapters 内部章节缓存。否则清除缓存后内部目录仍是旧的
+    -- (如子章节因只遍历顶层 toc 而保持 'No title' 被过滤), 无法触发 manifest 重新拉取。
+    self:execute("DELETE FROM epubchapters WHERE bookCacheId = ? OR chapterId = ?;",
+        {book_cache_id, book_cache_id})
 
     return true
 end
