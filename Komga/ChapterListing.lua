@@ -70,7 +70,7 @@ end
 function ChapterListing:refreshItems(no_recalculate_dimen)
 
     local book_cache_id = self.bookinfo.cache_id
-    local chapter_cache_data = Backend:getBookChapterCache(book_cache_id)
+    local chapter_cache_data = Backend:getVolumesCache(book_cache_id)
 
     if chapter_cache_data and #chapter_cache_data > 0 then
 
@@ -99,7 +99,7 @@ end
 function ChapterListing:generateItemTableFromChapters(chapters)
 
     local item_table = {}
-    local last_read_chapter = Backend:getLastReadChapter(self.bookinfo.cache_id)
+    local last_read_chapter = Backend:getLastReadVolumeIndex(self.bookinfo.cache_id)
 
     for _, chapter in ipairs(chapters) do
 
@@ -175,7 +175,7 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
 end
 
 function ChapterListing:gotoLastReadChapter()
-    local last_read_chapter = Backend:getLastReadChapter(self.bookinfo.cache_id)
+    local last_read_chapter = Backend:getLastReadVolumeIndex(self.bookinfo.cache_id)
     if H.is_num(last_read_chapter) then
         self:switchItemTable(nil, self.item_table, last_read_chapter)
     end
@@ -187,7 +187,7 @@ function ChapterListing:onMenuChoice(item)
     if item.chapters_index == nil then
         return true
     end
-    local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+    local chapter = Backend:getVolumeInfoCache(book_cache_id, chapters_index)
 
     if Backend:getSettings().stream_image_view == true and chapter.mediaType ~= "EPUB" then
         ChapterListing.onReturnCallback = function()
@@ -220,7 +220,7 @@ function ChapterListing:onMenuHold(item)
         self:onRefreshChapters()
         return true
     end
-    local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+    local chapter = Backend:getVolumeInfoCache(book_cache_id, chapters_index)
     local is_read = chapter.isRead
     local cacheFilePath = chapter.cacheFilePath
     local isDownLoaded = chapter.isDownLoaded
@@ -229,7 +229,7 @@ function ChapterListing:onMenuHold(item)
         text = table.concat({Icons.FA_CHECK_CIRCLE, (is_read and ' 取消' or ' 标记'), "已读"}),
         callback = function()
             UIManager:close(dialog)
-            Backend:HandleResponse(Backend:MarkReadChapter({
+            Backend:HandleResponse(Backend:toggleVolumeRead({
                 chapters_index = item.chapters_index,
                 chapter_page = 0,
                 isRead = chapter.isRead,
@@ -247,7 +247,7 @@ function ChapterListing:onMenuHold(item)
         callback = function()
             UIManager:close(dialog)
             -- local chapter = Backend:getEpubChapterInfoCache(item.chapterId, item.chapters_index)
-            local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+            local chapter = Backend:getVolumeInfoCache(book_cache_id, chapters_index)
             -- chapter.bookId = item.chapterId
             self:showEpubToc(chapter)
         end
@@ -256,7 +256,7 @@ function ChapterListing:onMenuHold(item)
         text = table.concat({Icons.FA_DOWNLOAD, (isDownLoaded and ' 刷新' or ' 下载'), '章节'}),
         callback = function()
             UIManager:close(dialog)
-            Backend:HandleResponse(Backend:ChangeChapterCache({
+            Backend:HandleResponse(Backend:changeVolumeCache({
                 chapters_index = item.chapters_index,
                 cacheFilePath = cacheFilePath,
                 book_cache_id = chapter.book_cache_id,
@@ -287,7 +287,7 @@ function ChapterListing:onMenuHold(item)
         callback = function()
             UIManager:close(dialog)
             if not self.all_chapters_count then
-                self.all_chapters_count = Backend:getChapterCount(book_cache_id)
+                self.all_chapters_count = Backend:getVolumeCount(book_cache_id)
             end
             local autoturn_spin = SpinWidget:new{
                 value = 1,
@@ -355,7 +355,7 @@ end
 function ChapterListing:onRefreshChapters()
         Backend:closeDbManager()
         MessageBox:loading("正在刷新章节数据", function()
-            return Backend:refreshChaptersCache({
+            return Backend:refreshVolumesCache({
                 cache_id = self.bookinfo.cache_id,
                 bookUrl = self.bookinfo.bookUrl
             }, self.ui_refresh_time)
@@ -394,7 +394,7 @@ function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, dow
 
     call_event = call_event and call_event or 'next'
 
-    local begin_chapter = Backend:getChapterInfoCache(book_cache_id, begin_chapters_index)
+    local begin_chapter = Backend:getVolumeInfoCache(book_cache_id, begin_chapters_index)
     
     begin_chapter.call_event = call_event
 
@@ -404,11 +404,11 @@ function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, dow
     end
 
     if down_chapters_count == nil then
-        down_chapters_count = Backend:getChapterCount(book_cache_id)
+        down_chapters_count = Backend:getVolumeCount(book_cache_id)
     end
 
     down_chapters_count = tonumber(down_chapters_count)
-    local status, err = Backend:preLoadingChapters(begin_chapter, down_chapters_count)
+    local status, err = Backend:preLoadVolumes(begin_chapter, down_chapters_count)
 
     if not status then
         MessageBox:error('后台下载任务提交出错', tostring(err))
@@ -516,7 +516,7 @@ function ChapterListing:syncProgressShow(chapter)
     MessageBox:loading("同步中 ", function()
         if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
             chapter.current_page = 0
-            local response = Backend:saveBookProgress(chapter)
+            local response = Backend:saveVolumeProgress(chapter)
             if not (type(response) == 'table' and response.type == 'SUCCESS') then
                 local message = (type(response) == 'table' and response.message) or
                                     "进度上传失败，请稍后重试"
@@ -532,11 +532,11 @@ function ChapterListing:syncProgressShow(chapter)
             Backend:HandleResponse(response, function(data)
 
                 local bookCacheId = self.bookinfo.cache_id
-                local bookinfo = Backend:getBookInfoCache(bookCacheId)
+                local bookinfo = Backend:getSeriesInfoCache(bookCacheId)
 
                 if H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex) then
 
-                    Backend:MarkReadChapter({
+                    Backend:toggleVolumeRead({
                         book_cache_id = bookCacheId,
                         chapters_index = bookinfo.durChapterIndex,
                         chapter_page = 0,
@@ -617,7 +617,7 @@ function ChapterListing:openMenu()
             if Device.isAndroid() then
                 local book_cache_id = self.bookinfo.cache_id
                 if not self.all_chapters_count then
-                    self.all_chapters_count = Backend:getChapterCount(book_cache_id)
+                    self.all_chapters_count = Backend:getVolumeCount(book_cache_id)
                 end
                 UIManager:show(SpinWidget:new{
                     value = 1,
@@ -650,7 +650,7 @@ function ChapterListing:openMenu()
         }})
     end
     local book_cache_id = self.bookinfo.cache_id
-    local lastUpdated = Backend:getChapterLastUpdateTime(book_cache_id)
+    local lastUpdated = Backend:getSeriesLastUpdateTime(book_cache_id)
     lastUpdated = tonumber(lastUpdated)
     dialog = ButtonDialog:new{
         title = "chapters_cache_" .. os.date("%m-%d %H:%M:%S", lastUpdated),

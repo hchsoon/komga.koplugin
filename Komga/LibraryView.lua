@@ -505,7 +505,7 @@ function LibraryView:openSeriesVolumesFolder(book_cache_id, serie_file)
     -- fork 后的子进程内网络请求在部分设备(Android/macOS)上会挂起,
     -- 而 MessageBox:loading 的对话框 dismissable=false 无法点击取消,
     -- 导致模态对话框永久显示、后续点击全部失效("重新点击没有反应")。
-    -- refreshChaptersCache 内部 socketutil 有 10s/12s 超时, 本进程内可靠返回。
+    -- refreshVolumesCache 内部 socketutil 有 10s/12s 超时, 本进程内可靠返回。
     self:syncChaptersInProcess(book_cache_id, bookinfo)
 end
 
@@ -529,7 +529,7 @@ function LibraryView:syncChaptersInProcess(book_cache_id, bookinfo)
         icon = "notice-info"
     })
     local ok, err_or_res = pcall(function()
-        return Backend:refreshChaptersCache({
+        return Backend:refreshVolumesCache({
             bookUrl = bookinfo.bookUrl,
             cache_id = book_cache_id,
             name = bookinfo.name,
@@ -823,7 +823,7 @@ function LibraryView:uploadCurrentProgress()
     if not (H.is_str(file) and file:find('/cache/komga.cache/', 1, true)) then
         return
     end
-    -- 翻章后内部章节可能丢失 name/bookUrl, 从卷数据兜底补回(saveBookProgress 强依赖这两项)
+    -- 翻章后内部章节可能丢失 name/bookUrl, 从卷数据兜底补回(saveVolumeProgress 强依赖这两项)
     if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
         local vol_idx = self.volume_reading_index or chapter.chapters_index
         local vol = KomgaModel:new(chapter.book_cache_id):getVolume(vol_idx) -- Komga Book(分卷)
@@ -934,7 +934,7 @@ function LibraryView:uploadCurrentProgress()
         self._last_epub_server_frac = { bookId = chapter.bookId, frac = comic_frac }
         self:persistKomgaProgressToShortcut()
     end
-    -- 用卷号而非内部 index, 否则 saveBookProgress 内 MarkReadChapter 会把错误的卷标已读。
+    -- 用卷号而非内部 index, 否则 saveVolumeProgress 内 toggleVolumeRead 会把错误的卷标已读。
     -- 优先按 bookId 反查(翻章后 chapters_index 是内部 index 且 volume_reading_index 可能未设置)
     local vol_index = self:getVolumeIndexByBookId(chapter.book_cache_id, chapter.bookId)
     if not (H.is_num(vol_index) and vol_index > 0) then
@@ -976,7 +976,7 @@ function LibraryView:scheduleProgressUpload(upload_chapter)
                 -- positions 获取失败: 跳过本次上传(失败静默, 下次翻章/关闭再传)
             end
         else
-            local ok_save, save_resp = pcall(Backend.saveBookProgress, Backend, upload_chapter)
+            local ok_save, save_resp = pcall(Backend.saveVolumeProgress, Backend, upload_chapter)
         end
         self.progress_sync_busy = false
         local pending = self.progress_sync_pending
@@ -1027,7 +1027,7 @@ function LibraryView:resumeAndOpenVolume(volume)
         end
         if not server_target and not H.is_num(tp) then
             -- 服务器无 Readium 进度: 回退 readProgress.page/pages(EPUB 页数单位错配, 仅作兜底)
-            local resp = Backend:getChapterInfo(volume)
+            local resp = Backend:getVolumeReadProgress(volume)
             local rp = resp and resp.body and resp.body.readProgress
             if H.is_tbl(rp) and H.is_num(pages) and pages > 0 then
                 server_frac = math.min(math.max((tonumber(rp.page) or 1) / pages, 0), 1)
@@ -1041,7 +1041,7 @@ function LibraryView:resumeAndOpenVolume(volume)
             local_target = { chapters_index = last.chapters_index, frac = last.frac }
         end
     else
-        local resp = Backend:getChapterInfo(volume)
+        local resp = Backend:getVolumeReadProgress(volume)
         local rp = resp and resp.body and resp.body.readProgress
         if H.is_tbl(rp) and H.is_num(pages) and pages > 0 then
             server_frac = math.min(math.max((tonumber(rp.page) or 1) / pages, 0), 1)
@@ -1270,7 +1270,7 @@ function LibraryView:persistComicServerProgress(chapter)
     if not (H.is_tbl(chapter) and H.is_str(chapter.bookId) and H.is_num(chapter.pages) and chapter.pages > 0) then
         return
     end
-    local ok, resp = pcall(Backend.getChapterInfo, Backend, chapter)
+    local ok, resp = pcall(Backend.getVolumeReadProgress, Backend, chapter)
     local rp = ok and resp and resp.body and resp.body.readProgress
     local page = rp and tonumber(rp.page)
     if H.is_num(page) and page > 0 then
@@ -1391,7 +1391,7 @@ function LibraryView:openVolumeBrowserMenu(file, customedata)
         text = table.concat({Icons.FA_CHECK_CIRCLE, (is_read and ' 取消' or ' 标记'), "已读"}),
         callback = function()
             UIManager:close(dialog)
-            Backend:HandleResponse(Backend:MarkReadChapter({
+            Backend:HandleResponse(Backend:toggleVolumeRead({
                 chapters_index = chapters_index,
                 chapter_page = 0,
                 isRead = is_read,
@@ -1407,7 +1407,7 @@ function LibraryView:openVolumeBrowserMenu(file, customedata)
         text = table.concat({Icons.FA_DOWNLOAD, (isDownLoaded and ' 刷新' or ' 下载'), '分卷'}),
         callback = function()
             UIManager:close(dialog)
-            Backend:HandleResponse(Backend:ChangeChapterCache({
+            Backend:HandleResponse(Backend:changeVolumeCache({
                 chapters_index = chapters_index,
                 cacheFilePath = volume.cacheFilePath,
                 book_cache_id = book_cache_id,
@@ -1464,7 +1464,7 @@ function LibraryView:syncVolumeProgressShow(book_cache_id, chapters_index)
         MessageBox:notice("分卷数据不存在")
         return
     end
-    local cache_chapter = Backend:getCacheChapterFilePath(volume)
+    local cache_chapter = Backend:getCacheVolumeFilePath(volume)
     volume.current_page = 0
     if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
         local cache_doc_settings = DocSettings:open(cache_chapter.cacheFilePath)
@@ -1472,7 +1472,7 @@ function LibraryView:syncVolumeProgressShow(book_cache_id, chapters_index)
     end
     Backend:closeDbManager()
     MessageBox:loading("同步中 ", function()
-        local response = Backend:saveBookProgress(volume)
+        local response = Backend:saveVolumeProgress(volume)
         if not (type(response) == 'table' and response.type == 'SUCCESS') then
             local message = (type(response) == 'table' and response.message) or
                 "进度上传失败，请稍后重试"
@@ -1496,7 +1496,7 @@ end
 
 function LibraryView:loadAndRenderChapter(chapter)
 
-    local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+    local cache_chapter = Backend:getCacheVolumeFilePath(chapter)
 
     if (H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)) then
         -- 缓存命中分支也要传递分卷阅读标记, 否则目录按钮会退回系列目录而非 EPUB 原生目录
@@ -1506,7 +1506,7 @@ function LibraryView:loadAndRenderChapter(chapter)
         -- Backend:closeDbManager()
         -- dismissable=true: 下载中可取消, 避免慢下载/挂起时卡住界面无法点击其他分卷
         return MessageBox:loading("正在下载正文", function()
-            return Backend:downloadChapter(chapter)
+            return Backend:downloadVolume(chapter)
         end, function(state, response)
             if state == false then
                 Backend:show_notice("已取消下载")
@@ -1538,7 +1538,7 @@ function LibraryView:ReaderUIEventCallback(chapter_call_event)
     self.chapter_call_event = chapter_call_event
     chapter.call_event = chapter_call_event
 
-    local nextChapter = Backend:findNextChapter({
+    local nextChapter = Backend:findNextVolume({
         chapters_index = chapter.chapters_index,
         call_event = chapter.call_event,
         book_cache_id = chapter.book_cache_id,
@@ -1728,7 +1728,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             MessageBox:notice("openLastReadChapter parameter error")
             return
         end
-        local last_read_chapter = Backend:getLastReadChapter(book_cache_id)
+        local last_read_chapter = Backend:getLastReadVolumeIndex(book_cache_id)
         if H.is_num(last_read_chapter) then
             local bookinfo = KomgaModel:new(book_cache_id):getSeries()
             if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
@@ -2411,7 +2411,7 @@ local function init_book_browser(parent)
                 end
             else
                 -- 漫画无落盘比例: 退回缓存文件 last_page
-                local cache_chapter = Backend:getCacheChapterFilePath(volume)
+                local cache_chapter = Backend:getCacheVolumeFilePath(volume)
                 if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
                     local last_page = DocSettings:open(cache_chapter.cacheFilePath):readSetting("last_page")
                     if H.is_num(last_page) and last_page > 0 and last_page <= pages then

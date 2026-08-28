@@ -42,7 +42,7 @@ function M:onClose()
     self.chapter.current_page = self.chapter_imglist_cur
     Backend:closeDbManager()
     if H.is_tbl(self.chapter) and H.is_num(self.chapter_imglist_cur) then
-        Backend:saveBookProgress(self.chapter)
+        Backend:saveVolumeProgress(self.chapter)
         -- 与 ReaderUI 关闭路径一致: 把流式阅读的整卷比例落盘到快捷方式 sidecar 并刷新文件夹显示
         local okLV, LibraryView = pcall(require, "Komga/LibraryView")
         local inst = okLV and LibraryView and LibraryView.instance
@@ -112,11 +112,11 @@ function M:get_image_bb(imgData)
 end
 
 function M:loadChatperInitImage(chapter)
-    local new_chapter_imglist = Backend:getChapterImgList(chapter)
+    local new_chapter_imglist = Backend:getVolumePageUrls(chapter)
     if H.is_tbl(new_chapter_imglist) and #new_chapter_imglist > 0 then
         self.chapter_imglist = new_chapter_imglist
         local start_id = 1
-        local response = Backend:getChapterInfo(self.chapter)
+        local response = Backend:getVolumeReadProgress(self.chapter)
         if H.is_tbl(response) and response.type == "SUCCESS" then
             -- print("BookId ...", response.body.id)
             -- for key, value in pairs(response) do
@@ -192,9 +192,9 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         -- 更新章节索引并获取新章节的图片列表
         -- self.chapter.chapters_index = current_chapter_index
         self.chapter.current_page = self.chapter_imglist_cur
-        Backend:saveBookProgress(self.chapter)
-        self.chapter =  Backend:getChapterInfoCache(self.bookinfo.cache_id,current_chapter_index)
-        local new_chapter_imglist = Backend:getChapterImgList(self.chapter)
+        Backend:saveVolumeProgress(self.chapter)
+        self.chapter =  Backend:getVolumeInfoCache(self.bookinfo.cache_id,current_chapter_index)
+        local new_chapter_imglist = Backend:getVolumePageUrls(self.chapter)
 
         if H.is_tbl(new_chapter_imglist) and #new_chapter_imglist > 0 then
             self.chapter_imglist = new_chapter_imglist
@@ -283,7 +283,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
         else
 
             self.chapter.chapters_index = current_chapter_index
-            local new_chapter_imglist = Backend:getChapterImgList(self.chapter)
+            local new_chapter_imglist = Backend:getVolumePageUrls(self.chapter)
 
             if H.is_tbl(new_chapter_imglist) and #new_chapter_imglist > 0 then
                 retData['new_chapter_imglist'] = new_chapter_imglist

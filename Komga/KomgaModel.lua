@@ -3,7 +3,7 @@ Komga/KomgaModel.lua — Komga 数据模型层
 
 本文件梳理清楚 Komga 的三级层级关系，并把数据访问统一封装成语义化 accessor，
 业务代码（LibraryView / book_browser / book_menu）不再散落直接调用
-Backend:getBookInfoCache / getBookChapterCache / getChapterInfoCache。
+Backend:getSeriesInfoCache / getVolumesCache / getVolumeInfoCache。
 
 ━━━ 名词对照（重要：插件内部命名与 Komga 官方名词不同）━━━
   Komga 官方        插件 DB/代码          主键                       说明
@@ -43,7 +43,7 @@ end
 -- 系列信息(books 表 → Komga Series)
 -- 返回 bookinfo: cache_id/name/author/totalChapterNum/durChapterIndex/coverUrl/intro ...
 function KomgaModel:getSeries()
-    return Backend:getBookInfoCache(self.book_cache_id)
+    return Backend:getSeriesInfoCache(self.book_cache_id)
 end
 
 -- 系列名（常用，快捷便利方法）
@@ -57,7 +57,7 @@ end
 -- 全部分卷列表(chapters 表 → Komga Book)，按 chapterIndex 排序
 -- 返回 chapter 数组: chapters_index/title/bookId/isRead/isDownLoaded/cacheFilePath/durChapterIndex
 function KomgaModel:getVolumes()
-    return Backend:getBookChapterCache(self.book_cache_id)
+    return Backend:getVolumesCache(self.book_cache_id)
 end
 
 -- 分卷总数（= 系列卷数）
@@ -100,7 +100,7 @@ function KomgaModel:getVolume(chapter_index)
     if not H.is_num(chapter_index) then
         return nil
     end
-    return Backend:getChapterInfoCache(self.book_cache_id, chapter_index)
+    return Backend:getVolumeInfoCache(self.book_cache_id, chapter_index)
 end
 
 -- ===== EpubChapter(书内章节) =====

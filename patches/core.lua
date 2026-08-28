@@ -394,7 +394,7 @@ M.install = function()
                 return original_openFileFromLink(self, link_url)
             end
             -- 未缓存: 按需下载后打开。
-            -- 构造 chapter 时就补全 name 等字段(而非下载后再补), 否则 pDownloadChapter
+            -- 构造 chapter 时就补全 name 等字段(而非下载后再补), 否则 pDownloadVolume
             -- 会用空书名命名缓存文件(-<bookId>-<index>.xhtml), 与正常命名不一致造成重复缓存
             local chapter = patch_fields({
                 book_cache_id = document_dir_name,
@@ -422,11 +422,11 @@ M.install = function()
             end
             if okMsg and MessageBox then
                 MessageBox:loading("正在下载章节", function()
-                    return Backend:downloadChapter(chapter)
+                    return Backend:downloadVolume(chapter)
                 end, download_cb, {dismissable = true})
             else
                 -- MessageBox 不可用时的兜底: 直接下载(结果仍走 download_cb)
-                local okdl, dlresp = pcall(Backend.downloadChapter, Backend, chapter)
+                local okdl, dlresp = pcall(Backend.downloadVolume, Backend, chapter)
                 if okdl then
                     download_cb(true, dlresp)
                 else

@@ -1,3 +1,18 @@
+--[[
+Komga/BookInfoDB.lua — SQLite 数据层(缓存 Komga 服务端数据)
+
+三张表与 Komga 三级层级一一对应(命名对照详见 KomgaModel 头注释):
+  Komga 官方      表             主键                      本文件返回的对象
+  --------------  -----------   -----------------------   -------------------------
+  Series          books         (bookShelfId, bookCacheId)  series(旧名 bookinfo)
+  Book(分卷)      chapters      (bookCacheId, chapterIndex) volume(旧名 chapter)
+  Chapter(书内章) epubchapters  (chapterId, chapterIndex)   epub_chapter(仅 EPUB)
+
+本文件是纯 SQL 层: 不做 Komga 业务逻辑, 只把表行映射成 Lua 对象供上层(Backend/KomgaModel)使用。
+表名与列名保持插件历史命名(chapters 表存的是 Komga Book 分卷; chapterIndex 列存分卷序号),
+函数名已统一为 Series/Volume 语义(如 getVolumeInfo 返回 chapters 表一行 = Komga Book 分卷)。
+]]
+
 local SQ3 = require("lua-ljsqlite3/init")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
@@ -520,40 +535,35 @@ function M:safe_rows(sql, params, fetch_size)
     end
 end
 
-function M:upsertBooks(bookShelfId, komga_data, server_address,isUpdate)
+function M:upsertSeries(bookShelfId, komga_data, server_address,isUpdate)
     if not H.is_str(bookShelfId) or not H.is_tbl(komga_data) then
-        dbg.log('BookInfoDB:upsertBooks Incorrect input parameters')
+        dbg.log('BookInfoDB:upsertSeries Incorrect input parameters')
         return false
     end
 
-    local bookData = {}
+    local seriesData = {}
 
-    for index, item in ipairs(komga_data) do
-
-        item.name = item.metadata.title
-        -- print(item.booksMetadata.authors[1].name)
+    for index, series in ipairs(komga_data) do
+        -- Komga Series: 书名在 metadata.title, 作者在 booksMetadata.authors(拼接)
+        series.name = series.metadata.title
         local authorname = ""
-        for index, author in ipairs(item.booksMetadata.authors) do
-            -- print(author.name)
-            if(index == 1) then
+        for index, author in ipairs(series.booksMetadata.authors) do
+            if index == 1 then
                 authorname = author.name
             else
                 authorname = author.name .. "/" .. authorname
             end
         end
+        series.author = authorname
 
-        item.author = authorname
-
-        if not H.is_str(item.name) or not H.is_str(item.id) or not H.is_str(item.url) then
+        if not H.is_str(series.name) or not H.is_str(series.id) or not H.is_str(series.url) then
             goto continue
         end
 
-        -- item.id = util.trim(item.id)
-        local show_book_title = ("%s[%s]"):format(item.name,item.author)
-        -- print(show_book_title)
-        item.cache_id = tostring(md5(show_book_title))
+        -- 本地主键: bookCacheId = md5(书名[作者])
+        series.cache_id = tostring(md5(("%s[%s]"):format(series.name, series.author)))
 
-        table.insert(bookData, item)
+        table.insert(seriesData, series)
         ::continue::
     end
 
@@ -588,14 +598,13 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
     ]]
 
     local batch_data = {}
-    for index, book in ipairs(bookData) do
-        local coverUrl = server_address .. "/api/v1/series/" .. book.id .. "/thumbnail"
-        -- print(coverUrl)
-        batch_data[index] = {bookShelfId, book.id, book.metadata.title, book.author, book.url, book.id or "",
-                             book.metadata.title or "", book.originOrder or 0, book.durChapterIndex or 0,
-                             book.durChapterPos or 0, book.durChapterTime or 0, book.durChapterTitle or "",
-                             book.wordCount or "", coverUrl, book.metadata.summary or "", book.booksCount or 0,
-                             book.type or 0, 1, book.kind or ''}
+    for index, series in ipairs(seriesData) do
+        local coverUrl = server_address .. "/api/v1/series/" .. series.id .. "/thumbnail"
+        batch_data[index] = {bookShelfId, series.id, series.metadata.title, series.author, series.url, series.id or "",
+            series.metadata.title or "", series.originOrder or 0, series.durChapterIndex or 0,
+            series.durChapterPos or 0, series.durChapterTime or 0, series.durChapterTitle or "",
+            series.wordCount or "", coverUrl, series.metadata.summary or "", series.booksCount or 0,
+            series.type or 0, 1, series.kind or ''}
     end
 
     if batch_data and #batch_data > 0 then
@@ -609,7 +618,7 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
 
 end
 
-function M:getAllBooks(bookShelfId)
+function M:getAllSeries(bookShelfId)
     if bookShelfId == nil then
         return {}
     end
@@ -618,13 +627,13 @@ function M:getAllBooks(bookShelfId)
     originOrder, durChapterIndex, durChapterPos FROM books WHERE isEnabled = 1 AND bookShelfId = ?;
     ]]
     local result = self:execute(sql_stmt, {bookShelfId})
-    local books = {}
+    local series = {}
     if result and #result > 0 then
 
         for i = 1, #result, 1 do
             local row = result[i]
 
-            books[i] = {
+            series[i] = {
                 book_self_id = bookShelfId,
 
                 cache_id = row[1],
@@ -641,10 +650,10 @@ function M:getAllBooks(bookShelfId)
         end
     end
 
-    return books
+    return series
 end
 
-function M:getAllBooksByUI(bookShelfId)
+function M:getAllSeriesByUI(bookShelfId)
     if bookShelfId == nil then
         return {}
     end
@@ -652,11 +661,11 @@ function M:getAllBooksByUI(bookShelfId)
     SELECT bookCacheId, name, author, originName FROM books WHERE isEnabled = 1 AND bookShelfId = ? ORDER BY sortOrder = 0 DESC, sortOrder DESC;
     ]]
     local result = self:execute(sql_stmt, {bookShelfId})
-    local books = {}
+    local series = {}
     if H.is_tbl(result) and #result > 0 then
         for i = 1, #result, 1 do
             local row = result[i]
-            books[i] = {
+            series[i] = {
                 cache_id = row[1],
                 name = row[2],
                 author = row[3],
@@ -665,10 +674,10 @@ function M:getAllBooksByUI(bookShelfId)
         end
     end
 
-    return books
+    return series
 end
 
-function M:getBookinfo(bookShelfId, bookCacheId)
+function M:getSeriesInfo(bookShelfId, bookCacheId)
     if bookShelfId == nil then
         return {}
     end
@@ -678,13 +687,13 @@ function M:getBookinfo(bookShelfId, bookCacheId)
     wordCount, intro, totalChapterNum, kind, sortOrder, cacheExt, coverUrl FROM books WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId =? ;
     ]]
     local result = self:execute(sql_stmt, {bookShelfId, bookCacheId})
-    local book = {}
+    local series = {}
     if result and #result > 0 then
 
         for i = 1, #result, 1 do
             local row = result[i]
 
-            book[i] = {
+            series[i] = {
                 book_self_id = bookShelfId,
                 cache_id = row[1],
                 name = row[2],
@@ -708,32 +717,18 @@ function M:getBookinfo(bookShelfId, bookCacheId)
         end
     end
 
-    if type(book[1]) ~= 'table' then
+    if type(series[1]) ~= 'table' then
         return {}
     end
 
-    return book[1]
+    return series[1]
 end
 
-function M:upsertChapters(bookCacheId, chapters)
-    -- print(H.is_tbl(chapters))
-    -- print(bookCacheId)
-    -- print(H.is_str(bookCacheId))
-
-    -- for index, chapter in ipairs(chapters) do
-    --     print(index)
-    --     print(chapter.url)
-    -- end
-    if not H.is_str(bookCacheId) or not H.is_tbl(chapters) then
-        dbg.log('BookInfoDB:upsertChapters Incorrect input parameters')
+function M:upsertVolumes(bookCacheId, volumes)
+    if not H.is_str(bookCacheId) or not H.is_tbl(volumes) then
+        dbg.log('BookInfoDB:upsertVolumes Incorrect input parameters')
         return false
     end
-
-    -- for index, chapter in ipairs(chapters) do
-    --     print(chapter.id)
-    --     print(chapter.url)
-    --     print(chapter.media.pagesCount)
-    -- end
 
     local sql_stmt = [[
         INSERT INTO chapters (bookCacheId, bookId ,chapterIndex, title, isVolume, pages, mediaType)
@@ -744,20 +739,20 @@ ON CONFLICT(bookCacheId, chapterIndex) DO UPDATE SET
     ]]
 
     local batch_data = {}
-    for index, chapter in ipairs(chapters) do
-        if chapter.number ~= nil then
-
-            if not H.is_str(chapter.title) or chapter.title == '' then
-                chapter.title = string.format('第%s章', chapter.index)
+    for index, volume in ipairs(volumes) do
+        if volume.number ~= nil then
+            -- Komga Book(分卷)标题: metadata.title 优先; 缺失时用卷号兜底。
+            -- (原代码把兜底写进 chapter.title 却插入 chapter.metadata.title, 兜底从未生效, 已修复)
+            local vol_title = volume.metadata.title
+            if not (H.is_str(vol_title) and vol_title ~= '') then
+                vol_title = string.format('第%s卷', volume.number)
             end
-
-            table.insert(batch_data, {bookCacheId, chapter.id ,chapter.number, chapter.metadata.title,true,chapter.media.pagesCount,chapter.media.mediaProfile})
-
+            table.insert(batch_data, {bookCacheId, volume.id, volume.number, vol_title, true,
+                volume.media.pagesCount, volume.media.mediaProfile})
         end
     end
 
     if #batch_data > 0 then
-
         self:batch_insert(sql_stmt, batch_data, 0)
     end
 
@@ -824,7 +819,7 @@ ON CONFLICT(chapterId, chapterIndex) DO UPDATE SET
     return true
 end
 
-function M:getAllChapters(bookCacheId)
+function M:getAllVolumes(bookCacheId)
     if bookCacheId == nil then
         return {}
     end
@@ -849,13 +844,13 @@ ORDER BY c.chapterIndex ASC;
     ]]
 
     local result = self:execute(sql_stmt, bookCacheId)
-    local chapters = {}
+    local volumes = {}
     if result and #result > 0 then
 
         for i = 1, #result, 1 do
             local row = result[i]
 
-            chapters[i] = {
+            volumes[i] = {
                 book_cache_id = bookCacheId,
                 chapters_index = tonumber(row[1]),
                 title = row[2],
@@ -873,10 +868,10 @@ ORDER BY c.chapterIndex ASC;
         end
     end
 
-    return chapters
+    return volumes
 end
 
-function M:getAllChaptersByUI(bookCacheId, is_desc_sort)
+function M:getAllVolumesByUI(bookCacheId, is_desc_sort)
     if bookCacheId == nil then
         return {}
     end
@@ -901,13 +896,13 @@ ORDER BY c.chapterIndex ]]
         sql_stmt = sql_stmt .. ' ASC;'
     end
     local result = self:execute(sql_stmt, bookCacheId)
-    local chapters = {}
+    local volumes = {}
     if result and #result > 0 then
 
         for i = 1, #result, 1 do
             local row = result[i]
             local chapterIndex = tonumber(row[1])
-            chapters[i] = {
+            volumes[i] = {
                 chapters_index = chapterIndex,
                 title = row[2],
                 isRead = row[3] == 1,
@@ -919,17 +914,17 @@ ORDER BY c.chapterIndex ]]
         end
     end
 
-    return chapters
+    return volumes
 end
 
-function M:getChapterCount(bookCacheId)
+function M:getVolumeCount(bookCacheId)
     local sql_stmt = "SELECT count(*) as total_num FROM chapters WHERE  bookCacheId = '%s';"
     sql_stmt = string.format(sql_stmt, bookCacheId)
     local totalChapterNum = self:getDB():rowexec(sql_stmt)
     return tonumber(totalChapterNum)
 end
 
-function M:getLastReadChapter(bookCacheId)
+function M:getLastReadVolumeIndex(bookCacheId)
     if not H.is_str(bookCacheId) then
         return 0
     end
@@ -945,25 +940,24 @@ LIMIT 1;
     return tonumber(lastUpdated) or 0
 end
 
-function M:getChapterLastUpdateTime(bookCacheId)
-    local sql_stmt = "SELECT lastUpdated FROM books WHERE isEnabled = 1 AND bookCacheId = '%s';"
-    sql_stmt = string.format(sql_stmt, bookCacheId)
+function M:getSeriesLastUpdateTime(bookCacheId)
+    local sql_stmt = string.format(
+        "SELECT lastUpdated FROM books WHERE isEnabled = 1 AND bookCacheId = '%s';", bookCacheId)
 
+    -- 查询失败(表未就绪等)用当前时间兜底。原代码在失败分支引用未 require 的
+    -- time 全局, pcall 兜底反而会报错; os.time() 为 Lua 标准库, 始终可用
     local ok, ret = pcall(function()
-        self:getDB():rowexec(sql_stmt)
+        return self:getDB():rowexec(sql_stmt)
     end)
-
-    local lastUpdated = ret
-
     if not ok then
-        lastUpdated = time.now()
+        ret = os.time()
     end
-    return tonumber(lastUpdated)
+    return tonumber(ret)
 end
 
-function M:getChapterInfo(bookCacheId, chapterIndex)
+function M:getVolumeInfo(bookCacheId, chapterIndex)
     if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
-        dbg.log('getChapterInfo Incorrect input parameters')
+        dbg.log('getVolumeInfo Incorrect input parameters')
         return {}
     end
 
@@ -991,7 +985,7 @@ WHERE
     ]]
 
     local result = self:execute(sql_stmt, {bookCacheId, chapterIndex})
-    local chapter = {}
+    local volume = {}
 
     if result and #result > 0 then
 
@@ -999,7 +993,7 @@ WHERE
             local row = result[i]
 
             local chapterIndex = tonumber(row[1])
-            chapter[i] = {
+            volume[i] = {
                 book_cache_id = bookCacheId,
                 chapters_index = chapterIndex,
                 title = row[2],
@@ -1020,11 +1014,11 @@ WHERE
         end
     end
 
-    if not H.is_tbl(chapter[1]) then
+    if not H.is_tbl(volume[1]) then
         return {}
     end
 
-    return chapter[1]
+    return volume[1]
 end
 
 function M:getEpubChapterCount(chapterId)
@@ -1154,16 +1148,16 @@ WHERE
     return chapter[1]
 end
 
-function M:getcompleteReadAheadChapters(current_chapter)
+function M:getReadAheadVolumeCount(current_volume)
 
-    if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('getcompleteReadAheadChapters:', current_chapter)
+    if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.chapters_index == nil then
+        dbg.log('getReadAheadVolumeCount:', current_volume)
         return 0
     end
 
-    local bookCacheId = current_chapter.book_cache_id
-    local current_chapters_index = current_chapter.chapters_index
-    local call_event_type = current_chapter.call_event
+    local bookCacheId = current_volume.book_cache_id
+    local current_volume_index = current_volume.chapters_index
+    local call_event_type = current_volume.call_event
     if call_event_type == nil then
         call_event_type = 'next'
     end
@@ -1196,7 +1190,7 @@ WHERE
   );
   ]]
 
-        sql_stmt = string.format(sql_stmt, current_chapters_index, bookCacheId, current_chapters_index, bookCacheId,
+        sql_stmt = string.format(sql_stmt, current_volume_index, bookCacheId, current_volume_index, bookCacheId,
             bookCacheId)
     else
 
@@ -1226,7 +1220,7 @@ WHERE
   );
 
     ]]
-        sql_stmt = string.format(sql_stmt, current_chapters_index, bookCacheId, current_chapters_index, bookCacheId,
+        sql_stmt = string.format(sql_stmt, current_volume_index, bookCacheId, current_volume_index, bookCacheId,
             bookCacheId)
     end
     local continuous_count = self:getDB():rowexec(sql_stmt)
@@ -1234,9 +1228,9 @@ WHERE
 
 end
 
-function M:findChapterNotDownLoadLittle(current_chapter, count)
-    if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('findChapterNotDownLoadLittle:', current_chapter)
+function M:findVolumesNotDownloaded(current_volume, count)
+    if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.chapters_index == nil then
+        dbg.log('findVolumesNotDownloaded:', current_volume)
         return {}
     end
 
@@ -1244,9 +1238,9 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
         count = 1
     end
 
-    local bookCacheId = current_chapter.book_cache_id
-    local current_chapters_index = current_chapter.chapters_index
-    local call_event_type = current_chapter.call_event
+    local bookCacheId = current_volume.book_cache_id
+    local current_volume_index = current_volume.chapters_index
+    local call_event_type = current_volume.call_event
     if call_event_type == nil then
         call_event_type = 'next'
     end
@@ -1273,14 +1267,14 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
 
     sql_stmt = table.concat({sql_stmt, suffix, count, ';'})
 
-    local result = self:execute(sql_stmt, {bookCacheId, current_chapters_index})
+    local result = self:execute(sql_stmt, {bookCacheId, current_volume_index})
 
-    local chapters = {}
+    local volumes = {}
     if result and #result > 0 then
         for i = 1, #result, 1 do
             local row = result[i]
             local chapterIndex = tonumber(row[1])
-            chapters[i] = {
+            volumes[i] = {
                 book_cache_id = bookCacheId,
                 title = row[2],
                 bookUrl = row[3],
@@ -1291,23 +1285,23 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
         end
     end
 
-    if not H.is_tbl(chapters[1]) then
+    if not H.is_tbl(volumes[1]) then
         return {}
     end
 
-    return chapters
+    return volumes
 
 end
 
-function M:findNextChapterInfo(current_chapter, is_downloaded)
-    if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('findNextChapterInfo:', current_chapter)
+function M:findNextVolumeInfo(current_volume, is_downloaded)
+    if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.chapters_index == nil then
+        dbg.log('findNextVolumeInfo:', current_volume)
         return {}
     end
 
-    local bookCacheId = current_chapter.book_cache_id
-    local current_chapters_index = current_chapter.chapters_index
-    local call_event_type = current_chapter.call_event
+    local bookCacheId = current_volume.book_cache_id
+    local current_volume_index = current_volume.chapters_index
+    local call_event_type = current_volume.call_event
     if call_event_type == nil then
         call_event_type = 'next'
     end
@@ -1345,9 +1339,9 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
 
     sql_stmt = sql_stmt .. suffix
 
-    local result = self:execute(sql_stmt, {bookCacheId, current_chapters_index})
+    local result = self:execute(sql_stmt, {bookCacheId, current_volume_index})
 
-    local chapter = {}
+    local volume = {}
 
     if result and #result > 0 then
 
@@ -1355,7 +1349,7 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
             local row = result[i]
 
             local chapterIndex = tonumber(row[1])
-            chapter[i] = {
+            volume[i] = {
                 book_cache_id = bookCacheId,
                 title = row[2],
                 isRead = row[3] == 1,
@@ -1373,11 +1367,11 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
         end
     end
 
-    if not H.is_tbl(chapter[1]) then
+    if not H.is_tbl(volume[1]) then
         return {}
     end
 
-    return chapter[1]
+    return volume[1]
 end
 
 function M:findNextEpubChapterInfo(current_chapter, is_downloaded)
@@ -1463,13 +1457,13 @@ function M:findNextEpubChapterInfo(current_chapter, is_downloaded)
 end
 
 
-function M:updateIsRead(chapter, chapter_page ,isRead, is_update_timestamp)
-    local bookCacheId = chapter.book_cache_id
-    local chapterIndex = chapter.chapters_index
+function M:updateVolumeIsRead(volume, chapter_page ,isRead, is_update_timestamp)
+    local bookCacheId = volume.book_cache_id
+    local chapterIndex = volume.chapters_index
     if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
         return
     end
-    chapter.isRead = isRead
+    volume.isRead = isRead
     local update_state = {}
     update_state.isRead = isRead
     if is_update_timestamp == true then
@@ -1477,10 +1471,10 @@ function M:updateIsRead(chapter, chapter_page ,isRead, is_update_timestamp)
             _set = "= strftime('%s', 'now')"
         }
     end
-    return self:dynamicUpdateChapters(chapter, update_state)
+    return self:dynamicUpdateVolume(volume, update_state)
 end
 
-function M:updateDownloadState(chapter, is_downloaded)
+function M:updateVolumeDownloadState(volume, is_downloaded)
     local content = ''
     if is_downloaded == true then
         content = 'downloaded'
@@ -1490,12 +1484,12 @@ function M:updateDownloadState(chapter, is_downloaded)
         content = is_downloaded
     end
 
-    return self:dynamicUpdateChapters(chapter, {
+    return self:dynamicUpdateVolume(volume, {
         content = content
     })
 end
 
-function M:updateCacheFilePath(chapter, cacheFilePath)
+function M:updateVolumeCacheFilePath(volume, cacheFilePath)
 
     local cacheFilePath_add = ''
     if type(cacheFilePath) == 'string' then
@@ -1504,12 +1498,12 @@ function M:updateCacheFilePath(chapter, cacheFilePath)
         cacheFilePath_add = self.nil_object()
     end
 
-    return self:dynamicUpdateChapters(chapter, {
+    return self:dynamicUpdateVolume(volume, {
         cacheFilePath = cacheFilePath_add
     })
 end
 
-function M:isDownloaded(bookCacheId, chapterIndex)
+function M:isVolumeDownloaded(bookCacheId, chapterIndex)
     local sql_stmt = [[
         SELECT 1 
         FROM chapters
@@ -1529,7 +1523,7 @@ function M:isDownloaded(bookCacheId, chapterIndex)
     return is_downed
 end
 
-function M:cleanDownloading()
+function M:cleanVolumeDownloading()
     local sql_stmt = [[
     UPDATE chapters 
 SET content = NULL 
@@ -1540,21 +1534,21 @@ WHERE
     return self:getDB():exec(sql_stmt)
 end
 
-function M:isDownloading(bookCacheId, chapterId, chapterIndex)
+function M:isVolumeDownloading(bookCacheId, bookId, chapterIndex)
     if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
-        dbg.log('Db isDownloading Error parameters')
+        dbg.log('Db isVolumeDownloading Error parameters')
         return true
     end
 
     local sql_stmt = [[
-        SELECT  1 
+        SELECT  1
         FROM chapters
         WHERE bookCacheId = '%s'
           AND bookId = '%s'
           AND chapterIndex = %d AND content = 'downloading_';
     ]]
 
-    sql_stmt = string.format(sql_stmt, bookCacheId, chapterId, chapterIndex)
+    sql_stmt = string.format(sql_stmt, bookCacheId, bookId, chapterIndex)
     local ok, ret = pcall(function()
         return self:getDB():rowexec(sql_stmt)
     end)
@@ -1566,9 +1560,9 @@ function M:isDownloading(bookCacheId, chapterId, chapterIndex)
     return is_downing
 end
 
-function M:clearBooks(bookShelfId)
+function M:clearAllSeries(bookShelfId)
     if not H.is_str(bookShelfId) then
-        dbg.log('DB clearBooks error')
+        dbg.log('DB clearAllSeries error')
         return false
     end
 
@@ -1580,10 +1574,10 @@ function M:clearBooks(bookShelfId)
     return true
 end
 
-function M:clearBook(bookShelfId, book_cache_id)
+function M:clearSeries(bookShelfId, book_cache_id)
 
     if not H.is_str(bookShelfId) or not H.is_str(book_cache_id) then
-        dbg.log('DB clearBook error')
+        dbg.log('DB clearSeries error')
         return false
     end
 
@@ -1610,19 +1604,19 @@ function M:clearBook(bookShelfId, book_cache_id)
     return true
 end
 
-function M:dynamicUpdateChapters(chapter, updateData)
-    if not H.is_tbl(updateData) or not H.is_tbl(chapter) then
-        dbg.log('dynamicUpdateChapters Required parameter error')
+function M:dynamicUpdateVolume(volume, updateData)
+    if not H.is_tbl(updateData) or not H.is_tbl(volume) then
+        dbg.log('dynamicUpdateVolume Required parameter error')
         return
     end
 
-    local bookCacheId = chapter.book_cache_id
-    local chapterIndex = chapter.chapters_index
-    -- local bookId = chapter.bookId
+    local bookCacheId = volume.book_cache_id
+    local chapterIndex = volume.chapters_index
+    -- local bookId = volume.bookId
 
     if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
-        dbg.log('dynamicUpdateChapters Required parameter error')
-        error('dynamicUpdateChapters Required parameter error')
+        dbg.log('dynamicUpdateVolume Required parameter error')
+        error('dynamicUpdateVolume Required parameter error')
         return
     end
 
@@ -1633,18 +1627,18 @@ function M:dynamicUpdateChapters(chapter, updateData)
 
 end
 
-function M:dynamicUpdateBooks(book, updateData)
-    if not H.is_tbl(updateData) or not H.is_tbl(book) then
-        dbg.log('dynamicUpdateBooks An error occurred when calling the parameter')
+function M:dynamicUpdateSeries(series, updateData)
+    if not H.is_tbl(updateData) or not H.is_tbl(series) then
+        dbg.log('dynamicUpdateSeries An error occurred when calling the parameter')
         return
     end
 
-    local bookCacheId = book.book_cache_id
-    local bookShelfId = book.bookShelfId
+    local bookCacheId = series.book_cache_id
+    local bookShelfId = series.bookShelfId
 
     if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
-        dbg.log('dynamicUpdateBooks Error parameters')
-        error('dynamicUpdateBooks Error parameters')
+        dbg.log('dynamicUpdateSeries Error parameters')
+        error('dynamicUpdateSeries Error parameters')
         return
     end
 
@@ -1709,7 +1703,7 @@ function M:dynamicUpdate(tableName, updateData, conditions)
     return self:execute(sql_stmt, params)
 end
 
-function M:getDownloadProgress(bookCacheId, target_indexes)
+function M:getVolumesDownloadProgress(bookCacheId, target_indexes)
 
     local sql_template =
         "SELECT COUNT(*) AS total_count FROM chapters WHERE content = 'downloaded' AND chapterIndex IN (%s) AND bookCacheId='%s';"
@@ -1730,9 +1724,9 @@ function M:getDownloadProgress(bookCacheId, target_indexes)
     return ret
 end
 
-function M:setBooksTopStatus(bookShelfId, book_cache_id, isPinnedManually, isPinnedByTime)
+function M:setSeriesTopStatus(bookShelfId, book_cache_id, isPinnedManually, isPinnedByTime)
     if not (H.is_str(bookShelfId) and H.is_str(book_cache_id)) then
-        dbg.log('DB setBooksTopStatus error')
+        dbg.log('DB setSeriesTopStatus error')
         return false
     end
 
