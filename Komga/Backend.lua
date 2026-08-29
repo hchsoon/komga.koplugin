@@ -31,6 +31,7 @@ local time = require("ui/time")
 
 local UIManager = require("ui/uimanager")
 local H = require("Komga/Helper")
+local Config = require("Komga/Config")
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -242,9 +243,7 @@ function M:loadSpore()
     local Spore = require("Spore")
     local komgaSpec = require("Komga/KomgaSpec")
     self.apiClient = Spore.new_from_lua(komgaSpec, {
-        base_url = self.settings_data.data.server_address .. '/'
-        -- base_url = 'http://192.168.1.18:10102/'
-        -- base_url = 'http://eu.httpbin.org/'
+        base_url = (self.settings_data.data.server_address or Config.DEFAULT_SERVER_ADDRESS) .. '/'
     })
 
     package.loaded["Spore.Middleware.FormatEpubJSON"] = {}
@@ -295,7 +294,7 @@ function M:loadSpore()
     require("Spore.Middleware.ForceJSON").call = function(args, req)
         -- req.env.HTTP_USER_AGENT = ""
         req.headers = req.headers or {}
-        -- req.headers["X-API-Key"] = "451e132996b44937b1576242447d9cd2"
+        -- req.headers["X-API-Key"] = self:getApiKey()
         req.headers["user-agent"] =
             "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
         return function(res)
@@ -308,7 +307,8 @@ function M:loadSpore()
     require("Spore.Middleware.KomgaAuth").call = function(args, req)
         local spore = req.env.spore
 
-        req.headers["X-API-Key"] = "451e132996b44937b1576242447d9cd2"
+        -- X-API-Key 来自设置(api_key), 未设置时回落到 Config 预设值
+        req.headers["X-API-Key"] = self:getApiKey()
         req.headers["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
 
         return function(res)
@@ -336,13 +336,19 @@ function M:initialize()
     if self.settings_data and not self.settings_data.data['server_address'] then
         self.settings_data.data = {
             chapter_sorting_mode = "chapter_ascending",
-            server_address = 'http://192.168.1.18:10102',
+            server_address = Config.DEFAULT_SERVER_ADDRESS,
             server_address_md5 = 'f528764d624db129b32c21fbca0cb8d6',
-            setting_url = 'http://192.168.1.18:10102',
+            setting_url = Config.DEFAULT_SERVER_ADDRESS,
             servers_history = {},
+            api_key = Config.DEFAULT_API_KEY,
             stream_image_view = nil,
             disable_browser = nil
         }
+        self.settings_data:flush()
+    end
+    -- 兼容旧设置文件: 没有 api_key 键时补默认值
+    if not H.is_str(self.settings_data.data.api_key) then
+        self.settings_data.data.api_key = Config.DEFAULT_API_KEY
         self.settings_data:flush()
     end
 
@@ -1706,7 +1712,7 @@ function M:pDownloadVolume(volume, message_dialog, is_recursive)
                             maxtime = 120,
                             headers = {
                                 ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
-                                ["X-API-Key"] = "451e132996b44937b1576242447d9cd2"
+                                ["X-API-Key"] = self:getApiKey()
                             }
                     })
 
@@ -1875,7 +1881,7 @@ function M:pDownload_Image(img_src, timeout)
                     maxtime = 60,
                     headers = {
                         ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
-                        ["X-API-Key"] = "451e132996b44937b1576242447d9cd2"
+                        ["X-API-Key"] = self:getApiKey()
                     }
                 })
     if status and H.is_tbl(err) and err['data'] then
@@ -2400,7 +2406,7 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
                         maxtime = 120,
                         headers = {
                             ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
-                            ["X-API-Key"] = "451e132996b44937b1576242447d9cd2"
+                            ["X-API-Key"] = self:getApiKey()
                         }
                 })
     if status and err and err['data'] then
@@ -2636,6 +2642,28 @@ end
 
 function M:getSettings()
     return self.settings_data.data
+end
+
+-- 当前生效的 X-API-Key: 设置项 api_key, 未设置/为空时回落代码预设值
+function M:getApiKey()
+    local key = self.settings_data and self.settings_data.data and self.settings_data.data.api_key
+    if H.is_str(key) and key ~= '' then
+        return key
+    end
+    return Config.DEFAULT_API_KEY
+end
+
+-- 设置 X-API-Key(立即持久化生效)
+function M:setApiKey(new_api_key)
+    if not H.is_str(new_api_key) or new_api_key == '' then
+        return wrap_response(nil, 'API Key 不能为空')
+    end
+    if not self.settings_data or not self.settings_data.data then
+        return wrap_response(nil, '设置未初始化')
+    end
+    self.settings_data.data.api_key = new_api_key
+    self.settings_data:flush()
+    return wrap_response(self.settings_data.data)
 end
 
 function M:saveSettings(settings)

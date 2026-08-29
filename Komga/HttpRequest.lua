@@ -1,4 +1,7 @@
 local logger = require("logger")
+local H = require("Komga/Helper")
+local Config = require("Komga/Config")
+local LuaSettings = require("luasettings")
 
 --- Common timeout values
 -- Large content 块超时 总超时
@@ -11,10 +14,28 @@ local FILE_TOTAL_TIMEOUT = 60
 local DEFAULT_BLOCK_TIMEOUT = 60
 local DEFAULT_TOTAL_TIMEOUT = -1   
 
-local default_headers = {
-    ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
-    ["X-API-Key"] = "451e132996b44937b1576242447d9cd2"
-}
+local USER_AGENT = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+
+-- 从设置文件读取当前 X-API-Key(与 Backend.getApiKey 同源; 此处直接读文件避免循环依赖),
+-- 未设置/为空时回落 Config 预设值
+local function get_api_key()
+    local ok, settings = pcall(function()
+        return LuaSettings:open(H.getUserSettingsPath())
+    end)
+    local key = ok and settings and settings.data and settings.data.api_key
+    if type(key) == "string" and key ~= "" then
+        return key
+    end
+    return Config.DEFAULT_API_KEY
+end
+
+-- 默认请求头: 调用方未显式传 headers 时使用, X-API-Key 取当前配置
+local function get_default_headers()
+    return {
+        ["user-agent"] = USER_AGENT,
+        ["X-API-Key"] = get_api_key()
+    }
+end
 
 local function get_extension_from_mimetype(content_type)
     local extensions = {
@@ -80,7 +101,7 @@ local function pGetUrlContent(options, is_create)
     local request = {
         url = url,
         method = options.method or "GET",
-        headers = options.headers or default_headers,
+        headers = options.headers or get_default_headers(),
         sink = not file_fp and (maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink)) or
             (maxtime and socketutil.file_sink(file_fp) or ltn12.sink.file(file_fp)),
         source = options.source,

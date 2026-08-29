@@ -20,6 +20,7 @@ local Backend = require("Komga/Backend")
 local KomgaModel = require("Komga/KomgaModel")
 local MessageBox = require("Komga/MessageBox")
 local H = require("Komga/Helper")
+local Config = require("Komga/Config")
 
 local LibraryView = {
     disk_available = nil,
@@ -220,6 +221,44 @@ function LibraryView:openInstalledReadSource()
     end
 end
 
+-- 配置 X-API-Key(请求头), 默认值取自 Config.DEFAULT_API_KEY
+function LibraryView:openApiKeySetting()
+    local setting_data = Backend:getSettings()
+    local current_key = H.is_str(setting_data.api_key) and setting_data.api_key or Config.DEFAULT_API_KEY
+    local description = [[
+X-API-Key 请求头, 用于 Komga 服务器鉴权。
+未设置或留空时使用代码内置的默认密钥。
+修改后立即持久化生效。]]
+    local save_callback = function(input_text)
+        if H.is_str(input_text) then
+            local new_key = util.trim(input_text)
+            if new_key == '' then
+                MessageBox:notice('输入为空')
+                return false
+            end
+            return Backend:HandleResponse(Backend:setApiKey(new_key), function(data)
+                MessageBox:notice('API Key 已更新')
+                return true
+            end, function(err_msg)
+                MessageBox:notice('设置失败：' .. tostring(err_msg))
+                return false
+            end)
+        end
+        MessageBox:notice('输入为空')
+        return false
+    end
+    MessageBox:input(nil, nil, {
+        title = "设置 Komga API Key (X-API-Key)",
+        input = current_key,
+        description = description,
+        use_available_height = true,
+        fullscreen = true,
+        condensed = true,
+        save_callback = save_callback,
+        allow_newline = false
+    })
+end
+
 function LibraryView:openBrowserMenu(file)
     self:getInstance()
     self:getBrowserWidget()
@@ -312,6 +351,12 @@ function LibraryView:openMenu()
         callback = function()
             UIManager:close(dialog)
             self:openInstalledReadSource()
+        end
+    }}, {{
+        text = Icons.FA_PLUG .. " Komga API Key",
+        callback = function()
+            UIManager:close(dialog)
+            self:openApiKeySetting()
         end
     }}, {{
         text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,

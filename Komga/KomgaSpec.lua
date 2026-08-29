@@ -1,9 +1,13 @@
+local Config = require("Komga/Config")
+
 return {
-    base_url = "http://192.168.1.18:10102",
+    -- 运行时实际 base_url 由 Backend:loadSpore 用设置项 server_address 覆盖, 此处仅为 Spore 预设默认
+    base_url = Config.DEFAULT_SERVER_ADDRESS,
     name = "KomgaAPI",
     version = "0.2",
     headers = {
-        ["X-API-Key"] = "451e132996b44937b1576242447d9cd2"
+        -- 实际请求头由 Backend KomgaAuth 中间件用设置项 api_key 覆盖
+        ["X-API-Key"] = Config.DEFAULT_API_KEY
     },
     methods = {
         komgaLogin = {
