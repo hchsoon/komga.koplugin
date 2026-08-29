@@ -37,7 +37,7 @@ local LibraryView = {
     progress_sync_busy = nil,   -- 进度上传锁
     progress_sync_pending = nil,-- 待上传的合并进度（仅保留最新一条）
     resume_goto_frac = nil,     -- 自动续读目标(漫画:整卷比例 0..1; EPUB:目标章内比例 0..1), 打开后跳转
-    _last_epub_pos = nil,       -- 最近一次 EPUB 阅读位置 {bookId, chapters_index=内部章节, frac=章内比例}(本地断点)
+    _last_epub_pos = nil,       -- 最近一次 EPUB 阅读位置 {bookId, number=内部章节, frac=章内比例}(本地断点)
     volume_lnk_path = nil,      -- 当前卷快捷方式路径(openVolumeShortcut 记录; 上传/续读时把服务器进度落盘到其 sidecar)
     _last_epub_server_frac = nil, -- 最近一次服务器空间整卷比例 {bookId, frac 0..1}(供快捷方式显示正确百分比)
     -- menu mode
@@ -530,7 +530,7 @@ function LibraryView:syncChaptersInProcess(book_cache_id, bookinfo)
     })
     local ok, err_or_res = pcall(function()
         return Backend:refreshVolumesCache({
-            bookUrl = bookinfo.bookUrl,
+            url = bookinfo.url,
             cache_id = book_cache_id,
             name = bookinfo.name,
             author = bookinfo.author,
@@ -664,10 +664,10 @@ function LibraryView:epubChapterHrefMap(bookId)
     local all = Backend.dbManager and Backend.dbManager:getAllEpubChapterUrls(bookId)
     if H.is_tbl(all) then
         for _, item in ipairs(all) do
-            local idx = item and item.chapters_index
-            local url = item and item.chapterUrl
+            local idx = item and item.number
+            local url = item and item.url
             if H.is_num(idx) and H.is_str(url) then
-                -- chapterUrl 形如 .../resource/OEBPS/Text/Section000.xhtml, 取其相对路径
+                -- url 形如 .../resource/OEBPS/Text/Section000.xhtml, 取其相对路径
                 local rel = url:match("resource/([^?#]+)") or url
                 rel = rel:gsub("^%./", "")
                 local key = (rel:match("([^/]+)$") or rel):lower()
@@ -682,12 +682,12 @@ end
 -- EPUB: 内部章节 + 章内比例 → 服务器整卷比例(0..1)
 -- 用 positions 表中同一资源(href)的条目插值, 得到该位置的服务器总进度, 用于构造 locator。
 -- 与上传方向一致: 服务器按 locator 重算的 totalProgression ≈ 该比例, 续读再按 href 反查回同一章节。
-function LibraryView:epubChapterFracToServerFrac(bookId, chapters_index, frac)
-    if not (H.is_str(bookId) and H.is_num(chapters_index) and H.is_num(frac)) then
+function LibraryView:epubChapterFracToServerFrac(bookId, number, frac)
+    if not (H.is_str(bookId) and H.is_num(number) and H.is_num(frac)) then
         return nil
     end
     local map, _ = self:epubChapterHrefMap(bookId)
-    local href = map[chapters_index]
+    local href = map[number]
     if not href then
         return nil
     end
@@ -728,7 +728,7 @@ function LibraryView:getVolumePages(book_cache_id, bookId)
     return KomgaModel:new(book_cache_id):getVolumePages(bookId)
 end
 
--- 按 bookId 反查卷号: EPUB 翻章后 chapters_index 是内部章节 index, 上传/刷新必须用卷号。
+-- 按 bookId 反查卷号: EPUB 翻章后 number 是内部章节 index, 上传/刷新必须用卷号。
 -- 数据逻辑在 KomgaModel:getVolumeIndexByBookId。
 function LibraryView:getVolumeIndexByBookId(book_cache_id, bookId)
     if not (H.is_str(book_cache_id) and H.is_str(bookId)) then
@@ -740,22 +740,22 @@ end
 -- EPUB: 扫描卷内全部内部章节的已缓存文件, 返回 (order, data)
 -- order = 按章节序的 idx 数组; data[idx] = {cp=KOReader页数, frac=已读比例}
 -- 每章独立缓存为 <safe书名>-<bookId>-<内部章节idx>.xhtml, 侧车记录该章页数与进度。
--- current_override={chapters_index=当前章, frac=实时比例} 时, 当前章用实时比例, 其余读侧车。
+-- current_override={number=当前章, frac=实时比例} 时, 当前章用实时比例, 其余读侧车。
 function LibraryView:scanEpubVolumeChapters(book_cache_id, bookId, book_name, current_override)
     local order, data = {}, {}
     if not (H.is_str(book_cache_id) and H.is_str(bookId)) then
         return order, data
     end
-    local cur_idx = current_override and current_override.chapters_index
+    local cur_idx = current_override and current_override.number
     local cur_frac = current_override and current_override.frac
     local all = Backend.dbManager and Backend.dbManager:getAllEpubChapterUrls(bookId)
     if H.is_tbl(all) then
         for _, item in ipairs(all) do
-            local idx = item and item.chapters_index
+            local idx = item and item.number
             if H.is_num(idx) then
                 local cp = 1
                 local frac = 0
-                local path = H.getChapterCacheFilePath(book_cache_id, bookId, idx, book_name or "") .. ".xhtml"
+                local path = H.getVolumeCacheFilePath(book_cache_id, bookId, idx, book_name or "") .. ".xhtml"
                 if util.fileExists(path) then
                     local ds = DocSettings:open(path)
                     if ds and ds.readSetting then
@@ -804,7 +804,7 @@ function LibraryView:calcVolumeGlobalPage(book_cache_id, chapter, pages)
         p = pages
     end
     if p > 0 then
-        return p, chapter.chapters_index
+        return p, chapter.number
     end
     return 0, nil
 end
@@ -823,16 +823,16 @@ function LibraryView:uploadCurrentProgress()
     if not (H.is_str(file) and file:find('/cache/komga.cache/', 1, true)) then
         return
     end
-    -- 翻章后内部章节可能丢失 name/bookUrl, 从卷数据兜底补回(saveVolumeProgress 强依赖这两项)
-    if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
-        local vol_idx = self.volume_reading_index or chapter.chapters_index
+    -- 翻章后内部章节可能丢失 name/url, 从卷数据兜底补回(saveVolumeProgress 强依赖这两项)
+    if not (H.is_str(chapter.name) and H.is_str(chapter.url)) then
+        local vol_idx = self.volume_reading_index or chapter.number
         local vol = KomgaModel:new(chapter.book_cache_id):getVolume(vol_idx) -- Komga Book(分卷)
         if H.is_tbl(vol) then
             chapter.name = chapter.name or vol.name
-            chapter.bookUrl = chapter.bookUrl or vol.bookUrl
+            chapter.url = chapter.url or vol.url
         end
     end
-    if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
+    if not (H.is_str(chapter.name) and H.is_str(chapter.url)) then
         return
     end
     local doc_settings = DocSettings:open(file)
@@ -887,7 +887,7 @@ function LibraryView:uploadCurrentProgress()
             }
         else
             local read_pages = self:calcVolumeLocalRead(chapter.book_cache_id, chapter.bookId, chapter.name,
-                { chapters_index = cur_idx, frac = frac })
+                { number = cur_idx, frac = frac })
             loc = self:epubFractionToLocator(chapter.bookId, math.min(math.max(read_pages / pages, 0), 1))
         end
         if H.is_tbl(loc) then
@@ -900,7 +900,7 @@ function LibraryView:uploadCurrentProgress()
         end
         -- 记录本地断点: 关闭/翻章后按内部章节 + 章内比例直接定位(与上传同源)
         if cur_idx then
-            self._last_epub_pos = { bookId = chapter.bookId, chapters_index = cur_idx, frac = frac }
+            self._last_epub_pos = { bookId = chapter.bookId, number = cur_idx, frac = frac }
         end
         current_page = math.max(math.min(math.ceil(frac * pages), pages), 1)
         -- EPUB 进度必须走 /progression: 服务器对 EPUB 拒绝 page 格式 read-progress(400 "not Divina compatible")
@@ -935,18 +935,18 @@ function LibraryView:uploadCurrentProgress()
         self:persistKomgaProgressToShortcut()
     end
     -- 用卷号而非内部 index, 否则 saveVolumeProgress 内 toggleVolumeRead 会把错误的卷标已读。
-    -- 优先按 bookId 反查(翻章后 chapters_index 是内部 index 且 volume_reading_index 可能未设置)
+    -- 优先按 bookId 反查(翻章后 number 是内部 index 且 volume_reading_index 可能未设置)
     local vol_index = self:getVolumeIndexByBookId(chapter.book_cache_id, chapter.bookId)
     if not (H.is_num(vol_index) and vol_index > 0) then
-        vol_index = self.volume_reading_index or chapter.chapters_index
+        vol_index = self.volume_reading_index or chapter.number
     end
     self:scheduleProgressUpload({
         name = chapter.name,
-        bookUrl = chapter.bookUrl,
+        url = chapter.url,
         bookId = chapter.bookId,
         pages = pages,
         current_page = current_page,
-        chapters_index = vol_index,
+        number = vol_index,
         book_cache_id = chapter.book_cache_id,
         epub = is_epub,
         frac = epub_frac,
@@ -992,8 +992,8 @@ function LibraryView:resumeAndOpenVolume(volume)
     local pages = volume.pages
     local is_epub = volume.mediaType == "EPUB"
     local server_frac, server_completed
-    local server_target -- EPUB: {chapters_index=内部章节, frac=章内比例}
-    local local_target  -- EPUB: {chapters_index=内部章节, frac=章内比例} 本地断点
+    local server_target -- EPUB: {number=内部章节, frac=章内比例}
+    local local_target  -- EPUB: {number=内部章节, frac=章内比例} 本地断点
     if is_epub then
         -- EPUB: 服务器 locator 自带 href + 章内 progression, 直接映射内部章节定位;
         -- 不依赖 totalProgression 换算页码(各端分页规则不同, 换算会跳错章节)
@@ -1017,12 +1017,12 @@ function LibraryView:resumeAndOpenVolume(volume)
             self._last_epub_server_frac = { bookId = volume.bookId, frac = server_frac }
             self:persistKomgaProgressToShortcut()
         end
-        -- 服务器 locator.href → 内部章节 + 章内比例(href 与 chapterUrl 同源, 用 basename 反查)
+        -- 服务器 locator.href → 内部章节 + 章内比例(href 与 url 同源, 用 basename 反查)
         if H.is_str(href) and H.is_num(prog_in_ch) then
             local _, rev = self:epubChapterHrefMap(volume.bookId)
             local s_idx = rev[(href:match("([^/]+)$") or href):lower()]
             if H.is_num(s_idx) then
-                server_target = { chapters_index = s_idx, frac = math.min(math.max(prog_in_ch, 0), 1) }
+                server_target = { number = s_idx, frac = math.min(math.max(prog_in_ch, 0), 1) }
             end
         end
         if not server_target and not H.is_num(tp) then
@@ -1037,8 +1037,8 @@ function LibraryView:resumeAndOpenVolume(volume)
         -- 本地断点: 关闭时记录的内部章节 + 章内比例(与上传同源)
         local last = self._last_epub_pos
         if H.is_tbl(last) and last.bookId == volume.bookId
-            and H.is_num(last.chapters_index) and H.is_num(last.frac) then
-            local_target = { chapters_index = last.chapters_index, frac = last.frac }
+            and H.is_num(last.number) and H.is_num(last.frac) then
+            local_target = { number = last.number, frac = last.frac }
         end
     else
         local resp = Backend:getVolumeReadProgress(volume)
@@ -1062,14 +1062,14 @@ function LibraryView:resumeAndOpenVolume(volume)
                 end
             end
             if last_idx then
-                target = { chapters_index = last_idx, frac = 1 }
+                target = { number = last_idx, frac = 1 }
                 self.chapter_call_event = "next"
             end
         elseif server_target then
             if local_target then
-                if server_target.chapters_index > local_target.chapters_index then
+                if server_target.number > local_target.number then
                     target = server_target
-                elseif server_target.chapters_index < local_target.chapters_index then
+                elseif server_target.number < local_target.number then
                     target = local_target
                 else
                     target = (server_target.frac >= local_target.frac) and server_target or local_target
@@ -1082,8 +1082,8 @@ function LibraryView:resumeAndOpenVolume(volume)
             target = local_target
             self.chapter_call_event = nil
         end
-        if target and H.is_num(target.chapters_index) then
-            volume.chapters_index = target.chapters_index
+        if target and H.is_num(target.number) then
+            volume.number = target.number
             if H.is_num(target.frac) and target.frac > 0 and target.frac < 1 then
                 self.resume_goto_frac = target.frac
             else
@@ -1124,15 +1124,15 @@ function LibraryView:resumeAndOpenVolume(volume)
 end
 
 -- 分卷快捷方式点击: 镜像 ChapterListing:onMenuChoice 的流式/缓存分流
-function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
+function LibraryView:openVolumeShortcut(book_cache_id, number, lnk_path)
     self:getInstance()
     self:getBrowserWidget()
-    if not (H.is_str(book_cache_id) and H.is_num(chapters_index)) then
+    if not (H.is_str(book_cache_id) and H.is_num(number)) then
         MessageBox:notice("openVolumeShortcut parameter error")
         return
     end
-    local volume = KomgaModel:new(book_cache_id):getVolume(chapters_index) -- Komga Book(分卷)
-    if not (H.is_tbl(volume) and H.is_num(volume.chapters_index)) then
+    local volume = KomgaModel:new(book_cache_id):getVolume(number) -- Komga Book(分卷)
+    if not (H.is_tbl(volume) and H.is_num(volume.number)) then
         MessageBox:notice("分卷数据不存在,请返回书架刷新同步")
         return
     end
@@ -1143,7 +1143,7 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
     -- 分卷快捷方式进入的 EPUB 阅读: 标记为分卷阅读, 目录按钮显示 EPUB 原生目录而非系列目录
     if volume.mediaType == "EPUB" then
         volume.volume_read = true
-        self.volume_reading_index = chapters_index
+        self.volume_reading_index = number
         self.volume_pages = volume.pages
         self.volume_bookId = volume.bookId
         -- 自动续读: 服务器进度更新时跳到服务器位置(章节级近似); 离线或设置关闭时不查
@@ -1154,7 +1154,7 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
         -- 漫画(单文件整卷): 与 EPUB 一致, 打开前读取服务器进度并落盘到快捷方式 sidecar, 供文件夹显示正确百分比;
         -- 缓存漫画: 服务器进度领先时跳到服务器位置(复用 resumeAndOpenVolume 的漫画分支);
         -- 流式漫画: 只落盘显示用进度, 阅读位置由 StreamImageView 按 readProgress 处理
-        self.volume_reading_index = chapters_index
+        self.volume_reading_index = number
         self.volume_pages = volume.pages
         self.volume_bookId = volume.bookId
         local is_stream = Backend:getSettings().stream_image_view == true
@@ -1168,7 +1168,7 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
     end
     -- 刷新该卷快捷方式的进度显示
     if H.is_str(lnk_path) and util.fileExists(lnk_path) then
-        self:refreshVolumeShortcutProgress(book_cache_id, chapters_index, lnk_path)
+        self:refreshVolumeShortcutProgress(book_cache_id, number, lnk_path)
     end
 
     if Backend:getSettings().stream_image_view == true and volume.mediaType ~= "EPUB" then
@@ -1201,9 +1201,9 @@ function LibraryView:openVolumeShortcut(book_cache_id, chapters_index, lnk_path)
 end
 
 -- 读完返回文件浏览器时, 刷新当前分卷快捷方式的进度显示
-function LibraryView:refreshReadVolumeShortcut(book_cache_id, chapters_index)
+function LibraryView:refreshReadVolumeShortcut(book_cache_id, number)
     self:getBrowserWidget()
-    if not (H.is_str(book_cache_id) and H.is_num(chapters_index)) then
+    if not (H.is_str(book_cache_id) and H.is_num(number)) then
         return
     end
     local file_manager = FileManager.instance
@@ -1219,7 +1219,7 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, chapters_index)
         if util.fileExists(fullpath) and name:find("\u{200B}.html", 1, true) then
             local customedata = self.book_browser:getCustomMateData(fullpath)
             if H.is_tbl(customedata) and customedata.type == 'volume' and
-                customedata.chapters_index == chapters_index then
+                customedata.number == number then
                 local doc_settings = DocSettings:open(fullpath)
                 if doc_settings:readSetting("book_cache_id") == book_cache_id then
                     found = fullpath
@@ -1231,7 +1231,7 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, chapters_index)
         self.volume_lnk_path = found
         -- 关闭返回时把服务器空间进度写入该快捷方式(覆盖目录打开等无快捷方式路径的场景)
         self:persistKomgaProgressToShortcut()
-        self.book_browser:refreshVolumeMetadata(nil, found, book_cache_id, chapters_index)
+        self.book_browser:refreshVolumeMetadata(nil, found, book_cache_id, number)
     end
 end
 
@@ -1297,19 +1297,19 @@ function LibraryView:persistStreamComicProgress(chapter, page)
         self._last_epub_server_frac = { bookId = chapter.bookId, frac = frac }
         self:persistKomgaProgressToShortcut()
     end
-    if H.is_num(chapter.chapters_index) then
-        self:refreshReadVolumeShortcut(chapter.book_cache_id, chapter.chapters_index)
+    if H.is_num(chapter.number) then
+        self:refreshReadVolumeShortcut(chapter.book_cache_id, chapter.number)
     end
 end
 
 -- 轻量刷新分卷快捷方式进度（doc_props）
-function LibraryView:refreshVolumeShortcutProgress(book_cache_id, chapters_index, lnk_path)
+function LibraryView:refreshVolumeShortcutProgress(book_cache_id, number, lnk_path)
     self:getBrowserWidget()
-    if not (H.is_str(book_cache_id) and H.is_num(chapters_index) and H.is_str(lnk_path) and
+    if not (H.is_str(book_cache_id) and H.is_num(number) and H.is_str(lnk_path) and
         util.fileExists(lnk_path)) then
         return
     end
-    self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, chapters_index)
+    self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, number)
 end
 
 -- 阅读记录(History): 把当前正在阅读的分卷映射到其分卷快捷方式(.html)。
@@ -1325,12 +1325,12 @@ function LibraryView:ensureVolumeShortcutForReading()
         return nil
     end
     local book_cache_id = chapter.book_cache_id
-    -- 分卷索引: 漫画 chapters_index 即卷号; EPUB 的 displayed_chapter.chapters_index 可能是内部章节 index, 用卷号反查
-    local vol_index = chapter.chapters_index
+    -- 分卷索引: 漫画 number 即卷号; EPUB 的 displayed_chapter.number 可能是内部章节 index, 用卷号反查
+    local vol_index = chapter.number
     if chapter.mediaType == "EPUB" then
         vol_index = self.volume_reading_index
             or self:getVolumeIndexByBookId(book_cache_id, chapter.bookId)
-            or chapter.chapters_index
+            or chapter.number
     end
     if not (H.is_num(vol_index) and vol_index > 0) then
         return nil
@@ -1346,12 +1346,12 @@ function LibraryView:ensureVolumeShortcutForReading()
     end
     -- 用与 syncSeriesVolumes 同源的卷数据构造快捷方式, 保证文件名一致(已存在则复用, 不会重复创建)
     local vol = model:getVolume(vol_index) -- Komga Book(分卷)
-    if not (H.is_tbl(vol) and H.is_num(vol.chapters_index)) then
+    if not (H.is_tbl(vol) and H.is_num(vol.number)) then
         return nil
     end
     local lnk_path = self.book_browser:writeVolLnk(vol, volume_folder, book_cache_id)
     if H.is_str(lnk_path) and util.fileExists(lnk_path) then
-        -- 补写 DocSettings sidecar(provider="komga" / custom_props.type="volume" / book_cache_id / chapters_index):
+        -- 补写 DocSettings sidecar(provider="komga" / custom_props.type="volume" / book_cache_id / number):
         -- writeVolLnk 只把 book_cache_id 写进 .html 内联 config, 不写 sidecar;
         -- 而 LibraryView:openFile 点开分卷快捷方式时依赖 customedata.type=='volume' 路由到 openVolumeShortcut,
         -- 缺了它历史条目点击会退化到 series 的 openLastReadChapter 而非该卷续读。
@@ -1375,15 +1375,16 @@ function LibraryView:openVolumeBrowserMenu(file, customedata)
     if not H.is_str(book_cache_id) then
         book_cache_id = DocSettings:open(lnk_path):readSetting("book_cache_id")
     end
-    local chapters_index = customedata and customedata.chapters_index
-    if not H.is_num(chapters_index) then
-        chapters_index = DocSettings:open(lnk_path):readSetting("chapters_index")
+    local number = customedata and customedata.number
+    if not H.is_num(number) then
+        number = DocSettings:open(lnk_path):readSetting("number") or
+            DocSettings:open(lnk_path):readSetting("chapters_index") -- 兼容旧版 sidecar key
     end
-    if not (H.is_str(book_cache_id) and H.is_num(chapters_index)) then
+    if not (H.is_str(book_cache_id) and H.is_num(number)) then
         MessageBox:notice("分卷快捷方式数据不完整")
         return
     end
-    local volume = KomgaModel:new(book_cache_id):getVolume(chapters_index) -- Komga Book(分卷)
+    local volume = KomgaModel:new(book_cache_id):getVolume(number) -- Komga Book(分卷)
     local is_read = H.is_tbl(volume) and volume.isRead == true
     local isDownLoaded = H.is_tbl(volume) and volume.isDownLoaded == true
     local dialog
@@ -1392,12 +1393,12 @@ function LibraryView:openVolumeBrowserMenu(file, customedata)
         callback = function()
             UIManager:close(dialog)
             Backend:HandleResponse(Backend:toggleVolumeRead({
-                chapters_index = chapters_index,
+                number = number,
                 chapter_page = 0,
                 isRead = is_read,
                 book_cache_id = book_cache_id
             }), function(data)
-                self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, chapters_index)
+                self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, number)
                 self.book_browser:refreshItems()
             end, function(err_msg)
                 MessageBox:error('标记失败 ', err_msg)
@@ -1408,14 +1409,14 @@ function LibraryView:openVolumeBrowserMenu(file, customedata)
         callback = function()
             UIManager:close(dialog)
             Backend:HandleResponse(Backend:changeVolumeCache({
-                chapters_index = chapters_index,
+                number = number,
                 cacheFilePath = volume.cacheFilePath,
                 book_cache_id = book_cache_id,
                 isDownLoaded = isDownLoaded,
-                bookUrl = volume.bookUrl,
+                url = volume.url,
                 title = volume
             }), function(data)
-                self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, chapters_index)
+                self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, number)
                 self.book_browser:refreshItems()
                 if isDownLoaded == true then
                     Backend:show_notice('删除成功')
@@ -1430,7 +1431,7 @@ function LibraryView:openVolumeBrowserMenu(file, customedata)
         text = table.concat({Icons.FA_THUMB_TACK, " 上传进度"}),
         callback = function()
             UIManager:close(dialog)
-            self:syncVolumeProgressShow(book_cache_id, chapters_index)
+            self:syncVolumeProgressShow(book_cache_id, number)
         end
     }}, {{
         text = "删除快捷方式",
@@ -1457,9 +1458,9 @@ function LibraryView:openVolumeBrowserMenu(file, customedata)
 end
 
 -- 上传分卷阅读进度到服务器（尽力读取本地缓存文件进度）
-function LibraryView:syncVolumeProgressShow(book_cache_id, chapters_index)
+function LibraryView:syncVolumeProgressShow(book_cache_id, number)
     self:getBrowserWidget()
-    local volume = KomgaModel:new(book_cache_id):getVolume(chapters_index) -- Komga Book(分卷)
+    local volume = KomgaModel:new(book_cache_id):getVolume(number) -- Komga Book(分卷)
     if not (H.is_tbl(volume) and H.is_num(volume.pages)) then
         MessageBox:notice("分卷数据不存在")
         return
@@ -1539,11 +1540,11 @@ function LibraryView:ReaderUIEventCallback(chapter_call_event)
     chapter.call_event = chapter_call_event
 
     local nextChapter = Backend:findNextVolume({
-        chapters_index = chapter.chapters_index,
+        number = chapter.number,
         call_event = chapter.call_event,
         book_cache_id = chapter.book_cache_id,
         bookId = chapter.bookId,
-        totalChapterNum = chapter.totalChapterNum
+        booksCount = chapter.booksCount
     })
 
     if H.is_tbl(nextChapter) then
@@ -1557,7 +1558,7 @@ function LibraryView:ReaderUIEventCallback(chapter_call_event)
         nextChapter.name = chapter.name
         nextChapter.author = chapter.author
         nextChapter.cacheExt = chapter.cacheExt
-        nextChapter.totalChapterNum = chapter.totalChapterNum
+        nextChapter.booksCount = chapter.booksCount
         self:loadAndRenderChapter(nextChapter)
     else
         -- print("No more pages")
@@ -1574,7 +1575,7 @@ function LibraryView:showReaderUI(chapter)
         return
     end
     -- print("Cache file path...", chapter.cacheFilePath)
-    chapter.totalChapterNum = Backend:getEpubChapterCount(chapter.bookId)
+    chapter.booksCount = Backend:getEpubChapterCount(chapter.bookId)
     -- 兜底: 分卷类型可能因翻页/换章节而丢失, 由缓存文件扩展名推断 EPUB
     if chapter.mediaType == nil and H.is_str(chapter.cacheFilePath) then
         local _, ext = util.splitFileNameSuffix(chapter.cacheFilePath)
@@ -1600,7 +1601,7 @@ function LibraryView:showReaderUI(chapter)
         UIManager:close(self.book_toc)
     end
     -- 自动续读: reader 打开后按 resume_goto_frac 跳转。
-    -- EPUB 的 resume_goto_frac 是目标内部章节的章内比例(目标章节已通过 chapters_index 打开)
+    -- EPUB 的 resume_goto_frac 是目标内部章节的章内比例(目标章节已通过 number 打开)
     local goto_resume_target = function()
         local target = self.resume_goto_frac
         self.resume_goto_frac = nil
@@ -1639,8 +1640,8 @@ function LibraryView:showVolumeEpubToc(chapter)
     local item_table = {}
     for _, epub_chapter in ipairs(epub_chapters) do
         table.insert(item_table, {
-            chapters_index = epub_chapter.chapters_index,
-            text = epub_chapter.title or string.format('章节 %d', epub_chapter.chapters_index),
+            number = epub_chapter.number,
+            text = epub_chapter.title or string.format('章节 %d', epub_chapter.number),
             mandatory = "  "
         })
     end
@@ -1665,9 +1666,9 @@ function LibraryView:showVolumeEpubToc(chapter)
         end,
     }
     volume_toc_menu.onMenuChoice = function(_, item)
-        if item.chapters_index then
+        if item.number then
             volume_toc_menu:onClose()
-            chapter.chapters_index = item.chapters_index
+            chapter.number = item.number
             self:loadAndRenderChapter(chapter)
         end
     end
@@ -1743,7 +1744,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 book_cache_id) then
                 library_view_ref.instance.book_toc = ChapterListing:fetchAndShow({
                     cache_id = bookinfo.cache_id,
-                    bookUrl = bookinfo.bookUrl,
+                    url = bookinfo.url,
                     durChapterIndex = bookinfo.durChapterIndex,
                     name = bookinfo.name,
                     author = bookinfo.author,
@@ -1757,12 +1758,12 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 end, true, true)
             end
 
-            local chapters_index = last_read_chapter - 1
-            if chapters_index < 0 then
-                chapters_index = 0
+            local number = last_read_chapter - 1
+            if number < 0 then
+                number = 0
             end
-            local chapter = KomgaModel:new(book_cache_id):getVolume(chapters_index)
-            if H.is_tbl(chapter) and chapter.chapters_index then
+            local chapter = KomgaModel:new(book_cache_id):getVolume(number)
+            if H.is_tbl(chapter) and chapter.number then
                 -- jump to the reading position
                 chapter.call_event = "next"
                 library_view_ref.instance:loadAndRenderChapter(chapter)
@@ -1817,7 +1818,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         local fetch_show_chapter = function()
             library_view_ref.instance.book_toc = ChapterListing:fetchAndShow({
                 cache_id = bookinfo.cache_id,
-                bookUrl = bookinfo.bookUrl,
+                url = bookinfo.url,
                 durChapterIndex = bookinfo.durChapterIndex,
                 name = bookinfo.name,
                 author = bookinfo.author,
@@ -2037,11 +2038,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     -- 1) 自动上传进度到服务器（同步取数 + 延迟发送, 不阻塞关书）
                     instance:uploadCurrentProgress()
                     -- 2) 读完返回时刷新该分卷快捷方式的进度显示
-                    -- 用卷号而非 displayed_chapter.chapters_index（翻章后它是内部章节 index）
+                    -- 用卷号而非 displayed_chapter.number（翻章后它是内部章节 index）
                     local vol_idx = instance:getVolumeIndexByBookId(
                         displayed_chapter.book_cache_id, displayed_chapter.bookId)
                     if not (H.is_num(vol_idx) and vol_idx > 0) then
-                        vol_idx = instance.volume_reading_index or displayed_chapter.chapters_index
+                        vol_idx = instance.volume_reading_index or displayed_chapter.number
                     end
                     if H.is_num(vol_idx) then
                         instance:refreshReadVolumeShortcut(displayed_chapter.book_cache_id, vol_idx)
@@ -2110,7 +2111,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
         local function getCustomMetaData(filepath)
             local custom_metadata_file = DocSettings:findCustomMetadataFile(filepath)
-            return custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
+            local props = custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
+            if H.is_tbl(props) and props.number == nil and props.chapters_index ~= nil then
+                props.number = props.chapters_index -- 兼容旧版快捷方式(升级前 custom_props 用 chapters_index 存卷号)
+            end
+            return props
         end
         if not (is_komga_browser_path(file) and file:find("\u{200B}.html", 1, true)) then
             open_regular_file(file)
@@ -2131,10 +2136,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
         -- 分卷快捷方式: 点击后直接打开该分卷阅读（必须在通用分支之前）
         if booktype == 'volume' and book_cache_id then
-            local chapters_index = (customedata and customedata.chapters_index) or
-                doc_settings:readSetting("chapters_index")
-            if H.is_num(chapters_index) then
-                library_view_ref:openVolumeShortcut(book_cache_id, chapters_index, file)
+            local number = (customedata and customedata.number) or
+                doc_settings:readSetting("number") or
+                doc_settings:readSetting("chapters_index") -- 兼容旧版 sidecar key
+            if H.is_num(number) then
+                library_view_ref:openVolumeShortcut(book_cache_id, number, file)
                 return true
             end
         end
@@ -2244,9 +2250,9 @@ local function init_book_browser(parent)
 
             -- 分卷快捷方式走卷级元数据修复，避免被重写为系列
             local customedata = self:getCustomMateData(fullpath)
-            local chapters_index = H.is_tbl(customedata) and customedata.chapters_index or nil
-            if H.is_tbl(customedata) and customedata.type == 'volume' and H.is_num(chapters_index) then
-                self:refreshVolumeMetadata(nil, fullpath, book_cache_id, chapters_index, bookinfo)
+            local number = H.is_tbl(customedata) and customedata.number or nil
+            if H.is_tbl(customedata) and customedata.type == 'volume' and H.is_num(number) then
+                self:refreshVolumeMetadata(nil, fullpath, book_cache_id, number, bookinfo)
             else
                 self:refreshBookMetadata(nil, fullpath, bookinfo)
             end
@@ -2284,7 +2290,11 @@ local function init_book_browser(parent)
 
     function book_browser:getCustomMateData(filepath)
         local custom_metadata_file = DocSettings:findCustomMetadataFile(filepath)
-        return custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
+        local props = custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
+        if H.is_tbl(props) and props.number == nil and props.chapters_index ~= nil then
+            props.number = props.chapters_index -- 兼容旧版快捷方式(升级前 custom_props 用 chapters_index 存卷号)
+        end
+        return props
     end
 
     function book_browser:addBookShortcut(bookinfo)
@@ -2344,15 +2354,15 @@ local function init_book_browser(parent)
     end
 
     function book_browser:writeVolLnk(volume, volume_folder, book_cache_id)
-        if not (volume_folder and H.is_tbl(volume) and H.is_num(volume.chapters_index) and H.is_str(book_cache_id)) then
+        if not (volume_folder and H.is_tbl(volume) and H.is_num(volume.number) and H.is_str(book_cache_id)) then
             logger.err("book_browser.writeVolLnk: parameter error")
             return
         end
-        local chapters_index = volume.chapters_index
+        local number = volume.number
         local volume_title = (H.is_str(volume.title) and volume.title ~= "") and volume.title or
-            "卷" .. tostring(chapters_index)
+            "卷" .. tostring(number)
         -- 卷号补零到 3 位, 避免文件浏览器按文件名排序时 2,10,11... 乱序
-        local volume_lnk_name = string.format("%03d-%s\u{200B}.html", chapters_index, volume_title)
+        local volume_lnk_name = string.format("%03d-%s\u{200B}.html", number, volume_title)
         volume_lnk_name = util.getSafeFilename(volume_lnk_name)
         if not volume_lnk_name then
             logger.err("book_browser.writeVolLnk: getSafeFilename error")
@@ -2367,16 +2377,16 @@ local function init_book_browser(parent)
         return volume_lnk_path, volume_lnk_name
     end
 
-    function book_browser:refreshVolumeMetadata(lnk_name, lnk_path, book_cache_id, chapters_index, bookinfo)
+    function book_browser:refreshVolumeMetadata(lnk_name, lnk_path, book_cache_id, number, bookinfo)
         lnk_name = lnk_name or (H.is_str(lnk_path) and select(2, util.splitFilePathName(lnk_path)))
         if not (util.fileExists(lnk_path) and H.is_str(lnk_name) and H.is_str(book_cache_id) and
-            H.is_num(chapters_index)) then
+            H.is_num(number)) then
             logger.err("browser.refreshVolumeMetadata parameter error")
             return
         end
-        local volume = KomgaModel:new(book_cache_id):getVolume(chapters_index) -- Komga Book(分卷)
-        if not (H.is_tbl(volume) and H.is_num(volume.chapters_index)) then
-            logger.err("browser.refreshVolumeMetadata no volume data:", book_cache_id, chapters_index)
+        local volume = KomgaModel:new(book_cache_id):getVolume(number) -- Komga Book(分卷)
+        if not (H.is_tbl(volume) and H.is_num(volume.number)) then
+            logger.err("browser.refreshVolumeMetadata no volume data:", book_cache_id, number)
             return
         end
         bookinfo = bookinfo or KomgaModel:new(book_cache_id):getSeries() -- Komga Series
@@ -2428,7 +2438,7 @@ local function init_book_browser(parent)
             percent = math.min(pageno / pages, 1)
         end
         local volume_title = (H.is_str(volume.title) and volume.title ~= "") and volume.title or
-            (H.is_tbl(bookinfo) and bookinfo.name) or "卷" .. tostring(chapters_index)
+            (H.is_tbl(bookinfo) and bookinfo.name) or "卷" .. tostring(number)
         -- 无变化则跳过写入，避免每次进入目录都重写并广播事件
         local custom = nil
         local custom_metadata_file = DocSettings:findCustomMetadataFile(lnk_path)
@@ -2437,7 +2447,7 @@ local function init_book_browser(parent)
             custom = {
                 custom_props = custom_settings:readSetting("custom_props"),
                 book_cache_id = custom_settings:readSetting("book_cache_id"),
-                chapters_index = custom_settings:readSetting("chapters_index"),
+                number = custom_settings:readSetting("number"),
                 doc_props = custom_settings:readSetting("doc_props")
             }
         end
@@ -2455,9 +2465,9 @@ local function init_book_browser(parent)
             target_status = "reading"
         end
         if H.is_tbl(custom) and H.is_tbl(custom.custom_props) and custom.custom_props.type == 'volume' and
-            custom.custom_props.chapters_index == chapters_index and
+            custom.custom_props.number == number and
             H.is_tbl(custom.doc_props) and custom.doc_props.pages == pages and custom.doc_props.pageno == pageno and
-            custom.book_cache_id == book_cache_id and custom.chapters_index == chapters_index and
+            custom.book_cache_id == book_cache_id and custom.number == number and
             lnk_percent == percent and lnk_doc_pages == (H.is_num(pages) and pages or nil) and
             lnk_status == target_status and lnk_ds:readSetting("provider") == "komga" then
             return
@@ -2473,11 +2483,11 @@ local function init_book_browser(parent)
                 title = volume_title,
                 description = (H.is_tbl(bookinfo) and bookinfo.intro) or nil,
                 type = "volume",
-                chapters_index = chapters_index,
+                number = number,
                 bookId = volume.bookId
             })
             doc_settings:saveSetting("book_cache_id", book_cache_id)
-            doc_settings:saveSetting("chapters_index", chapters_index)
+            doc_settings:saveSetting("number", number)
             doc_settings:saveSetting("doc_props", {
                 pages = pages,
                 pageno = pageno
@@ -2498,12 +2508,12 @@ local function init_book_browser(parent)
             doc_settings:flushCustomMetadata(lnk_path)
             doc_settings:flush()
         end
-        -- 主 sidecar 也写入 chapters_index, 便于 openFile 读取
+        -- 主 sidecar 也写入 number, 便于 openFile 读取
         local lnk_config = Backend:getLuaConfig(lnk_path)
         if lnk_config and lnk_config.readSetting then
-            local old_index = lnk_config:readSetting("chapters_index")
-            if old_index ~= chapters_index then
-                lnk_config:saveSetting("chapters_index", chapters_index):flush()
+            local old_index = lnk_config:readSetting("number")
+            if old_index ~= number then
+                lnk_config:saveSetting("number", number):flush()
             end
         end
         self:emitMetadataChanged(lnk_path)
@@ -2530,7 +2540,7 @@ local function init_book_browser(parent)
             end
         end, 12000, 2000)
         Backend:launchProcess(function()
-            local cover_path_no_ext = Backend:getVolumeCoverCachePath(book_cache_id, chapter.chapters_index)
+            local cover_path_no_ext = Backend:getVolumeCoverCachePath(book_cache_id, chapter.number)
             local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
             if cover_path and util.fileExists(cover_path) then
                 DocSettings:flushCustomCover(lnk_path, cover_path)
@@ -2586,10 +2596,10 @@ local function init_book_browser(parent)
             return
         end
         for _, volume in ipairs(volumes) do
-            if H.is_num(volume.chapters_index) then
+            if H.is_num(volume.number) then
                 local lnk_path, lnk_name = self:writeVolLnk(volume, volume_folder, book_cache_id)
                 if lnk_path and util.fileExists(lnk_path) then
-                    self:refreshVolumeMetadata(lnk_name, lnk_path, book_cache_id, volume.chapters_index, bookinfo)
+                    self:refreshVolumeMetadata(lnk_name, lnk_path, book_cache_id, volume.number, bookinfo)
                     if not DocSettings:findCustomCoverFile(lnk_path) then
                         self:asyncDownloadVolumeCover(book_cache_id, volume, lnk_path)
                     end
@@ -2644,7 +2654,7 @@ local function init_book_browser(parent)
             })
             doc_settings:saveSetting("book_cache_id", book_cache_id)
             doc_settings:saveSetting("doc_props", {
-                pages = bookinfo.totalChapterNum,
+                pages = bookinfo.booksCount,
                 pageno = bookinfo.durChapterIndex
             }):flushCustomMetadata(lnk_path)
         end
@@ -2738,7 +2748,7 @@ local function init_book_menu(parent)
         end
         self.parent_ref.book_toc = ChapterListing:fetchAndShow({
             cache_id = bookinfo.cache_id,
-            bookUrl = bookinfo.bookUrl,
+            url = bookinfo.url,
             durChapterIndex = bookinfo.durChapterIndex,
             name = bookinfo.name,
             author = bookinfo.author,
@@ -2786,7 +2796,7 @@ local function init_book_menu(parent)
     ]]
 
         msginfo = T(msginfo, bookinfo.name or '', bookinfo.author or '', bookinfo.kind or '',
-            bookinfo.totalChapterNum or '', bookinfo.intro or '')
+            bookinfo.booksCount or '', bookinfo.intro or '')
 
         MessageBox:confirm(msginfo, nil, {
             icon = "notice-info",

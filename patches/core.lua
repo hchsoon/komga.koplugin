@@ -237,7 +237,7 @@ M.install = function()
     --    目标文件已缓存则直接打开(跳过原生"是否打开本地文档"确认框);
     --    未缓存则按需下载后打开, 避免 "Invalid or external link" 提示。
     -- 2) 兼容旧缓存中未重写的相对路径(../Text/Sectionxxx.xhtml):
-    --    以当前文档同卷章节为基准, 用数据库 chapterUrl 的基名映射到缓存文件名。
+    --    以当前文档同卷章节为基准, 用数据库 url 的基名映射到缓存文件名。
     -- 3) 调试日志已关闭(dbg 为空操作), 不再写 <datadir>/komga_link_debug.log。
     --    若需重新定位链接跳转问题, 把下方 dbg 恢复为写文件实现即可。
     local ReaderLink = require("apps/reader/modules/readerlink")
@@ -312,9 +312,9 @@ M.install = function()
                         local all = Backend.dbManager:getAllEpubChapterUrls(cur_bookId)
                         if type(all) == "table" then
                             for _, ch in ipairs(all) do
-                                if type(ch) == "table" and type(ch.chapters_index) == "number" and
-                                    normalize_href_basename(ch.chapterUrl) == key then
-                                    target_idx = ch.chapters_index
+                                if type(ch) == "table" and type(ch.number) == "number" and
+                                    normalize_href_basename(ch.url) == key then
+                                    target_idx = ch.number
                                     bookId = cur_bookId
                                     target_file = cur_prefix .. "-" .. target_idx .. ".xhtml"
                                     break
@@ -348,13 +348,13 @@ M.install = function()
             end
             local cur_chapter = (LibraryView and LibraryView.instance) and LibraryView.instance.displayed_chapter
             local server_addr = (Backend.settings_data and Backend.settings_data.data and Backend.settings_data.data.server_address)
-                or (type(cur_chapter) == "table" and cur_chapter.bookUrl)
+                or (type(cur_chapter) == "table" and cur_chapter.url)
             -- 补全分卷阅读所需字段(与 ReaderUIEventCallback 相同),
             -- 避免 TOC 按钮退回系列目录/进度上传缺字段
             local function patch_fields(data)
                 if type(cur_chapter) == "table" then
                     for _, k in ipairs({"call_event", "mediaType", "volume_read", "name",
-                        "author", "cacheExt", "totalChapterNum", "book_cache_id", "bookUrl"}) do
+                        "author", "cacheExt", "booksCount", "book_cache_id", "url"}) do
                         if data[k] == nil and cur_chapter[k] ~= nil then
                             data[k] = cur_chapter[k]
                         end
@@ -366,9 +366,9 @@ M.install = function()
                 return patch_fields({
                     book_cache_id = document_dir_name,
                     bookId = bookId,
-                    chapters_index = target_idx,
+                    number = target_idx,
                     cacheFilePath = cache_file,
-                    bookUrl = server_addr,
+                    url = server_addr,
                 })
             end
             -- 打开目标章节: 优先 LibraryView.showReaderUI(正确更新 displayed_chapter);
@@ -390,7 +390,7 @@ M.install = function()
                 return true
             end
             if not server_addr then
-                dbg("  no bookUrl -> original")
+                dbg("  no url -> original")
                 return original_openFileFromLink(self, link_url)
             end
             -- 未缓存: 按需下载后打开。
@@ -399,8 +399,8 @@ M.install = function()
             local chapter = patch_fields({
                 book_cache_id = document_dir_name,
                 bookId = bookId,
-                chapters_index = target_idx,
-                bookUrl = server_addr,
+                number = target_idx,
+                url = server_addr,
             })
             dbg("  download bookId=" .. tostring(bookId) .. " idx=" .. tostring(target_idx))
             local function download_cb(state, response)

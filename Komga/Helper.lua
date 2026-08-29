@@ -377,11 +377,11 @@ M.getCoverCacheFilePath = function(book_cache_id)
     local book_cache_path = M.getBookCachePath(book_cache_id)
     return M.joinPath(book_cache_path, 'cover')
 end
-M.getChapterCacheFilePath = function(book_cache_id, chapter_id ,chapters_index, book_name)
+M.getVolumeCacheFilePath = function(book_cache_id, book_id, number, book_name)
     book_name = util.getSafeFilename(book_name)
     local book_cache_path = M.getBookCachePath(book_cache_id)
-    local chapter_cache_name = string.format("%s-%s-%s", book_name or "", chapter_id, chapters_index)
-    return M.joinPath(book_cache_path, chapter_cache_name)
+    local volume_cache_name = string.format("%s-%s-%s", book_name or "", book_id, number)
+    return M.joinPath(book_cache_path, volume_cache_name)
 end
 M.getHomeDir = function()
     return G_reader_settings and G_reader_settings:readSetting("home_dir") or

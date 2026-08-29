@@ -155,15 +155,15 @@ function M:getTurnPageNextImage(call_event_type, image_num)
     end
 
     -- 初始化章节索引和图片列表游标
-    local current_chapter_index = self.chapter.chapters_index
+    local current_number = self.chapter.number
     local new_image_num = image_num
     local is_success = false
 
     -- 处理边界情况,向前翻页到章节开头
     if image_num == 0 then
-        if current_chapter_index > 1 then
-            current_chapter_index = current_chapter_index - 1
-            logger.dbg("切换到上一章节：", current_chapter_index)
+        if current_number > 1 then
+            current_number = current_number - 1
+            logger.dbg("切换到上一章节：", current_number)
         else
             Backend:show_notice("已经是第一章")
             return
@@ -182,18 +182,18 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         else
             -- 处理章节末页翻页
             local direction = call_event_type == 'next' and 1 or -1
-            current_chapter_index = current_chapter_index + direction
-            logger.dbg("已到达章节边界，切换到新章节：", current_chapter_index)
+            current_number = current_number + direction
+            logger.dbg("已到达章节边界，切换到新章节：", current_number)
         end
     end
 
     -- 需要加载新章节内容的情况
     if not is_success then
         -- 更新章节索引并获取新章节的图片列表
-        -- self.chapter.chapters_index = current_chapter_index
+        -- self.chapter.number = current_number
         self.chapter.current_page = self.chapter_imglist_cur
         Backend:saveVolumeProgress(self.chapter)
-        self.chapter =  Backend:getVolumeInfoCache(self.bookinfo.cache_id,current_chapter_index)
+        self.chapter =  Backend:getVolumeInfoCache(self.bookinfo.cache_id,current_number)
         local new_chapter_imglist = Backend:getVolumePageUrls(self.chapter)
 
         if H.is_tbl(new_chapter_imglist) and #new_chapter_imglist > 0 then
@@ -208,8 +208,8 @@ function M:getTurnPageNextImage(call_event_type, image_num)
                 is_success = true
             end
         else
-            logger.err("获取章节图片列表失败：", current_chapter_index)
-            Backend:show_notice("内容加载失败" .. tostring(current_chapter_index))
+            logger.err("获取章节图片列表失败：", current_number)
+            Backend:show_notice("内容加载失败" .. tostring(current_number))
             return
         end
     end
@@ -245,13 +245,13 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
         self.image = nil
     end
 
-    local current_chapter_index = self.chapter.chapters_index
+    local current_number = self.chapter.number
     local current_img_src = false
 
     if image_num == 0 then
-        if current_chapter_index > 1 then
-            current_chapter_index = current_chapter_index - 1
-            logger.dbg("切换到上一章节：", current_chapter_index)
+        if current_number > 1 then
+            current_number = current_number - 1
+            logger.dbg("切换到上一章节：", current_number)
         else
             Backend:show_notice("已经是第一章")
             return
@@ -265,8 +265,8 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
         else
 
             local direction = call_event_type == 'next' and 1 or -1
-            current_chapter_index = current_chapter_index + direction
-            logger.dbg("已到达章节边界，切换到新章节:", current_chapter_index)
+            current_number = current_number + direction
+            logger.dbg("已到达章节边界，切换到新章节:", current_number)
         end
     end
 
@@ -282,7 +282,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
             end
         else
 
-            self.chapter.chapters_index = current_chapter_index
+            self.chapter.number = current_number
             local new_chapter_imglist = Backend:getVolumePageUrls(self.chapter)
 
             if H.is_tbl(new_chapter_imglist) and #new_chapter_imglist > 0 then

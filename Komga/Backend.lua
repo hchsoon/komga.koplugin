@@ -8,8 +8,8 @@ Komga/Backend.lua — Komga HTTP 层与业务编排
   Komga 官方         本层/DB 命名       主键                        说明
   ---------------    -----------------  --------------------------  ---------------------------
   Series              series             bookCacheId                书架上的一个"系列"
-  Book(单卷)          volume             (bookCacheId, chapterIndex)  系列内的一个"分卷", 服务器 ID = bookId
-  Chapter(书内章)     epub_chapter       (chapterId, chapterIndex)   EPUB 书内部章节, 仅 EPUB
+  Book(单卷)          volume             (bookCacheId, number)  系列内的一个"分卷", 服务器 ID = bookId
+  Chapter(书内章)     epub_chapter       (chapterId, number)   EPUB 书内部章节, 仅 EPUB
 
 ━━━ 命名约定 ━━━
   * 本文件(与 BookInfoDB / KomgaModel)统一用 series / volume / epub_chapter 描述三级层级。
@@ -469,7 +469,7 @@ function M:refreshVolumesCache(series, last_refresh_time)
         dbg.v('ui_refresh_time prevent refreshVolumesCache')
         return wrap_response(nil, '处理中')
     end
-    if not (H.is_tbl(series) and H.is_str(series.bookUrl) and H.is_str(series.cache_id)) then
+    if not (H.is_tbl(series) and H.is_str(series.url) and H.is_str(series.cache_id)) then
         return wrap_response(nil, "获取目录参数错误")
     end
 
@@ -564,7 +564,7 @@ end
 
 function M:getVolumeReadProgress(volume)
 
-    if not (H.is_str(volume.name) and H.is_str(volume.bookUrl)) then
+    if not (H.is_str(volume.name) and H.is_str(volume.url)) then
         return wrap_response(nil, '参数错误')
     end
 
@@ -574,11 +574,11 @@ function M:getVolumeReadProgress(volume)
             -- name = volume.name,
             -- author = volume.author or '',
             -- durChapterPos = 0,
-            -- durChapterIndex = chapters_index,
+            -- durChapterIndex = number,
             -- durChapterTime = time.to_ms(time.now()),
             -- durChapterTitle = volume.title or '',
-            -- index = chapters_index,
-            -- url = volume.bookUrl,
+            -- index = number,
+            -- url = volume.url,
             -- v = os.time()
         })
     end, nil, {
@@ -589,16 +589,16 @@ end
 
 function M:saveVolumeProgress(volume)
 
-    if not (H.is_str(volume.name) and H.is_str(volume.bookUrl)) then
+    if not (H.is_str(volume.name) and H.is_str(volume.url)) then
         return wrap_response(nil, '参数错误')
     end
 
-    local chapters_index = volume.chapters_index
+    local number = volume.number
     local finish = (volume.current_page == volume.pages)
     -- print(finish)
     if finish then
         volume.isRead = finish
-        -- print("Mark volume read...", volume.chapters_index)
+        -- print("Mark volume read...", volume.number)
         self:toggleVolumeRead(volume)
     end
     return self:komgaSporeApi(function()
@@ -609,11 +609,11 @@ function M:saveVolumeProgress(volume)
             -- name = volume.name,
             -- author = volume.author or '',
             -- durChapterPos = 0,
-            -- durChapterIndex = chapters_index,
+            -- durChapterIndex = number,
             -- durChapterTime = time.to_ms(time.now()),
             -- durChapterTitle = volume.title or '',
-            -- index = chapters_index,
-            -- url = volume.bookUrl,
+            -- index = number,
+            -- url = volume.url,
             -- v = os.time()
         })
     end, nil, {
@@ -641,10 +641,10 @@ end
 
 -- EPUB 进度上传: PUT /progression, payload 为 R2Progression(服务器按 locator 重算 totalProgression,
 -- 并换算 readProgress.page; totalProgression 到 1 时自动标 completed)
--- upload 需含 {bookId, name, bookUrl, chapters_index, book_cache_id, locator, frac, current_page, pages}
+-- upload 需含 {bookId, name, url, number, book_cache_id, locator, frac, current_page, pages}
 function M:saveBookProgression(upload)
     if not (H.is_str(upload.bookId) and H.is_tbl(upload.locator)
-        and H.is_str(upload.name) and H.is_str(upload.bookUrl)) then
+        and H.is_str(upload.name) and H.is_str(upload.url)) then
         return wrap_response(nil, '参数错误')
     end
     -- 读完(整卷比例 >= 99.9%): 本地标记已读, 服务器读满(totalProgression=1)会自动标 completed
@@ -699,19 +699,19 @@ end
 
 function M:refreshVolumeContent(volume)
 
-    local bookUrl = volume.bookUrl
-    local chapters_index = volume.chapters_index
-    local down_chapters_index = volume.chapters_index
+    local url = volume.url
+    local number = volume.number
+    local down_number = volume.number
 
-    if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
+    if not H.is_str(url) or not H.is_num(down_number) then
         return wrap_response(nil, '刷新章节出错')
     end
 
 
     self:komgaSporeApi(function()
         return self.apiClient:getBookContent({
-            url = bookUrl,
-            index = down_chapters_index,
+            url = url,
+            index = down_number,
             refresh = 1,
             v = os.time()
         })
@@ -720,8 +720,8 @@ function M:refreshVolumeContent(volume)
     }, 'GetChapterContent')
 end
 
-function M:searchBookSource(bookUrl, lastIndex, searchSize)
-    if not H.is_str(bookUrl) then
+function M:searchBookSource(url, lastIndex, searchSize)
+    if not H.is_str(url) then
         return wrap_response(nil, '获取更多书源参数错误')
     end
     if not H.is_num(lastIndex) then
@@ -733,7 +733,7 @@ function M:searchBookSource(bookUrl, lastIndex, searchSize)
     return self:komgaSporeApi(function()
         -- data.list data.lastindex
         return self.apiClient:searchBookSource({
-            url = bookUrl,
+            url = url,
             bookSourceGroup = '',
             lastIndex = lastIndex,
             searchSize = searchSize,
@@ -795,7 +795,7 @@ function M:searchBookMulti(search_text, lastIndex, searchSize, concurrentCount)
 end
 
 function M:deleteBook(bookinfo)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl)) then
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.url)) then
         return wrap_response(nil, "输入参数错误")
     end
 
@@ -806,7 +806,7 @@ function M:deleteBook(bookinfo)
             v = os.time(),
             name = bookinfo.name,
             author = bookinfo.author,
-            bookUrl = bookinfo.bookUrl,
+            url = bookinfo.url,
             origin = bookinfo.origin,
             originName = bookinfo.originName,
             originOrder = bookinfo.originOrder or 0,
@@ -816,7 +816,7 @@ function M:deleteBook(bookinfo)
             durChapterTitle = bookinfo.durChapterTitle or '',
             wordCount = bookinfo.wordCount or '',
             intro = bookinfo.intro or '',
-            totalChapterNum = bookinfo.totalChapterNum or 0,
+            booksCount = bookinfo.booksCount or 0,
             kind = bookinfo.kind or '',
             type = bookinfo.type or 0
         })
@@ -1140,7 +1140,7 @@ local volume_writeToFile = function(volume, filePath, resources)
 end
 
 -- 生成章节链接匹配关键字: 取文件基名(去扩展名, 小写)。
--- epub 内部章节文件通常唯一命名(如 Section0031.xhtml), 而 DB 里 chapterUrl 是
+-- epub 内部章节文件通常唯一命名(如 Section0031.xhtml), 而 DB 里 url 是
 -- 完整资源 URL、xhtml 内部 href 是相对路径, 只有基名是两边一致的, 故按基名匹配。
 local normalize_rel_href = function(href)
     if type(href) ~= "string" or href == "" then
@@ -1160,10 +1160,10 @@ local normalize_rel_href = function(href)
     return name:lower()
 end
 
--- 缓存的章节文件名: <安全书名>-<bookId>-<chapters_index>.xhtml, 与 H.getChapterCacheFilePath 生成的路径一致
-local get_cached_chapter_filename = function(bookId, chapters_index, book_name)
+-- 缓存的章节文件名: <安全书名>-<bookId>-<number>.xhtml, 与 H.getVolumeCacheFilePath 生成的路径一致
+local get_cached_chapter_filename = function(bookId, number, book_name)
     book_name = util.getSafeFilename(book_name or "")
-    return string.format("%s-%s-%s.xhtml", book_name, bookId, chapters_index)
+    return string.format("%s-%s-%s.xhtml", book_name, bookId, number)
 end
 
 local replace_css_urls = function(css_text, replace_fn)
@@ -1189,8 +1189,8 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy, callbac
 
     local processed_src
     if is_porxy == true then
-        local bookUrl = base_url
-        processed_src = M:getProxyImageUrl(bookUrl, resources_src)
+        local url = base_url
+        processed_src = M:getProxyImageUrl(url, resources_src)
     else
         processed_src = util.trim(resources_src)
 
@@ -1332,17 +1332,17 @@ end
 local htmlparser
 function M:_processVolumeContent(volume, content)
 
-    local bookUrl = volume.bookUrl
+    local url = volume.url
     local book_cache_id = volume.book_cache_id
-    local chapters_index = volume.chapters_index
+    local number = volume.number
     local chapter_title = volume.title or ''
-    local down_chapters_index = volume.chapters_index
+    local down_number = volume.number
 
     if type(content) ~= "string" then
         content = tostring(content)
     end
 
-    local filePath = H.getChapterCacheFilePath(book_cache_id, volume.bookId, chapters_index, volume.name)
+    local filePath = H.getVolumeCacheFilePath(book_cache_id, volume.bookId, number, volume.name)
 
     local first_line = string.match(content, "([^\n]*)\n?") or content
     local PAGE_TYPES = {
@@ -1357,7 +1357,7 @@ function M:_processVolumeContent(volume, content)
     -- logger.dbg("get_chapter_content_type:",page_type)
     -- print("page_type is..." , page_type);
     if page_type == PAGE_TYPES['IMAGE'] then
-        local img_sources = self:getPorxyPicUrls(bookUrl, content)
+        local img_sources = self:getPorxyPicUrls(url, content)
         if H.is_tbl(img_sources) and #img_sources > 0 then
 
             -- 一张图片就不打包cbz了
@@ -1402,8 +1402,8 @@ function M:_processVolumeContent(volume, content)
 
     elseif page_type == PAGE_TYPES['XHTML'] then
 
-        local html_url = self:getProxyEpubUrl(bookUrl, first_line)
-        -- logger.info("bookurl",bookUrl)
+        local html_url = self:getProxyEpubUrl(url, first_line)
+        -- logger.info("bookurl",url)
         -- logger.info("first_line",first_line)
         -- logger.info("html_url",html_url)
         if html_url == nil or html_url == '' then
@@ -1549,10 +1549,10 @@ function M:_processVolumeContent(volume, content)
                     local all_chs = self.dbManager:getAllEpubChapterUrls(volume.bookId)
                     if H.is_tbl(all_chs) then
                         for _, ch in ipairs(all_chs) do
-                            if H.is_num(ch.chapters_index) and H.is_str(ch.chapterUrl) then
-                                local key = normalize_rel_href(ch.chapterUrl)
+                            if H.is_num(ch.number) and H.is_str(ch.url) then
+                                local key = normalize_rel_href(ch.url)
                                 if key and not href_map[key] then
-                                    href_map[key] = ch.chapters_index
+                                    href_map[key] = ch.number
                                 end
                             end
                         end
@@ -1604,7 +1604,7 @@ function M:_processVolumeContent(volume, content)
                     return
                 end
                 local path = r3
-                local relpath = processLink(book_cache_id, path, bookUrl, true)
+                local relpath = processLink(book_cache_id, path, url, true)
                 if H.is_str(relpath) then
                     -- 随文图
                     return string.format('<div class="duokan-image-single">%s</div>',
@@ -1643,18 +1643,18 @@ end
 
 function M:pDownloadVolume(volume, message_dialog, is_recursive)
 
-    local bookUrl = volume.bookUrl
+    local series_url = volume.url
     local book_cache_id = volume.book_cache_id
-    local chapters_index = volume.chapters_index
+    local number = volume.number
     local chapter_title = volume.title or ''
-    local down_chapters_index = volume.chapters_index
+    local down_number = volume.number
     if volume.bookId == nil then
         volume.bookId = volume.book_cache_id
     end
 
     -- logger.info('pDownloadVolume called',volume)
 
-    -- print(bookUrl, book_cache_id, volume.bookId ,chapters_index, chapter_title, down_chapters_index)
+    -- print(series_url, book_cache_id, volume.bookId ,number, chapter_title, down_number)
     local function message_show(msg)
         if message_dialog then
             message_dialog.text = msg
@@ -1663,8 +1663,8 @@ function M:pDownloadVolume(volume, message_dialog, is_recursive)
         end
     end
 
-    if bookUrl == nil or not book_cache_id then
-        error('pDownloadVolume input parameters err' .. tostring(bookUrl) .. tostring(book_cache_id))
+    if series_url == nil or not book_cache_id then
+        error('pDownloadVolume input parameters err' .. tostring(series_url) .. tostring(book_cache_id))
     end
 
     local cache_chapter = self:getCacheVolumeFilePath(volume)
@@ -1673,15 +1673,14 @@ function M:pDownloadVolume(volume, message_dialog, is_recursive)
     end
 
     local url = nil
-    -- 分卷章节(chapters 表)没有 chapterUrl 列, 以前每下载一个未缓存章节都会先调
+    -- 分卷(volume 表)没有 url 列, 以前每下载一个未缓存章节都会先调
     -- pGetEpubManifest 拉取整个 manifest(getEpubManifest, 超时 18-25s), 导致下载卡住数秒到数十秒。
-    -- 内部章节 URL(epubchapters.chapterUrl)通常已在库中, 直接使用即可跳过该慢请求。
-    -- === FIX: 确保 chapterUrl 始终来自数据库(或 manifest 兜底), 子章节 URL 缺失时也能下载/跳转 ===
-    local epubchapter = self.dbManager:getEpubChapterInfo(volume.bookId, down_chapters_index)
-    if H.is_tbl(epubchapter) and H.is_str(epubchapter.chapterUrl) and epubchapter.chapterUrl ~= "" then
-        url = epubchapter.chapterUrl
-    elseif H.is_tbl(epubchapter) and volume.chapterUrl then
-        url = volume.chapterUrl
+    -- 内部章节 URL(epub_chapter.url)通常已在库中, 直接使用即可跳过该慢请求。
+    -- === FIX: 确保 url 始终来自数据库(或 manifest 兜底), 子章节 URL 缺失时也能下载/跳转 ===
+    -- (卷对象上的 url 字段是系列 URL, 与内部章节 URL 语义不同, 不能用作回退)
+    local epubchapter = self.dbManager:getEpubChapterInfo(volume.bookId, down_number)
+    if H.is_tbl(epubchapter) and H.is_str(epubchapter.url) and epubchapter.url ~= "" then
+        url = epubchapter.url
     end
 
     -- 兜底: 数据库没有该章节 URL 时, 强制刷新 manifest 并把内部章节回写数据库, 再取 URL。
@@ -1693,9 +1692,9 @@ function M:pDownloadVolume(volume, message_dialog, is_recursive)
             volume.readingOrder = inforesponse.body.readingOrder
             self.dbManager:upsertEpubChapters(book_cache_id, volume)
         end
-        epubchapter = self.dbManager:getEpubChapterInfo(volume.bookId, down_chapters_index)
-        if H.is_tbl(epubchapter) and H.is_str(epubchapter.chapterUrl) and epubchapter.chapterUrl ~= "" then
-            url = epubchapter.chapterUrl
+        epubchapter = self.dbManager:getEpubChapterInfo(volume.bookId, down_number)
+        if H.is_tbl(epubchapter) and H.is_str(epubchapter.url) and epubchapter.url ~= "" then
+            url = epubchapter.url
         end
     end
     
@@ -1731,17 +1730,17 @@ end
 
 function M:getCacheVolumeFilePath(volume)
 
-    if not H.is_tbl(volume) or volume.book_cache_id == nil or volume.chapters_index == nil then
+    if not H.is_tbl(volume) or volume.book_cache_id == nil or volume.number == nil then
         dbg.log('getCacheVolumeFilePath parameters err:', volume)
         return volume
     end
 
     local book_cache_id = volume.book_cache_id
-    local chapters_index = volume.chapters_index
+    local number = volume.number
     local book_name = volume.name or ""
     local cache_file_path = volume.cacheFilePath
     local cacheExt = volume.cacheExt
-    local filePath = H.getChapterCacheFilePath(book_cache_id, volume.bookId ,chapters_index, book_name)
+    local filePath = H.getVolumeCacheFilePath(book_cache_id, volume.bookId, number, book_name)
 
     if H.is_str(cache_file_path) then
         if util.fileExists(cache_file_path) and filePath == cache_file_path then
@@ -1775,7 +1774,7 @@ function M:getCacheVolumeFilePath(volume)
 end
 
 function M:findVolumesNotDownloaded(current_volume, count)
-    if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.chapters_index == nil then
+    if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.number == nil then
         dbg.log('findVolumesNotDownloaded: bad params', current_volume)
         return {}
     end
@@ -1786,8 +1785,8 @@ function M:findVolumesNotDownloaded(current_volume, count)
 
     local next_volumes = self.dbManager:findVolumesNotDownloaded(current_volume, count)
 
-    if not H.is_tbl(next_volumes[1]) or next_volumes[1].chapters_index == nil then
-        dbg.log('not found', current_volume.chapters_index)
+    if not H.is_tbl(next_volumes[1]) or next_volumes[1].number == nil then
+        dbg.log('not found', current_volume.number)
         return {}
     end
 
@@ -1796,14 +1795,14 @@ end
 
 function M:findNextVolume(current_volume, is_downloaded)
 
-    if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.chapters_index == nil then
+    if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.number == nil then
         dbg.log("findNextVolume: bad params", current_volume)
         return
     end
 
     local book_cache_id = current_volume.book_cache_id
     local bookId = current_volume.bookId
-    local current_volume_index = current_volume.chapters_index
+    local current_volume_index = current_volume.number
 
     if current_volume.call_event == nil then
         current_volume.call_event = 'next'
@@ -1811,8 +1810,8 @@ function M:findNextVolume(current_volume, is_downloaded)
 
     local next_volume = self.dbManager:findNextEpubChapterInfo(current_volume, is_downloaded)
 
-    if not H.is_tbl(next_volume) or next_volume.chapters_index == nil then
-        dbg.log('not found', current_volume.chapters_index)
+    if not H.is_tbl(next_volume) or next_volume.number == nil then
+        dbg.log('not found', current_volume.number)
         return
     end
 
@@ -1823,7 +1822,7 @@ function M:findNextVolume(current_volume, is_downloaded)
 
 end
 
-function M:getProxyEpubUrl(bookUrl, htmlUrl)
+function M:getProxyEpubUrl(url, htmlUrl)
     if not H.is_str(htmlUrl) then
         return htmlUrl
     end
@@ -1842,7 +1841,7 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
     end
 end
 
-function M:getProxyImageUrl(bookUrl, img_src)
+function M:getProxyImageUrl(url, img_src)
     local res_img_src = img_src
     local width = Device.screen:getWidth() or 800
     local server_address = self.settings_data.data.server_address
@@ -1855,7 +1854,7 @@ function M:getProxyImageUrl(bookUrl, img_src)
     return res_img_src
 end
 
-function M:getPorxyPicUrls(bookUrl, content)
+function M:getPorxyPicUrls(url, content)
     local picUrls = get_img_src(content)
     if not H.is_tbl(picUrls) or #picUrls < 1 then
         return {}
@@ -1863,7 +1862,7 @@ function M:getPorxyPicUrls(bookUrl, content)
 
     local new_porxy_picurls = {}
     for i, img_src in ipairs(picUrls) do
-        local new_url = self:getProxyImageUrl(bookUrl, img_src)
+        local new_url = self:getProxyImageUrl(url, img_src)
         table.insert(new_porxy_picurls, new_url)
     end
     return new_porxy_picurls
@@ -1887,7 +1886,7 @@ function M:pDownload_Image(img_src, timeout)
 end
 
 function M:getVolumePageUrls(volume)
-    local chapters_index = volume.chapters_index
+    local number = volume.number
     local server_address = self.settings_data.data['server_address']
 
     local imgs = {}
@@ -1929,7 +1928,7 @@ function M:preLoadVolumes(volume, download_volume_count)
 
     local volume_down_tasks = {}
 
-    if volume[1] and volume[1].chapters_index ~= nil and volume[1].book_cache_id ~= nil and volume[1].bookId ~= nil then
+    if volume[1] and volume[1].number ~= nil and volume[1].book_cache_id ~= nil and volume[1].bookId ~= nil then
 
         volume_down_tasks = volume
     else
@@ -1956,9 +1955,9 @@ function M:preLoadVolumes(volume, download_volume_count)
         end)
 
         local task_return_db_add = self.dbManager:transaction(
-            function(book_cache_id, chapters_index, cache_file_path)
+            function(book_cache_id, number, cache_file_path)
                 return self.dbManager:dynamicUpdateVolume({
-                    chapters_index = chapters_index,
+                    number = number,
                     book_cache_id = book_cache_id
                 }, {
                     content = 'downloaded',
@@ -1971,17 +1970,17 @@ function M:preLoadVolumes(volume, download_volume_count)
 
                 for i = 1, #volume_down_tasks do
                     local nextVolume = volume_down_tasks[i]
-                    if H.is_tbl(nextVolume) and nextVolume.chapters_index ~= nil and nextVolume.book_cache_id ~= nil and nextVolume.bookId ~= nil then
+                    if H.is_tbl(nextVolume) and nextVolume.number ~= nil and nextVolume.book_cache_id ~= nil and nextVolume.bookId ~= nil then
 
-                        local chapters_index = tonumber(nextVolume.chapters_index)
+                        local number = tonumber(nextVolume.number)
                         local book_cache_id = nextVolume.book_cache_id
                         local volume_book_id = nextVolume.bookId
 
-                        if task_return_ok_list['ok_' .. chapters_index] == nil then
+                        if task_return_ok_list['ok_' .. number] == nil then
 
                             local status, err = pcall(function()
                                 self.dbManager:updateVolumeDownloadState({
-                                    chapters_index = chapters_index,
+                                    number = number,
                                     book_cache_id = book_cache_id,
                                     bookId = volume_book_id
                                 }, false)
@@ -2005,7 +2004,7 @@ function M:preLoadVolumes(volume, download_volume_count)
 
             local nextVolume = volume_down_tasks[i]
 
-            if H.is_tbl(nextVolume) and nextVolume.chapters_index ~= nil and nextVolume.book_cache_id ~= nil and nextVolume.bookId ~= nil then
+            if H.is_tbl(nextVolume) and nextVolume.number ~= nil and nextVolume.book_cache_id ~= nil and nextVolume.bookId ~= nil then
 
                 nextVolume.is_pre_loading = true
                 dbg.v('Threaded tasks running:runInSubProcess_start_title:', nextVolume.title)
@@ -2022,15 +2021,15 @@ function M:preLoadVolumes(volume, download_volume_count)
                     if H.is_tbl(err) and err.cacheFilePath then
 
                         local cache_file_path = err.cacheFilePath
-                        local chapters_index = tonumber(nextVolume.chapters_index)
+                        local number = tonumber(nextVolume.number)
                         local book_cache_id = nextVolume.book_cache_id
 
-                        task_return_ok_list['ok_' .. chapters_index] = true
+                        task_return_ok_list['ok_' .. number] = true
 
-                        dbg.v('Download volume successfully:', book_cache_id, chapters_index, cache_file_path)
+                        dbg.v('Download volume successfully:', book_cache_id, number, cache_file_path)
 
                         status, err = pcall(function()
-                            return task_return_db_add(book_cache_id, chapters_index, cache_file_path)
+                            return task_return_db_add(book_cache_id, number, cache_file_path)
                         end)
                         if not status then
                             logger.err('Error saving download to database:', tostring(err))
@@ -2101,7 +2100,7 @@ function M:preLoadVolumes(volume, download_volume_count)
 
                 for i = 1, #task_return_volume do
                     local task_volume = task_return_volume[i]
-                    if H.is_tbl(task_volume) and task_volume.chapters_index ~= nil and task_volume.book_cache_id ~=
+                    if H.is_tbl(task_volume) and task_volume.number ~= nil and task_volume.book_cache_id ~=
                         nil then
                         self.dbManager:updateVolumeDownloadState(task_volume, content)
                     end
@@ -2121,13 +2120,13 @@ function M:preLoadVolumes(volume, download_volume_count)
 
 end
 
-function M:getVolumeInfoCache(bookCacheId, chapterIndex)
-    local volume_data = self.dbManager:getVolumeInfo(bookCacheId, chapterIndex)
+function M:getVolumeInfoCache(bookCacheId, number)
+    local volume_data = self.dbManager:getVolumeInfo(bookCacheId, number)
     return volume_data
 end
 
-function M:getEpubChapterInfoCache(chapterId, chapterIndex)
-    local chapter_data = self.dbManager:getEpubChapterInfo(chapterId, chapterIndex)
+function M:getEpubChapterInfoCache(chapterId, number)
+    local chapter_data = self.dbManager:getEpubChapterInfo(chapterId, number)
     return chapter_data
 end
 
@@ -2266,14 +2265,14 @@ function M:cleanAllBookCaches()
 end
 
 function M:toggleVolumeRead(volume, volume_page, is_update_timestamp)
-    local chapters_index = volume.chapters_index
+    local number = volume.number
     volume.isRead = not volume.isRead
     self.dbManager:updateVolumeIsRead(volume, volume_page ,volume.isRead, is_update_timestamp)
     return wrap_response(true)
 end
 
 function M:changeVolumeCache(volume)
-    local chapters_index = volume.chapters_index
+    local number = volume.number
     local cacheFilePath = volume.cacheFilePath
     local book_cache_id = volume.book_cache_id
     local isDownLoaded = volume.isDownLoaded
@@ -2378,12 +2377,12 @@ function M:getVolumeCoverUrl(bookId)
 end
 
 -- 分卷封面本地缓存路径（无扩展名，download_cover_img 会自动附加扩展名）
-function M:getVolumeCoverCachePath(book_cache_id, chapters_index)
-    if not (H.is_str(book_cache_id) and H.is_num(chapters_index)) then
+function M:getVolumeCoverCachePath(book_cache_id, number)
+    if not (H.is_str(book_cache_id) and H.is_num(number)) then
         return nil
     end
     local resources_path = H.joinPath(H.getBookCachePath(book_cache_id), 'resources')
-    return H.joinPath(resources_path, 'cover_v' .. tostring(chapters_index))
+    return H.joinPath(resources_path, 'cover_v' .. tostring(number))
 end
 
 function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
@@ -2467,8 +2466,8 @@ function M:check_the_background_download_job(volume_down_tasks)
 
     for i = 1, total_num do
         local task_volume = volume_down_tasks[i]
-        if task_volume and task_volume.chapters_index ~= nil then
-            table.insert(target_ages, task_volume.chapters_index)
+        if task_volume and task_volume.number ~= nil then
+            table.insert(target_ages, task_volume.number)
         end
     end
 
@@ -2522,7 +2521,7 @@ end
 
 function M:after_reader_chapter_show(volume)
 
-    local chapters_index = volume.chapters_index
+    local number = volume.number
     local cache_file_path = volume.cacheFilePath
     local book_cache_id = volume.book_cache_id
     -- EPUB 分卷打开不标记已读: isRead 在 refreshVolumeMetadata 被当作"整卷满进度 100%"。
@@ -2606,11 +2605,11 @@ end
 function M:downloadVolume(volume, message_dialog)
 
     local bookCacheId = volume.book_cache_id
-    local chapterIndex = volume.chapters_index
+    local number = volume.number
     local volume_book_id = volume.bookId
-    -- print(bookCacheId, chapterIndex, volume_book_id)
+    -- print(bookCacheId, number, volume_book_id)
 
-    if self.dbManager:isVolumeDownloading(bookCacheId, volume_book_id, chapterIndex) == true and self:isExtractingInBackground() == true then
+    if self.dbManager:isVolumeDownloading(bookCacheId, volume_book_id, number) == true and self:isExtractingInBackground() == true then
         return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 
