@@ -881,7 +881,7 @@ function LibraryView:uploadCurrentProgress()
         return
     end
     local doc_settings = DocSettings:open(file)
-    local is_epub = chapter.mediaType == "EPUB" or file:match("%.xhtml$") ~= nil
+    local is_epub = chapter.mediaType == "EPUB" or file:match("%.x?html$") ~= nil
     local current_page, pages, epub_frac, epub_locator
     -- 实时进度优先取 ReaderFooter(翻页即时更新), sidecar 的 percent_finished 只在 onSaveSettings 落盘会滞后
     local footer = reader.view and reader.view.footer

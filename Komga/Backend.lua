@@ -1718,7 +1718,11 @@ function M:pDownloadVolume(volume, message_dialog, is_recursive)
 
         if status and err and err['data'] then
             local data = err['data']
-            if string.find(url,".xhtml",1,true) then
+            -- EPUB 页面资源可能是 .xhtml 或 .html(取决于书内文件名), 两者都需
+            -- 拼接 url 供 get_chapter_content_type 判定为 XHTML; 否则页面源码会被
+            -- 当 MIXED 转义成可见源码(女校之星/无职转生部分卷缓存成源码的根因)。
+            -- 与 get_chapter_content_type 的 %.x?html$ 判定保持一致。
+            if url:lower():match("%.x?html$") then
                 data = url .. "\n" .. data
             end
             -- print(data)
@@ -2535,7 +2539,7 @@ function M:after_reader_chapter_show(volume)
     -- 由 saveBookProgression 按服务器空间整卷比例(totalProgression)>=99.9% 统一处理。
     -- 漫画单文件卷保持原"打开即已读"行为。
     local is_epub = volume.mediaType == "EPUB"
-        or (H.is_str(volume.cacheFilePath) and volume.cacheFilePath:match("%.xhtml$") ~= nil)
+        or (H.is_str(volume.cacheFilePath) and volume.cacheFilePath:match("%.x?html$") ~= nil)
 
     local status, err = pcall(function()
 
