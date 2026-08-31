@@ -1166,10 +1166,12 @@ local normalize_rel_href = function(href)
     return name:lower()
 end
 
--- 缓存的章节文件名: <安全书名>-<bookId>-<number>.xhtml, 与 H.getVolumeCacheFilePath 生成的路径一致
-local get_cached_chapter_filename = function(bookId, number, book_name)
+-- 缓存的章节文件名: <安全书名>-<bookId>-<number>.<xhtml|html>, 与 H.getVolumeCacheFilePath 生成的路径一致
+-- (扩展名随源页面 URL, 缺省 xhtml)
+local get_cached_chapter_filename = function(bookId, number, book_name, ext)
     book_name = util.getSafeFilename(book_name or "")
-    return string.format("%s-%s-%s.xhtml", book_name, bookId, number)
+    ext = ext or "xhtml"
+    return string.format("%s-%s-%s.%s", book_name, bookId, number, ext)
 end
 
 local replace_css_urls = function(css_text, replace_fn)
@@ -1537,6 +1539,7 @@ function M:_processVolumeContent(volume, content)
                 -- 使其能通过 ReaderLink:openFileFromLink 打开并跳转。
                 do
                     local href_map = {}
+                    local href_ext = {} -- key → 缓存扩展名(xhtml/html, 随源页面 URL)
                     -- 优先用 manifest readingOrder(含全部章节 href→序号 映射)。
                     -- 注意: Lua pattern 里 '|' 是字面字符, 不能当"或"用, 故用 %.x?html$
                     if H.is_tbl(volume.readingOrder) then
@@ -1546,6 +1549,7 @@ function M:_processVolumeContent(volume, content)
                                 local key = normalize_rel_href(ro_item.href)
                                 if key then
                                     href_map[key] = ro_idx
+                                    href_ext[key] = ro_item.href:lower():match("%.(x?html)$")
                                 end
                             end
                         end
@@ -1559,6 +1563,7 @@ function M:_processVolumeContent(volume, content)
                                 local key = normalize_rel_href(ch.url)
                                 if key and not href_map[key] then
                                     href_map[key] = ch.number
+                                    href_ext[key] = ch.url:lower():match("%.(x?html)$")
                                 end
                             end
                         end
@@ -1576,7 +1581,8 @@ function M:_processVolumeContent(volume, content)
                                 local target_index = key and href_map[key]
                                 if H.is_num(target_index) then
                                     return open .. quote ..
-                                        get_cached_chapter_filename(bookId, target_index, cached_name) .. quote
+                                        get_cached_chapter_filename(bookId, target_index, cached_name,
+                                            href_ext[key]) .. quote
                                 end
                                 return open .. quote .. href .. quote
                             end)

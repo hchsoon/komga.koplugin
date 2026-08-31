@@ -800,8 +800,11 @@ function LibraryView:scanEpubVolumeChapters(book_cache_id, bookId, book_name, cu
             if H.is_num(idx) then
                 local cp = 1
                 local frac = 0
-                local path = H.getVolumeCacheFilePath(book_cache_id, bookId, idx, book_name or "") .. ".xhtml"
-                if util.fileExists(path) then
+                -- 内部章节缓存扩展名随源页面 URL(.xhtml 或 .html), 探测实际存在的文件
+                local base = H.getVolumeCacheFilePath(book_cache_id, bookId, idx, book_name or "")
+                local path = util.fileExists(base .. ".xhtml") and (base .. ".xhtml")
+                    or (util.fileExists(base .. ".html") and (base .. ".html")) or nil
+                if path then
                     local ds = DocSettings:open(path)
                     if ds and ds.readSetting then
                         local p = tonumber(ds:readSetting("doc_pages")) or 0
@@ -905,7 +908,9 @@ function LibraryView:uploadCurrentProgress()
         --    (progression<1 必须, 服务器对 1.0 返回 400 "Invalid progression");
         -- 2) 兜底: 直接构造最小 locator(仅 href + 章内 progression);
         -- 3) 最后: 无法确定章节时按累计页数换算整卷比例走 positions
-        local cur_idx = tonumber(file:match("%-(%d+)%.xhtml$")) or nil
+        -- 内部章节缓存扩展名随源页面 URL(.xhtml 或 .html), 统一 %.x?html$ 解析;
+        -- 解析失败会导致 locator 恒为"第 1 章 0%", 服务器进度冻结在卷首
+        local cur_idx = tonumber(file:match("%-(%d+)%.x?html$")) or nil
         local map, _ = self:epubChapterHrefMap(chapter.bookId)
         local href = cur_idx and map[cur_idx]
         local loc
@@ -1621,12 +1626,11 @@ function LibraryView:showReaderUI(chapter)
     end
     -- print("Cache file path...", chapter.cacheFilePath)
     chapter.booksCount = Backend:getEpubChapterCount(chapter.bookId)
-    -- 兜底: 分卷类型可能因翻页/换章节而丢失, 由缓存文件扩展名推断 EPUB
-    if chapter.mediaType == nil and H.is_str(chapter.cacheFilePath) then
-        local _, ext = util.splitFileNameSuffix(chapter.cacheFilePath)
-        if ext and ext:lower() == "xhtml" then
-            chapter.mediaType = "EPUB"
-        end
+    -- 兜底: 分卷类型可能因翻页/换章节而丢失, 按 DB 是否有内部章节清单推断 EPUB。
+    -- 不能按扩展名推断: EPUB 内部章节缓存可能是 .xhtml 或 .html, 而书源文本章节也缓存为 .html
+    -- (booksCount 即上方 getEpubChapterCount 结果, 仅 EPUB 分卷 > 0)
+    if chapter.mediaType == nil and H.is_num(chapter.booksCount) and chapter.booksCount > 0 then
+        chapter.mediaType = "EPUB"
     end
     self.displayed_chapter = chapter
     -- 记录当前阅读是否为分卷快捷方式进入（TOC 决策依据）

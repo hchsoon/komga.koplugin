@@ -123,11 +123,24 @@ M.install = function()
         if chapter and chapter.mediaType == "EPUB" then
             return true
         end
-        -- 兜底: 缓存为单页 xhtml 的即为 EPUB 内部章节(mediaType 可能因翻页/换章节丢失)
+        -- 兜底(mediaType 可能因翻页/换章节丢失): EPUB 内部章节按 DB 清单判定。
+        -- .xhtml 缓存只有 EPUB 在用, 直接认定; .html 可能是书源文本章, 须查 DB
         if chapter and type(chapter.cacheFilePath) == 'string' then
             local ext = chapter.cacheFilePath:lower():match("%.([^.]+)$")
             if ext == "xhtml" then
                 return true
+            elseif ext == "html" then
+                local bookId = chapter.cacheFilePath:match("-([%u%d]+)-%d+%.html$")
+                if bookId then
+                    local okB, Backend = pcall(require, "Komga/Backend")
+                    if okB and Backend and Backend.dbManager then
+                        local okQ, all = pcall(Backend.dbManager.getAllEpubChapterUrls,
+                            Backend.dbManager, bookId)
+                        if okQ and type(all) == "table" and #all > 0 then
+                            return true
+                        end
+                    end
+                end
             end
         end
         return false
@@ -273,9 +286,12 @@ M.install = function()
                 return original_openFileFromLink(self, link_url)
             end
             local cur_file = self.ui.document and self.ui.document.file
-            local cur_bookId = cur_file and cur_file:match("-([%u%d]+)-%d+%.xhtml$")
-            -- 前缀取到 <safe-name>-<bookId>-(不含章节号), 目标文件 = 前缀..index..".xhtml"
-            local cur_prefix = cur_file and cur_file:match("^(.*)-%d+%.xhtml$")
+            -- 内部章节缓存扩展名随源页面 URL(.xhtml 或 .html), 统一 %.x?html$ 解析;
+            -- 重建目标文件名沿用当前文件扩展名
+            local cur_ext = cur_file and cur_file:match("%.(x?html)$")
+            local cur_bookId = cur_file and cur_file:match("-([%u%d]+)-%d+%.x?html$")
+            -- 前缀取到 <safe-name>-<bookId>-(不含章节号), 目标文件 = 前缀-index-<ext>
+            local cur_prefix = cur_file and cur_file:match("^(.*)-%d+%.x?html$")
             local bookId, target_idx, target_file
             -- Case 1: 缓存文件名 <safe-name>-<bookId>-<index>.xhtml
             -- (必须同时解析出 bookId 才视为缓存文件名; 否则可能是旧缓存的相对路径,
@@ -295,7 +311,7 @@ M.install = function()
                         elseif cur_bookId == bookId and cur_prefix then
                             -- 链接可能被 URL 编码(中文/空格变 %xx), 磁盘文件名与 href 字节
                             -- 不一致; 用当前文档同卷前缀重建目标路径再试
-                            local rebuilt = cur_prefix .. "-" .. target_idx .. ".xhtml"
+                            local rebuilt = cur_prefix .. "-" .. target_idx .. "." .. (cur_ext or "xhtml")
                             if lfs.attributes(rebuilt, "mode") == "file" then
                                 target_file = rebuilt
                             end
@@ -316,7 +332,7 @@ M.install = function()
                                     normalize_href_basename(ch.url) == key then
                                     target_idx = ch.number
                                     bookId = cur_bookId
-                                    target_file = cur_prefix .. "-" .. target_idx .. ".xhtml"
+                                    target_file = cur_prefix .. "-" .. target_idx .. "." .. (cur_ext or "xhtml")
                                     break
                                 end
                             end
