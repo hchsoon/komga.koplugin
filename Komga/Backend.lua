@@ -32,6 +32,7 @@ local time = require("ui/time")
 local UIManager = require("ui/uimanager")
 local H = require("Komga/Helper")
 local Config = require("Komga/Config")
+local VolumePath = require("Komga/VolumePath")
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -317,6 +318,53 @@ function M:loadSpore()
     end
 end
 
+-- 一次性设置迁移(幂等: 以字段缺失为触发条件, 已迁移自然跳过)。
+-- 新增迁移只需往表里加 {name, check, run}, 不要在 initialize 里散落 if 分支。
+local ONE_TIME_MIGRATIONS = {
+    {
+        name = "<1.038 setting_url 继承 komga_server",
+        check = function(d)
+            return d.setting_url == nil and d.reader3_un == nil and H.is_str(d.komga_server)
+        end,
+        run = function(d)
+            d.setting_url = d.komga_server
+        end
+    },
+    {
+        name = "<1.049 server_address 继承 komga_server",
+        check = function(d)
+            return d.server_address == nil and H.is_str(d.komga_server)
+        end,
+        run = function(d)
+            d.server_address = d.komga_server
+            d.komga_server = nil
+        end
+    },
+    {
+        name = "api_key 缺省补默认值",
+        check = function(d)
+            return not H.is_str(d.api_key)
+        end,
+        run = function(d)
+            d.api_key = Config.DEFAULT_API_KEY
+        end
+    }
+}
+
+function M:runOneTimeMigrations()
+    local dirty = false
+    for _, migration in ipairs(ONE_TIME_MIGRATIONS) do
+        if migration.check(self.settings_data.data) then
+            migration.run(self.settings_data.data)
+            dirty = true
+            dbg.v('settings migration applied:', migration.name)
+        end
+    end
+    if dirty then
+        self.settings_data:flush()
+    end
+end
+
 function M:initialize()
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
     -- 阅读中"后几页"预下载(EPUB 内部章节)的独立 pid 文件, 与整卷预下载互不阻塞
@@ -325,17 +373,8 @@ function M:initialize()
     self.stream_pages_pid_file = H.getTempDirectory() .. '/stream_pages.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
 
-    -- 兼容历史版本 <1.038
-    if not self.settings_data.data.setting_url and not self.settings_data.data.reader3_un and
-        H.is_str(self.settings_data.data.komga_server) then
-        self.settings_data.data.setting_url = self.settings_data.data.komga_server
-    end
-    -- <1.049
-    if not self.settings_data.data.server_address and H.is_str(self.settings_data.data.komga_server) then
-        self.settings_data.data.server_address = self.settings_data.data.komga_server
-        self.settings_data.data.komga_server = nil
-        self.settings_data:flush()
-    end
+    -- 旧版本设置迁移(集中管理, 见 ONE_TIME_MIGRATIONS)
+    self:runOneTimeMigrations()
 
     if self.settings_data and not self.settings_data.data['server_address'] then
         self.settings_data.data = {
@@ -348,11 +387,6 @@ function M:initialize()
             stream_image_view = nil,
             disable_browser = nil
         }
-        self.settings_data:flush()
-    end
-    -- 兼容旧设置文件: 没有 api_key 键时补默认值
-    if not H.is_str(self.settings_data.data.api_key) then
-        self.settings_data.data.api_key = Config.DEFAULT_API_KEY
         self.settings_data:flush()
     end
 
@@ -1156,33 +1190,15 @@ local volume_writeToFile = function(volume, filePath, resources)
     end
 end
 
--- 生成章节链接匹配关键字: 取文件基名(去扩展名, 小写)。
--- epub 内部章节文件通常唯一命名(如 Section0031.xhtml), 而 DB 里 url 是
--- 完整资源 URL、xhtml 内部 href 是相对路径, 只有基名是两边一致的, 故按基名匹配。
+-- 生成章节链接匹配关键字(实现收敛在 VolumePath.basenameKey, 有单测)
 local normalize_rel_href = function(href)
-    if type(href) ~= "string" or href == "" then
-        return nil
-    end
-    -- 全 URL(如 Komga /resource/ 资源地址)只取路径部分
-    local u = href:gsub("^%a[%w+.-]*://[^/]+/", "")
-    u = u:gsub("[?#].*", "")
-    local name = u:match("([^/]+)$")
-    if not name then
-        return nil
-    end
-    name = name:gsub("%.x?html?$", "")
-    if name == "" then
-        return nil
-    end
-    return name:lower()
+    return VolumePath.basenameKey(href)
 end
 
 -- 缓存的章节文件名: <安全书名>-<bookId>-<number>.<xhtml|html>, 与 H.getVolumeCacheFilePath 生成的路径一致
 -- (扩展名随源页面 URL, 缺省 xhtml)
 local get_cached_chapter_filename = function(bookId, number, book_name, ext)
-    book_name = util.getSafeFilename(book_name or "")
-    ext = ext or "xhtml"
-    return string.format("%s-%s-%s.%s", book_name, bookId, number, ext)
+    return VolumePath.chapterFileName(util.getSafeFilename(book_name or ""), bookId, number, ext)
 end
 
 local replace_css_urls = function(css_text, replace_fn)
@@ -2775,7 +2791,7 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
 
     -- 封面版本缓存: cover_url 带 ?v=<服务器 lastModified>(见 upsertSeries)时,
     -- 版本未变且本地已有封面文件则直接复用; Komga 换封面后随书架同步自动刷新
-    local cover_version = cover_url:match("[?&]v=([^&]*)") or nil
+    local cover_version = VolumePath.coverVersion(cover_url)
     if cover_version and cover_version ~= "" then
         local marker_path = cover_path_no_ext .. '.v'
         local marker = nil

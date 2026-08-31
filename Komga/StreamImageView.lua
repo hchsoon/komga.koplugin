@@ -4,17 +4,23 @@ local RenderImage = require("ui/renderimage")
 local ImageViewer = require("ui/widget/imageviewer")
 local logger = require("logger")
 local dbg = require("dbg")
+local Device = require("device")
 
 local MessageBox = require("Komga/MessageBox")
 local Backend = require("Komga/Backend")
 local H = require("Komga/Helper")
+local VolumePath = require("Komga/VolumePath")
+
+local Screen = Device.screen
 
 local M = ImageViewer:extend{
     bookinfo = nil,
     chapter = nil,
     chapter_imglist = {},
     chapter_imglist_cur = 1,
-    on_return_callback = nil
+    on_return_callback = nil,
+    stream_rtl_auto = nil, -- 自动 RTL: 由书籍 metadata.readingDirection 判定
+    _image_is_bb = nil -- 本次取到的 self.image 已是 blitbuffer(双页拼合), 跳过再渲染
 }
 
 function M:init()
@@ -79,11 +85,19 @@ function M:onClose()
 end
 
 function M:onShowNextImage()
-    self:getTurnPageNextImage('next', self.chapter_imglist_cur + 1)
+    if self:isDualPageEnabled() then
+        self:turnDualPage(1)
+    else
+        self:getTurnPageNextImage('next', self.chapter_imglist_cur + 1)
+    end
 end
 
 function M:onShowPrevImage()
-    self:getTurnPageNextImage('prev', self.chapter_imglist_cur - 1)
+    if self:isDualPageEnabled() then
+        self:turnDualPage(-1)
+    else
+        self:getTurnPageNextImage('prev', self.chapter_imglist_cur - 1)
+    end
 end
 
 -- 下载单页: 预取缓存命中直接读本地, 未命中走网络(与原行为一致)
@@ -136,6 +150,118 @@ function M:scheduleStreamPreload()
     end
 end
 
+-- ===========================================================================
+-- 双页(对页)模式 — 移植自 comicreader.koplugin 的配对规则
+--   设置 stream_dual_page: "auto"(默认, 横屏开)/"on"/"off"
+--   设置 stream_dual_first_cover: 首页为封面时封面独占, 之后 (2,3)(4,5)...
+--   设置 stream_rtl: nil=按书自动(metadata.readingDirection)/true/false(强制)
+-- ===========================================================================
+
+function M:isDualPageEnabled()
+    local mode = Backend:getSettings().stream_dual_page or "auto"
+    if mode == "on" then
+        return true
+    end
+    if mode == "off" then
+        return false
+    end
+    -- auto: 横屏自动开双页(每次判定, 旋转即生效)
+    return Screen:getWidth() > Screen:getHeight()
+end
+
+function M:isRTL()
+    local forced = Backend:getSettings().stream_rtl
+    if forced ~= nil then
+        return forced == true
+    end
+    return self.stream_rtl_auto == true
+end
+
+-- 当前页(基页)所在的页对, 返回按显示顺序的页号数组(RTL 时右→左)
+function M:dualIndicesFor(cur)
+    local first_cover = Backend:getSettings().stream_dual_first_cover ~= false
+    local total = #self.chapter_imglist
+    return VolumePath.dualPairFromBase(cur, total, first_cover, self:isRTL())
+end
+
+-- 两页并排拼合为单个 blitbuffer(顶部对齐)。
+-- 不在此处做高度归一缩放: bb:scale 是纯 Lua 逐像素缩放(太慢),
+-- 整体缩放交给 ImageViewer/ImageWidget 原生适配; 页尺寸不一致时顶对齐即可。
+function M:composeDualPages(bb_list)
+    local BlitBuffer = require("ffi/blitbuffer")
+    local total_w, max_h = 0, 0
+    for _, bb in ipairs(bb_list) do
+        total_w = total_w + bb:getWidth()
+        if bb:getHeight() > max_h then
+            max_h = bb:getHeight()
+        end
+    end
+    if total_w <= 0 or max_h <= 0 then
+        return nil
+    end
+    local composed = BlitBuffer.new(total_w, max_h, bb_list[1]:getType())
+    local x = 0
+    for _, bb in ipairs(bb_list) do
+        pcall(function()
+            composed:blitFrom(bb, x, 0)
+        end)
+        x = x + bb:getWidth()
+    end
+    for _, bb in ipairs(bb_list) do
+        pcall(function()
+            bb:free()
+        end)
+    end
+    return composed
+end
+
+-- 取图并渲染指定页号列表(双页时两张拼合), 返回 blitbuffer 或 nil。
+-- 任一页失败则退化为能取到的页, 全部失败返回 nil。
+function M:renderPagesAt(indices)
+    local bbs = {}
+    for _, idx in ipairs(indices or {}) do
+        local src = self.chapter_imglist[idx]
+        local data = H.is_str(src) and self:downloadPageImage(src) or nil
+        if data then
+            local ok, bb = pcall(function()
+                return RenderImage:renderImageData(data, #data, false)
+            end)
+            if ok and bb then
+                table.insert(bbs, bb)
+            end
+        end
+    end
+    if #bbs == 0 then
+        return nil
+    end
+    if #bbs == 1 then
+        return bbs[1]
+    end
+    return self:composeDualPages(bbs)
+end
+
+-- 双页模式翻页: 以页对为步进(direction = 1 下一对 / -1 上一对),
+-- 越出本卷时复用单页路径的换章逻辑。
+function M:turnDualPage(direction)
+    local first_cover = Backend:getSettings().stream_dual_first_cover ~= false
+    local total = #self.chapter_imglist
+    local cur_base = VolumePath.dualBaseFromPage(self.chapter_imglist_cur or 1, first_cover)
+    local next_base = cur_base + direction * 2
+    if next_base > total then
+        if direction > 0 then
+            return self:getTurnPageNextImage('next', total + 1)
+        end
+        return
+    end
+    if next_base < 1 then
+        if direction < 0 then
+            return self:getTurnPageNextImage('prev', 0)
+        end
+        return
+    end
+    return self:getTurnPageNextImage(direction > 0 and 'next' or 'prev', next_base)
+end
+
 function M:get_image_bb(imgData)
     imgData = imgData or self.image
 
@@ -172,12 +298,24 @@ function M:loadChatperInitImage(chapter)
             end
         end
         local img_src = self.chapter_imglist[start_id]
-        local img_data = self:downloadPageImage(img_src)
 
-        -- 渲染图片数据
-        self.image = self:get_image_bb(img_data)
+        -- 自动 RTL: 从 BookDto.metadata.readingDirection 判定(rtl/RTL/RIGHT_TO_LEFT)
+        local meta = H.is_tbl(response.body) and response.body.metadata
+        local dir = H.is_tbl(meta) and meta.readingDirection
+        self.stream_rtl_auto = (dir == "rtl" or dir == "RTL" or dir == "RIGHT_TO_LEFT")
 
         self.chapter_imglist_cur = start_id
+
+        if self:isDualPageEnabled() then
+            -- 双页: 以续读页为基页渲染页对(已是 bb, 标记跳过尾部再渲染)
+            self.image = self:renderPagesAt(self:dualIndicesFor(start_id))
+            self._image_is_bb = true
+        else
+            local img_data = self:downloadPageImage(img_src)
+            -- 渲染图片数据
+            self.image = self:get_image_bb(img_data)
+            self._image_is_bb = nil
+        end
 
         self:scheduleStreamPreload()
 
@@ -216,8 +354,14 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         local img_src = self.chapter_imglist[image_num]
 
         if H.is_str(img_src) then
-            -- 尝试下载当前图片
-            self.image = self:downloadPageImage(img_src)
+            -- 取当前页(双页模式下取整个页对并拼合)
+            if self:isDualPageEnabled() then
+                self.image = self:renderPagesAt(self:dualIndicesFor(image_num))
+                self._image_is_bb = true
+            else
+                self.image = self:downloadPageImage(img_src)
+                self._image_is_bb = nil
+            end
             if self.image then
                 self.chapter_imglist_cur = image_num
                 is_success = true
@@ -245,7 +389,13 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             new_image_num = (call_event_type == 'next') and 1 or #self.chapter_imglist
             local img_src = self.chapter_imglist[new_image_num]
 
-            self.image = self:downloadPageImage(img_src)
+            if self:isDualPageEnabled() then
+                self.image = self:renderPagesAt(self:dualIndicesFor(new_image_num))
+                self._image_is_bb = true
+            else
+                self.image = self:downloadPageImage(img_src)
+                self._image_is_bb = nil
+            end
             if self.image then
                 self.chapter_imglist_cur = new_image_num
                 is_success = true
@@ -271,9 +421,20 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         end
 
         self._images_list_cur = new_image_num
-        self.image = self:get_image_bb(self.image)
+        if self._image_is_bb then
+            self._image_is_bb = nil -- 双页拼合已是 blitbuffer, 不再单独渲染
+        else
+            self.image = self:get_image_bb(self.image)
+        end
 
         self:update()
+
+        -- e-ink: 图像页全刷+抖动, 避免残影(对齐 ReaderView 图像页策略)
+        if G_reader_settings and G_reader_settings:nilOrTrue("refresh_on_pages_with_images") then
+            UIManager:setDirty(self, function()
+                return "full", nil, true
+            end)
+        end
 
         -- 显示后预取后几页(子进程后台, 静默失败)
         self:scheduleStreamPreload()

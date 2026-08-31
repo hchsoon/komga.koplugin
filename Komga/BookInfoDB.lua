@@ -19,6 +19,7 @@ local logger = require("logger")
 local dbg = require("dbg")
 local Device = require("device")
 local util = require("util")
+local VolumePath = require("Komga/VolumePath")
 local md5 = require("ffi/sha2").md5
 local H = require("Komga/Helper")
 
@@ -608,12 +609,7 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
     for index, series in ipairs(seriesData) do
         -- 封面 URL 带服务器 lastModified 版本号(?v=): download_cover_img 据此判断
         -- 封面是否需要重新下载, Komga 换封面后随书架同步自动刷新
-        local cover_version = ""
-        if H.is_str(series.lastModified) and series.lastModified ~= "" then
-            cover_version = series.lastModified:gsub("[^%w]", function(c)
-                return string.format("%%%02X", string.byte(c))
-            end)
-        end
+        local cover_version = VolumePath.escapeVersion(H.is_str(series.lastModified) and series.lastModified or "")
         local coverUrl = server_address .. "/api/v1/series/" .. series.id ..
             "/thumbnail" .. (cover_version ~= "" and ("?v=" .. cover_version) or "")
         batch_data[index] = {bookShelfId, series.id, series.metadata.title, series.author, series.url, series.id or "",

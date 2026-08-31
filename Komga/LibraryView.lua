@@ -21,6 +21,7 @@ local KomgaModel = require("Komga/KomgaModel")
 local MessageBox = require("Komga/MessageBox")
 local H = require("Komga/Helper")
 local Config = require("Komga/Config")
+local VolumePath = require("Komga/VolumePath")
 
 local LibraryView = {
     disk_available = nil,
@@ -342,6 +343,25 @@ function LibraryView:openBrowserMenu(file)
     UIManager:show(dialog)
 end
 
+-- 流式双页/翻页方向的设置项显示文案
+local stream_dual_mode_label = function(settings)
+    local mode = settings.stream_dual_page or "auto"
+    if mode == "on" then
+        return "[常开]"
+    end
+    if mode == "off" then
+        return "[关闭]"
+    end
+    return "[自动·横屏]"
+end
+
+local stream_rtl_label = function(settings)
+    if settings.stream_rtl == nil then
+        return "[按书自动]"
+    end
+    return settings.stream_rtl == true and "[右开本]" or "[左开本]"
+end
+
 function LibraryView:openMenu()
     local dialog
     self:getInstance()
@@ -379,6 +399,62 @@ function LibraryView:openMenu()
                 ok_text = "切换",
                 cancel_text = "取消"
             })
+        end
+    }}, {{
+        text = string.format("%s 流式双页模式 %s", Icons.FA_BOOK, stream_dual_mode_label(settings)),
+        callback = function()
+            UIManager:close(dialog)
+            -- 三态循环: 自动(横屏开) -> 常开 -> 关闭
+            local order = {"auto", "on", "off"}
+            local cur = settings.stream_dual_page or "auto"
+            local next_mode = "auto"
+            for i, m in ipairs(order) do
+                if m == cur and order[i + 1] then
+                    next_mode = order[i + 1]
+                end
+            end
+            settings.stream_dual_page = next_mode ~= "auto" and next_mode or nil
+            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                MessageBox:notice("流式双页: " .. stream_dual_mode_label(settings) ..
+                    " (重新打开分卷生效)")
+            end, function(err_msg)
+                MessageBox:error('设置失败:', err_msg)
+            end)
+        end
+    }}, {{
+        text = string.format("%s 双页首页为封面 %s", Icons.FA_BOOK,
+            (settings.stream_dual_first_cover ~= false and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        callback = function()
+            UIManager:close(dialog)
+            -- 开启: 封面独占一屏, 之后 (2,3)(4,5) 配对(漫画书标准拼页); 关闭: (1,2)(3,4)
+            settings.stream_dual_first_cover = settings.stream_dual_first_cover == false and true or false
+            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                MessageBox:notice("双页首页为封面: " ..
+                    (settings.stream_dual_first_cover ~= false and "开" or "关") ..
+                    " (重新打开分卷生效)")
+            end, function(err_msg)
+                MessageBox:error('设置失败:', err_msg)
+            end)
+        end
+    }}, {{
+        text = string.format("%s 流式翻页方向 %s", Icons.FA_BOOK, stream_rtl_label(settings)),
+        callback = function()
+            UIManager:close(dialog)
+            -- 三态循环: 按书自动 -> 右开(RTL) -> 左开(LTR)
+            local forced = settings.stream_rtl
+            if forced == nil then
+                settings.stream_rtl = true
+            elseif forced == true then
+                settings.stream_rtl = false
+            else
+                settings.stream_rtl = nil
+            end
+            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                MessageBox:notice("流式翻页方向: " .. stream_rtl_label(settings) ..
+                    " (重新打开分卷生效)")
+            end, function(err_msg)
+                MessageBox:error('设置失败:', err_msg)
+            end)
         end
     }}, {{
         text = string.format("%s 自动生成快捷方式 %s", Icons.FA_FOLDER,
@@ -908,9 +984,9 @@ function LibraryView:uploadCurrentProgress()
         --    (progression<1 必须, 服务器对 1.0 返回 400 "Invalid progression");
         -- 2) 兜底: 直接构造最小 locator(仅 href + 章内 progression);
         -- 3) 最后: 无法确定章节时按累计页数换算整卷比例走 positions
-        -- 内部章节缓存扩展名随源页面 URL(.xhtml 或 .html), 统一 %.x?html$ 解析;
+        -- 内部章节缓存扩展名随源页面 URL(.xhtml 或 .html), 统一经 VolumePath 解析;
         -- 解析失败会导致 locator 恒为"第 1 章 0%", 服务器进度冻结在卷首
-        local cur_idx = tonumber(file:match("%-(%d+)%.x?html$")) or nil
+        local cur_idx = VolumePath.chapterIndex(file)
         local map, _ = self:epubChapterHrefMap(chapter.bookId)
         local href = cur_idx and map[cur_idx]
         local loc

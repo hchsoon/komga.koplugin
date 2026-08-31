@@ -23,6 +23,30 @@ M.install = function()
             return
         end
     end
+
+    -- 幂等: 重复调用 install()(如重启流程残留)会把补丁包两层
+    if M._installed then
+        return
+    end
+    M._installed = true
+    M.patch_status = {}
+
+    -- 每个补丁独立 pcall + 状态记录: 单个失败(如 KOReader 升级改了模块接口)
+    -- 不再拖垮后续补丁, 失败名单可经 M.patch_status 查询。
+    -- 注意: 各补丁正文保持原有缩进未重排(Lua 不依赖缩进), 减少无谓 diff。
+    local logger = require("logger")
+    local function apply(name, patch_fn)
+        if M.patch_status[name] ~= nil then
+            return
+        end
+        local ok, err = pcall(patch_fn)
+        M.patch_status[name] = ok == true or tostring(err)
+        if ok then
+            logger.dbg("komga patch applied:", name)
+        else
+            logger.warn("komga patch FAILED:", name, err)
+        end
+    end
     local is_komga_path = function(file_path, instance)
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
@@ -35,6 +59,7 @@ M.install = function()
         end
         return type(file_path) == 'string' and file_path:find("/Komga\u{200B}漫画/", 1, true) or false
     end
+    apply("ReaderRolling.onGotoViewRel", function()
     local ReaderRolling = require("apps/reader/modules/readerrolling")
     local onGotoViewRel_original = ReaderRolling.onGotoViewRel
     ReaderRolling.onGotoViewRel = function(self, diff)
@@ -50,6 +75,9 @@ M.install = function()
         return true
     end
     M._setMark(ReaderRolling)
+    end)
+
+    apply("ReaderPaging.onGotoViewRel", function()
     local ReaderPaging = require("apps/reader/modules/readerpaging")
     local onGotoViewRel_orig = ReaderPaging.onGotoViewRel
     -- In scroll mode, one screen may have multiple pages
@@ -64,6 +92,9 @@ M.install = function()
         end
         return true
     end
+    end)
+
+    apply("ReaderStatus.addToMainMenu", function()
     local ReaderStatus = require("apps/reader/modules/readerstatus")
     local addToMainMenu_readerstatus_orig = ReaderStatus.addToMainMenu
     function ReaderStatus:addToMainMenu(menu_items)
@@ -71,6 +102,9 @@ M.install = function()
             addToMainMenu_readerstatus_orig(self, menu_items)
         end
     end
+    end)
+
+    apply("FileManagerBookInfo.addToMainMenu", function()
     local FileManagerBookInfo = require("apps/filemanager/filemanagerbookinfo")
     local addToMainMenu_filemanagerbookinfo_orig = FileManagerBookInfo.addToMainMenu
     function FileManagerBookInfo:addToMainMenu(menu_items)
@@ -78,8 +112,13 @@ M.install = function()
             addToMainMenu_filemanagerbookinfo_orig(self, menu_items)
         end
     end
-    local ReadHistory = require("readhistory")
+    end)
+
+    -- lfs 是 ReadHistory/ReaderLink 两个补丁共用的 upvalue, 提到 install 作用域
     local lfs = require("libs/libkoreader-lfs")
+
+    apply("ReadHistory.addItem/updateLastBookTime", function()
+    local ReadHistory = require("readhistory")
     local original_addItem = ReadHistory.addItem
     function ReadHistory:addItem(file, ts, no_flush)
         -- Komga 阅读打开的是缓存文件(EPUB 内部章节 xhtml / 漫画 cbz), 直接写进历史点开会丢失
@@ -107,6 +146,9 @@ M.install = function()
             original_updateLastBookTime(self, no_flush)
         end
     end
+    end)
+
+    apply("ReaderToc.onShowToc", function()
     local ReaderToc = require("apps/reader/modules/readertoc")
     local original_onShowToc = ReaderToc.onShowToc
     -- Komga 阅读时目录按钮的决策:
@@ -157,7 +199,12 @@ M.install = function()
             return original_onShowToc(self)
         end
     end
+    end)
+
+    -- FileManager 被 showOpenWithDialog/showFiles/openFile 三个补丁共用, 提到 install 作用域
     local FileManager = require("apps/filemanager/filemanager")
+
+    apply("FileManager.showOpenWithDialog", function()
     local original_showOpenWithDialog = FileManager.showOpenWithDialog
     function FileManager:showOpenWithDialog(file)
         if file and is_komga_browser_path(file) then
@@ -166,6 +213,9 @@ M.install = function()
             original_showOpenWithDialog(self, file)
         end
     end
+    end)
+
+    apply("FileManager.showFiles", function()
     local original_showFiles = FileManager.showFiles
     function FileManager:showFiles(path, focused_file, selected_files)
         if is_komga_path(path) then
@@ -182,8 +232,11 @@ M.install = function()
         end
         original_showFiles(self, path, focused_file, selected_files)
     end
+    end)
+
     -- 兜底: Komga 快捷方式(.html 存书籍元信息)必须路由到 Komga 插件, 即使 sidecar 的 provider 字段缺失
     -- (DocumentRegistry:getProvider 会退回 document provider, 用 crengine 直接打开 html 显示元信息)
+    apply("FileManager.openFile", function()
     local original_openFile = FileManager.openFile
     function FileManager:openFile(file, provider, doc_caller_callback, aux_caller_callback, after_open_callback)
         if not provider and file and is_komga_browser_path(file) and file:find("\u{200B}.html", 1, true) then
@@ -201,9 +254,12 @@ M.install = function()
         end
         return original_openFile(self, file, provider, doc_caller_callback, aux_caller_callback, after_open_callback)
     end
+    end)
+
     -- 兜底拦截: 任何走到 ReaderUI:showReader 的 komga 快捷方式都必须路由回插件,
     -- 否则 crengine 会直接渲染 .html 元信息。这覆盖 FileManager:openFile 补丁之外
     -- 的所有入口(如返回流程/阅读记录里直接调 showReader 的路径)。
+    apply("ReaderUI.showReader", function()
     local ReaderUI = require("apps/reader/readerui")
     local original_showReader = ReaderUI.showReader
     function ReaderUI:showReader(file, provider, seamless, is_provider_forced, after_open_callback)
@@ -216,6 +272,9 @@ M.install = function()
         end
         return original_showReader(self, file, provider, seamless, is_provider_forced, after_open_callback)
     end
+    end)
+
+    apply("filemanagerutil.genBookCoverButton", function()
     local filemanagerutil = require("apps/filemanager/filemanagerutil")
     local original_genBookCoverButton = filemanagerutil.genBookCoverButton
     function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
@@ -235,7 +294,10 @@ M.install = function()
             return original_genBookCoverButton(file, book_props, caller_callback, button_disabled)
         end
     end
+    end)
+
     -- fix koreader .cbz next chapter crash
+    apply("ReaderFooter.getBookProgress", function()
     local ReaderFooter = require("apps/reader/modules/readerfooter")
     local original_getBookProgress = ReaderFooter.getBookProgress
     function ReaderFooter:getBookProgress()
@@ -245,6 +307,7 @@ M.install = function()
             return self.pageno / self.pages
         end
     end
+    end)
     -- 分卷 EPUB 内链(目录页 <a href> / 正文互链)跳转到缓存章节。
     -- 1) 链接已在下载时重写成缓存文件名 <safe-name>-<bookId>-<index>.xhtml:
     --    目标文件已缓存则直接打开(跳过原生"是否打开本地文档"确认框);
@@ -253,6 +316,7 @@ M.install = function()
     --    以当前文档同卷章节为基准, 用数据库 url 的基名映射到缓存文件名。
     -- 3) 调试日志已关闭(dbg 为空操作), 不再写 <datadir>/komga_link_debug.log。
     --    若需重新定位链接跳转问题, 把下方 dbg 恢复为写文件实现即可。
+    apply("ReaderLink.openFileFromLink", function()
     local ReaderLink = require("apps/reader/modules/readerlink")
     local original_openFileFromLink = ReaderLink.openFileFromLink
     local function dbg(_msg)
@@ -458,6 +522,7 @@ M.install = function()
         return res
     end
     dbg("install() patched ReaderLink:openFileFromLink")
+    end)
 end
 
 return M
