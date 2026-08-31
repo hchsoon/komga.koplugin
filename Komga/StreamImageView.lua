@@ -25,6 +25,20 @@ local M = ImageViewer:extend{
 
 function M:init()
     ImageViewer.init(self)
+    -- 双指左右滑: 单独旋转屏幕(ImageViewer 未占用该手势;
+    -- 双击不可用——首击会先触发 Tap 的翻页/双页切换)
+    if Device:isTouchDevice() and self.ges_events then
+        local Geom = require("ui/geometry")
+        local GestureRange = require("ui/gesturerange")
+        local range = Geom:new{
+            x = 0, y = 0,
+            w = Screen:getWidth(),
+            h = Screen:getHeight()
+        }
+        -- 检测器只发 two_finger_swipe + direction 字段, 方向过滤用 GestureRange.direction
+        self.ges_events.TwoFingerSwipeLeft = {GestureRange:new{ges = "two_finger_swipe", direction = "left", range = range}}
+        self.ges_events.TwoFingerSwipeRight = {GestureRange:new{ges = "two_finger_swipe", direction = "right", range = range}}
+    end
 end
 
 function M:fetchAndShow(options)
@@ -290,6 +304,9 @@ function M:autoRotateForDualMode(enabled)
     if rotated then
         -- 旋转后全量重绘; ImageViewer.update 会按新屏幕尺寸重排
         UIManager:setDirty("all", "full")
+        pcall(function()
+            self:update()
+        end)
     end
     return rotated
 end
@@ -297,12 +314,13 @@ end
 -- 阅读中手动切换 双页/单页: 点击屏幕中间 1/3 立即以当前页为基页重渲染。
 -- 切换成功才落盘设置(在"自动·横屏"基础上切换会显式固定 on/off, 恢复自动走设置菜单);
 -- 页面获取失败不改动设置, 静默提示。
-function M:toggleDualPageMode()
-    local want_dual = not self:isDualPageEnabled()
+-- 按当前(或指定)双页状态重渲染当前页并显示; 成功返回 true, 获取失败返回 false(不改动显示)
+function M:redisplayCurrent(force_dual)
+    local dual = (force_dual ~= nil) and force_dual or self:isDualPageEnabled()
     local cur = self.chapter_imglist_cur or 1
 
     local image, is_bb
-    if want_dual then
+    if dual then
         image = self:renderPagesAt(self:dualIndicesFor(cur))
         is_bb = true
     else
@@ -312,18 +330,8 @@ function M:toggleDualPageMode()
         is_bb = nil
     end
     if not image then
-        Backend:show_notice("切换失败，页面获取失败")
-        return true
+        return false
     end
-
-    local settings = Backend:getSettings()
-    settings.stream_dual_page = want_dual and "on" or "off"
-    pcall(function()
-        Backend:saveSettings(settings)
-    end)
-
-    -- 双页绑定横屏: 开→自动转横屏, 关→恢复原方向(用户未再手动旋转时)
-    self:autoRotateForDualMode(want_dual)
 
     if self.image and self.image.free then
         pcall(function()
@@ -346,9 +354,65 @@ function M:toggleDualPageMode()
         end)
     end
     self:scheduleStreamPreload()
+    return true
+end
+
+function M:toggleDualPageMode()
+    local want_dual = not self:isDualPageEnabled()
+
+    -- 先按目标模式渲染, 成功才落盘设置与转屏(失败静默提示, 状态不变)
+    if not self:redisplayCurrent(want_dual) then
+        Backend:show_notice("切换失败，页面获取失败")
+        return true
+    end
+
+    local settings = Backend:getSettings()
+    settings.stream_dual_page = want_dual and "on" or "off"
+    pcall(function()
+        Backend:saveSettings(settings)
+    end)
+
+    -- 双页绑定横屏: 开→自动转横屏, 关→恢复原方向(用户未再手动旋转时)
+    self:autoRotateForDualMode(want_dual)
 
     Backend:show_notice(want_dual and "双页模式：开" or "双页模式：关")
     return true
+end
+
+-- 单独旋转屏幕(不影响双页设置): 竖屏系 <-> 横屏系, 记住各自的变体。
+-- auto 模式下双页随方向自动联动, 旋转后重渲染当前页以匹配。
+function M:rotateScreenToggle()
+    local rotated = false
+    pcall(function()
+        local cur_mode = Screen:getRotationMode()
+        if Screen:getWidth() > Screen:getHeight() then
+            -- 横屏 -> 竖屏(记住横屏变体)
+            self._rotate_landscape_mode = cur_mode
+            Screen:setRotationMode(self._rotate_portrait_mode or Screen.DEVICE_ROTATED_UPRIGHT)
+        else
+            self._rotate_portrait_mode = cur_mode
+            Screen:setRotationMode(self._rotate_landscape_mode or Screen.DEVICE_ROTATED_CLOCKWISE)
+        end
+        rotated = true
+    end)
+    if rotated then
+        UIManager:setDirty("all", "full")
+        pcall(function()
+            self:update()
+        end)
+        if (Backend:getSettings().stream_dual_page or "auto") == "auto" then
+            self:redisplayCurrent()
+        end
+    end
+    return true
+end
+
+function M:onTwoFingerSwipeLeft()
+    return self:rotateScreenToggle()
+end
+
+function M:onTwoFingerSwipeRight()
+    return self:rotateScreenToggle()
 end
 
 -- 中间 1/3 点击 -> 双页/单页切换(替代原生"按钮栏显隐"; 关闭仍可用下滑/多次滑动/返回键)
