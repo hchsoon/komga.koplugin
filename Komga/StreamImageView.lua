@@ -415,6 +415,23 @@ function M:onTwoFingerSwipeRight()
     return self:rotateScreenToggle()
 end
 
+-- 上滑=旋转 / 下滑=关闭(中间 6/8 区域; 两侧 1/8 保留原竖滑缩放, 兼容无多点触控设备;
+-- 缩放后的竖向平移请用慢速拖动 Pan, 快速竖向轻扫已被旋转/关闭占用)
+function M:onSwipe(_, ges)
+    if ges and ges.pos and (ges.direction == "north" or ges.direction == "south") then
+        local w = Screen:getWidth()
+        local on_edge = ges.pos.x < w / 8 or ges.pos.x > w * 7 / 8
+        if not on_edge then
+            if ges.direction == "north" then
+                return self:rotateScreenToggle()
+            end
+            self:onClose()
+            return true
+        end
+    end
+    return ImageViewer.onSwipe(self, _, ges)
+end
+
 -- 中间 1/3 点击 -> 双页/单页切换(替代原生"按钮栏显隐"; 关闭仍可用下滑/多次滑动/返回键)
 function M:onTap(_, ges)
     if ges and ges.pos and self.main_frame then
