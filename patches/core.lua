@@ -53,11 +53,45 @@ M.install = function()
         end
         return type(file_path) == 'string' and file_path:lower():find('/cache/komga.cache/', 1, true) or false
     end
+    -- 浏览器根目录名可配置(插件设置项 browser_dir_name, 默认含零宽空格)。
+    -- 直接读插件设置文件(与 HttpRequest.get_api_key 同法, 不依赖 Backend 初始化),
+    -- 进程内缓存, 改名后重启生效; 匹配同时接受默认名与自定义名, 旧目录快捷方式仍可路由。
+    local DEFAULT_BROWSER_DIR_NAME = "Komga\u{200B}漫画"
+    local browser_dir_names_cache = nil
+    local function get_komga_browser_dir_names()
+        if browser_dir_names_cache then
+            return browser_dir_names_cache
+        end
+        local names = {DEFAULT_BROWSER_DIR_NAME}
+        local ok, configured = pcall(function()
+            local DataStorage = require("datastorage")
+            local LuaSettings = require("luasettings")
+            local settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/komga.lua")
+            local v = settings and settings.data and settings.data.browser_dir_name
+            if type(v) == "string" and v ~= "" and v ~= DEFAULT_BROWSER_DIR_NAME then
+                return (v:gsub("[/\\]", "_"))
+            end
+            return nil
+        end)
+        if ok and configured then
+            table.insert(names, configured)
+        end
+        browser_dir_names_cache = names
+        return names
+    end
     local is_komga_browser_path = function(file_path, instance)
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
         end
-        return type(file_path) == 'string' and file_path:find("/Komga\u{200B}漫画/", 1, true) or false
+        if type(file_path) ~= 'string' then
+            return false
+        end
+        for _, name in ipairs(get_komga_browser_dir_names()) do
+            if file_path:find("/" .. name .. "/", 1, true) then
+                return true
+            end
+        end
+        return false
     end
     apply("ReaderRolling.onGotoViewRel", function()
     local ReaderRolling = require("apps/reader/modules/readerrolling")
@@ -221,13 +255,16 @@ M.install = function()
         if is_komga_path(path) then
             local home_dir = G_reader_settings:readSetting("home_dir") or require("apps/filemanager/filemanagerutil").getDefaultDir()
             if home_dir then
-                local komga_homedir = home_dir .. "/Komga\u{200B}漫画"
-                local util = require("util")
-                if util and util.fileExists(komga_homedir) then
-                    path = komga_homedir
-                else
-                    path = home_dir
+                -- 重定向到浏览器根目录: 优先自定义名, 其次默认名, 都不存在回 Home
+                local redirected
+                for _, name in ipairs(get_komga_browser_dir_names()) do
+                    local d = home_dir .. "/" .. name
+                    if lfs.attributes(d, "mode") == "directory" then
+                        redirected = d
+                        break
+                    end
                 end
+                path = redirected or home_dir
             end
         end
         original_showFiles(self, path, focused_file, selected_files)

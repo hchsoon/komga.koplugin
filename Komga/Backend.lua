@@ -1,8 +1,8 @@
 --[[
 Komga/Backend.lua — Komga HTTP 层与业务编排
 
-封装 Komga 服务器的 HTTP 请求(apiClient 由 KomgaSpec 的 Spore 定义生成)与本地缓存编排,
-是插件对外的主要服务入口。
+封装 Komga 服务器的 HTTP 请求(经 Komga/ApiClient 单一 REST 客户端, socket.http + dkjson)
+与本地缓存编排, 是插件对外的主要服务入口。
 
 ━━━ 名词对照(重要: 插件内部命名与 Komga 官方名词不同)━━━
   Komga 官方         本层/DB 命名       主键                        说明
@@ -13,8 +13,7 @@ Komga/Backend.lua — Komga HTTP 层与业务编排
 
 ━━━ 命名约定 ━━━
   * 本文件(与 BookInfoDB / KomgaModel)统一用 series / volume / epub_chapter 描述三级层级。
-  * self.apiClient:* 与 KomgaSpec.lua 的方法名是 Komga HTTP 端点, 与 Komga 官方命名一致,
-    不参与上述改名(如 apiClient:getChapterInfo = GET /books/{id}/progress, apiClient:saveBookProgress = PUT)。
+  * self.api:get/post/put/patch(path, query, payload, opts) 直连 Komga/reader3 HTTP 端点。
   * EPUB 专用函数保留 "Epub/Chapter" 字样(它们处理的确实是 Komga Chapter)。
 ]]
 
@@ -33,6 +32,7 @@ local UIManager = require("ui/uimanager")
 local H = require("Komga/Helper")
 local Config = require("Komga/Config")
 local VolumePath = require("Komga/VolumePath")
+local ApiClient = require("Komga/ApiClient")
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -43,7 +43,7 @@ local M = {
     dbManager = {},
     settings_data = nil,
     task_pid_file = nil,
-    apiClient = nil,
+    api = nil,
     httpReq = nil
 }
 
@@ -240,82 +240,14 @@ function M:HandleResponse(response, on_success, on_error)
     return on_error and on_error("Unknown response type: " .. tostring(rtype))
 end
 
-function M:loadSpore()
-    local Spore = require("Spore")
-    local komgaSpec = require("Komga/KomgaSpec")
-    self.apiClient = Spore.new_from_lua(komgaSpec, {
-        base_url = (self.settings_data.data.server_address or Config.DEFAULT_SERVER_ADDRESS) .. '/'
-    })
-
-    package.loaded["Spore.Middleware.FormatEpubJSON"] = {}
-
-    require("Spore.Middleware.FormatEpubJSON").call = function(_args,req)
-        local decode = require'dkjson'.decode
-        local encode = require'dkjson'.encode
-        local type = type
-        local find = string.find
-        local raises = require'Spore'.raises
-        local spore = req.env.spore
-        local payload = spore.payload
-        -- 含 Readium 媒体类型: Komga 的 /positions 与 /progression 只产生
-        -- application/vnd.readium.position-list+json / application/vnd.readium.progression+json,
-        -- Accept 里没有会返回 406 Not Acceptable(EPUB 进度同步的读取/上报都会用到)
-        local contenttype = 'application/json,application/webpub+json,' ..
-            'application/vnd.readium.position-list+json,application/vnd.readium.progression+json'
-        if payload and type(payload) == 'table' then
-            spore.payload = encode(payload)
-            req.headers['content-type'] = "application/json"
-        end
-        req.headers['accept'] = contenttype
-
-        return  function (res)
-                    local header = res.headers and res.headers['content-type']
-                    local body = res.body
-                    if header and (find(header, 'application/json', 1, true) or find(header, 'application/webpub+json', 1, true)
-                        or find(header, 'application/vnd.readium.position-list+json', 1, true)
-                        or find(header, 'application/vnd.readium.progression+json', 1, true)) and type(body) == 'string' and body ~= '' then
-                        local r, _, msg = decode(body)
-                        if r then
-                            res.body = r
-                        else
-                            if spore.errors then
-                                spore.errors:write(msg, "\n")
-                                spore.errors:write(body, "\n")
-                            end
-                            if res.status == 200 then
-                                raises(res, msg)
-                            end
-                        end
-                    end
-                    return res
-                end
-    end
-
-    package.loaded["Spore.Middleware.ForceJSON"] = {}
-    require("Spore.Middleware.ForceJSON").call = function(args, req)
-        -- req.env.HTTP_USER_AGENT = ""
-        req.headers = req.headers or {}
-        -- req.headers["X-API-Key"] = self:getApiKey()
-        req.headers["user-agent"] =
-            "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
-        return function(res)
-            res.headers = res.headers or {}
-            res.headers["content-type"] = 'application/json'
-            return res
-        end
-    end
-    package.loaded["Spore.Middleware.KomgaAuth"] = {}
-    require("Spore.Middleware.KomgaAuth").call = function(args, req)
-        local spore = req.env.spore
-
-        -- X-API-Key 来自设置(api_key), 未设置时回落到 Config 预设值
-        req.headers["X-API-Key"] = self:getApiKey()
-        req.headers["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
-
-        return function(res)
-            return res
-        end
-    end
+-- 构建 REST 客户端(单一 HTTP 栈, 取代 Spore+KomgaSpec 双栈):
+-- 服务器地址/API Key 由设置驱动, 请求经 Komga/ApiClient 走 socket.http
+function M:loadApiClient()
+    self.api = ApiClient:new(function()
+        return self.settings_data.data.server_address or Config.DEFAULT_SERVER_ADDRESS
+    end, function()
+        return self:getApiKey()
+    end)
 end
 
 -- 一次性设置迁移(幂等: 以字段缺失为触发条件, 已迁移自然跳过)。
@@ -390,7 +322,7 @@ function M:initialize()
         self.settings_data:flush()
     end
 
-    self:loadSpore()
+    self:loadApiClient()
 
     local BookInfoDB = require("Komga/BookInfoDB")
     self.dbManager = BookInfoDB:new({
@@ -442,28 +374,13 @@ function print_table(t, indent)
     end
 end
 
-function M:komgaSporeApi(requestFunc, callback, opts, logName)
-    local socketutil = require("socketutil")
+-- 统一请求包装(原 komgaSporeApi): 错误映射 / 204 摘取 / content 摘取语义保持不变,
+-- 传输层由 Spore 换成 self.api(Komga/ApiClient, 直接 socket.http)。
+-- requestFunc 返回 {status, body, headers}(ApiClient 约定)或 nil, err_msg。
+function M:komgaApi(requestFunc, callback, logName)
+    logName = logName or 'komgaApi'
 
-    local server_address = self.settings_data.data['server_address']
-    logName = logName or 'komgaSporeApi'
-    opts = opts or {}
-
-    local isServerOnly = opts.isServerOnly
-    local timeouts = opts.timeouts
-    if not H.is_tbl(timeouts) or not H.is_num(timeouts[1]) or not H.is_num(timeouts[2]) then
-        timeouts = {8, 12}
-    end
-
-    self.apiClient:reset_middlewares()
-    self.apiClient:enable("KomgaAuth")
-    -- self.apiClient:enable("Format.JSON")
-    self.apiClient:enable("FormatEpubJSON")
-    self.apiClient:enable("ForceJSON")
-    -- 单次轮询 timeout,总 timeout
-    socketutil:set_timeout(timeouts[1], timeouts[2])
-    local status, res = pcall(requestFunc)
-    socketutil:reset_timeout()
+    local status, res, rerr = pcall(requestFunc)
 
     if not status then
         local err_msg = H.errorHandler(res)
@@ -474,8 +391,18 @@ function M:komgaSporeApi(requestFunc, callback, opts, logName)
         return wrap_response(nil, 'requestFunc: ' .. err_msg)
     end
 
-    -- 204 No Content（如 saveVolumeProgress）: 服务器确认成功但无响应体，视为成功
-    if H.is_tbl(res) and res.status == 204 then
+    -- ApiClient 失败约定: nil, err_msg
+    if not H.is_tbl(res) then
+        local err_msg = H.errorHandler(rerr)
+        if err_msg == "wantread" then
+            err_msg = '连接超时'
+        end
+        logger.err(logName, 'request err:', tostring(rerr))
+        return wrap_response(nil, 'requestFunc: ' .. err_msg)
+    end
+
+    -- 204 No Content（如进度上报）: 服务器确认成功但无响应体，视为成功
+    if res.status == 204 then
         return wrap_response({})
     end
 
@@ -488,21 +415,16 @@ function M:komgaSporeApi(requestFunc, callback, opts, logName)
         return wrap_response(nil, 'requestFunc: ' .. err_msg)
     end
 
-    
-    if H.is_tbl(res.body) and res.body.content then
+
+    if res.body.content then
         if H.is_func(callback) then
             return callback(res.body)
         else
             return wrap_response(res.body.content)
         end
     elseif H.is_tbl(res.body) then --and res.body.readProgress then
-        -- print("Res.body is ...",res.body)
         return wrap_response(res.body)
     else
-        -- print_table(res.body.content,"  ")
-        -- print(H.is_tbl(res.body))
-        -- print(res.body.isSuccess)
-        -- print(res.body.content)
         return wrap_response(nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错1')
     end
 end
@@ -518,20 +440,21 @@ function M:refreshVolumesCache(series, last_refresh_time)
     end
 
     local book_cache_id = series.cache_id
-    return self:komgaSporeApi(function()
-        return self.apiClient:getChapterList({
-            condition =  {
+    return self:komgaApi(function()
+        -- POST /api/v1/books/list(按系列条件查询分卷)
+        return self.api:post("/api/v1/books/list", nil, {
+            condition = {
                 allOf = {
-                  {
-                    seriesId = {
-                        operator = "is",
-                        value = series.cache_id
+                    {
+                        seriesId = {
+                            operator = "is",
+                            value = series.cache_id
+                        }
                     }
-                  }
                 }
             },
             size = 1000
-        })
+        }, {timeouts = {10, 12}})
     end, function(response)
 
         local status, err = pcall(function()
@@ -543,9 +466,7 @@ function M:refreshVolumesCache(series, last_refresh_time)
             return wrap_response(nil, '数据写入出错，请重试')
         end
         return wrap_response(true)
-    end, {
-        timeouts = {10, 12}
-    }, 'refreshVolumesCache')
+    end, 'refreshVolumesCache')
 end
 
 function M:refreshLibraryCache(last_refresh_time)
@@ -555,15 +476,15 @@ function M:refreshLibraryCache(last_refresh_time)
         return wrap_response(nil, '处理中')
     end
 
-    return self:komgaSporeApi(function()
+    return self:komgaApi(function()
         -- data=bookinfos
         dbg.v('Start refreshing library')
         logger.warn('Start refreshing library')
-        local response =  self.apiClient:getBookShelf({
+        -- POST /api/v1/series/list(全量书架)
+        return self.api:post("/api/v1/series/list", nil, {
             fullTextSearch = "",
-            size=1000
-        })
-        return response
+            size = 1000
+        }, {timeouts = {8, 12}})
     end, function(response)
         local bookShelfId = self:getServerPathCode()
         local status, err = pcall(function()
@@ -577,9 +498,7 @@ function M:refreshLibraryCache(last_refresh_time)
         end
 
         return wrap_response(true)
-    end, {
-        timeouts = {8, 12}
-    }, 'refreshLibraryCache')
+    end, 'refreshLibraryCache')
 end
 
 function M:pGetEpubManifest(volume)
@@ -589,21 +508,15 @@ function M:pGetEpubManifest(volume)
         return wrap_response(nil, 'GetChapterContent参数错误')
     end
 
-    return self:komgaSporeApi(function()
-        -- data=string
-        -- return self.apiClient:getBookContent({
-        --     bookId = bookId,
-        --     pageNumber = 1,
-        -- })
-        return self.apiClient:getEpubManifest({
-            bookId = bookId,
-            -- pageNumber = 0,
-        },{headers = {
+    return self:komgaApi(function()
+        -- GET /api/v1/books/:id/manifest/epub(webpub+json, 含 readingOrder/toc)
+        return self.api:get("/api/v1/books/" .. bookId .. "/manifest/epub", nil, {
+            headers = {
                 ["X-Accept"] = "application/webpub+json"
-            }})
-    end, nil, {
-        timeouts = {18, 25}
-    }, 'getEpubManifest')
+            },
+            timeouts = {18, 25}
+        })
+    end, nil, 'getEpubManifest')
 end
 
 function M:getVolumeReadProgress(volume)
@@ -612,22 +525,10 @@ function M:getVolumeReadProgress(volume)
         return wrap_response(nil, '参数错误')
     end
 
-    return self:komgaSporeApi(function()
-        return self.apiClient:getChapterInfo({
-            bookId = volume.bookId
-            -- name = volume.name,
-            -- author = volume.author or '',
-            -- durChapterPos = 0,
-            -- durChapterIndex = number,
-            -- durChapterTime = time.to_ms(time.now()),
-            -- durChapterTitle = volume.title or '',
-            -- index = number,
-            -- url = volume.url,
-            -- v = os.time()
-        })
-    end, nil, {
-        timeouts = {3, 5}
-    }, 'getVolumeReadProgress')
+    return self:komgaApi(function()
+        -- GET /api/v1/books/:id(BookDto, 含 readProgress/media/metadata)
+        return self.api:get("/api/v1/books/" .. volume.bookId, nil, {timeouts = {3, 5}})
+    end, nil, 'getVolumeReadProgress')
 
 end
 
@@ -645,24 +546,13 @@ function M:saveVolumeProgress(volume)
         -- print("Mark volume read...", volume.number)
         self:toggleVolumeRead(volume)
     end
-    return self:komgaSporeApi(function()
-        return self.apiClient:saveBookProgress({
-            bookId = volume.bookId,
+    return self:komgaApi(function()
+        -- PATCH /api/v1/books/:id/read-progress(漫画分卷页码进度)
+        return self.api:patch("/api/v1/books/" .. volume.bookId .. "/read-progress", nil, {
             page = volume.current_page,
             completed = finish
-            -- name = volume.name,
-            -- author = volume.author or '',
-            -- durChapterPos = 0,
-            -- durChapterIndex = number,
-            -- durChapterTime = time.to_ms(time.now()),
-            -- durChapterTitle = volume.title or '',
-            -- index = number,
-            -- url = volume.url,
-            -- v = os.time()
-        })
-    end, nil, {
-        timeouts = {3, 5}
-    }, 'saveVolumeProgress')
+        }, {timeouts = {3, 5}})
+    end, nil, 'saveVolumeProgress')
 
 end
 
@@ -672,13 +562,10 @@ function M:getBookProgression(bookId)
     if not H.is_str(bookId) then
         return wrap_response(nil, '参数错误')
     end
-    local r = self:komgaSporeApi(function()
-        return self.apiClient:getBookProgression({
-            bookId = bookId
-        })
-    end, nil, {
-        timeouts = {3, 5}
-    }, 'getBookProgression')
+    local r = self:komgaApi(function()
+        -- GET /api/v1/books/:id/progression(R2Progression)
+        return self.api:get("/api/v1/books/" .. bookId .. "/progression", nil, {timeouts = {3, 5}})
+    end, nil, 'getBookProgression')
     local loc = r and r.body and r.body.locator
     return r
 end
@@ -701,16 +588,14 @@ function M:saveBookProgression(upload)
         ts = (self._last_prog_modified_ts or 0) + 1
     end
     self._last_prog_modified_ts = ts
-    local r = self:komgaSporeApi(function()
-        return self.apiClient:updateBookProgression({
-            bookId = upload.bookId,
+    local r = self:komgaApi(function()
+        -- PUT /api/v1/books/:id/progression
+        return self.api:put("/api/v1/books/" .. upload.bookId .. "/progression", nil, {
             modified = os.date("!%Y-%m-%dT%H:%M:%SZ", ts),
-            device = { id = "koreader", name = "KOReader" },
-            locator = upload.locator,
-        })
-    end, nil, {
-        timeouts = {3, 5}
-    }, 'saveBookProgression')
+            device = {id = "koreader", name = "KOReader"},
+            locator = upload.locator
+        }, {timeouts = {3, 5}})
+    end, nil, 'saveBookProgression')
     return r
 end
 
@@ -719,26 +604,18 @@ function M:getBookPositions(bookId)
     if not H.is_str(bookId) then
         return wrap_response(nil, '参数错误')
     end
-    local r = self:komgaSporeApi(function()
-        return self.apiClient:getBookPositions({
-            bookId = bookId
-        })
-    end, nil, {
-        timeouts = {3, 5}
-    }, 'getBookPositions')
+    local r = self:komgaApi(function()
+        -- GET /api/v1/books/:id/positions(readium position-list)
+        return self.api:get("/api/v1/books/" .. bookId .. "/positions", nil, {timeouts = {3, 5}})
+    end, nil, 'getBookPositions')
     return r
 end
 
 function M:getBookSourcesList()
-    return self:komgaSporeApi(function()
-        return self.apiClient:getBookSources({
-            simple = 1,
-            v = os.time()
-        })
-    end, nil, {
-        timeouts = {15, 20},
-        isServerOnly = true
-    }, 'getBookSourcesList')
+    return self:komgaApi(function()
+        -- GET /getBookSources(书源列表, reader3 服务)
+        return self.api:get("/getBookSources", {simple = 1, v = os.time()}, {timeouts = {15, 20}})
+    end, nil, 'getBookSourcesList')
 end
 
 function M:refreshVolumeContent(volume)
@@ -752,16 +629,15 @@ function M:refreshVolumeContent(volume)
     end
 
 
-    self:komgaSporeApi(function()
-        return self.apiClient:getBookContent({
+    self:komgaApi(function()
+        -- GET /api/v1/books/:id/pages/:n 的历史调用形态(url/index 参数), 保留原语义
+        return self.api:get("/api/v1/books/-/pages/" .. tostring(down_number), {
             url = url,
             index = down_number,
             refresh = 1,
             v = os.time()
-        })
-    end, nil, {
-        timeouts = {10, 20}
-    }, 'GetChapterContent')
+        }, {timeouts = {10, 20}})
+    end, nil, 'GetChapterContent')
 end
 
 function M:searchBookSource(url, lastIndex, searchSize)
@@ -774,20 +650,16 @@ function M:searchBookSource(url, lastIndex, searchSize)
     if not H.is_num(searchSize) then
         searchSize = 5
     end
-    return self:komgaSporeApi(function()
+    return self:komgaApi(function()
         -- data.list data.lastindex
-        return self.apiClient:searchBookSource({
+        return self.api:get("/searchBookSource", {
             url = url,
             bookSourceGroup = '',
             lastIndex = lastIndex,
             searchSize = searchSize,
             v = os.time()
-        })
-
-    end, nil, {
-        timeouts = {70, 80},
-        isServerOnly = true
-    }, 'searchBook')
+        }, {timeouts = {70, 80}})
+    end, nil, 'searchBook')
 
 end
 
@@ -796,9 +668,9 @@ function M:searchBook(search_text, bookSourceUrl, concurrentCount)
         return wrap_response(nil, "输入参数错误")
     end
     concurrentCount = concurrentCount or 32
-    return self:komgaSporeApi(function()
+    return self:komgaApi(function()
         -- data = bookinfolist
-        return self.apiClient:searchBook({
+        return self.api:get("/searchBook", {
             key = search_text,
             bookSourceGroup = '',
             concurrentCount = concurrentCount,
@@ -806,11 +678,8 @@ function M:searchBook(search_text, bookSourceUrl, concurrentCount)
             lastIndex = -1,
             page = 1,
             v = os.time()
-        })
-    end, nil, {
-        timeouts = {20, 30},
-        isServerOnly = true
-    }, 'searchBook')
+        }, {timeouts = {20, 30}})
+    end, nil, 'searchBook')
 end
 
 function M:searchBookMulti(search_text, lastIndex, searchSize, concurrentCount)
@@ -822,20 +691,17 @@ function M:searchBookMulti(search_text, lastIndex, searchSize, concurrentCount)
     lastIndex = lastIndex or -1
     searchSize = searchSize or 20
     concurrentCount = concurrentCount or 32
-    return self:komgaSporeApi(function()
+    return self:komgaApi(function()
         -- data.list data.lastindex
-        return self.apiClient:searchBookMulti({
+        return self.api:get("/searchBookMulti", {
             key = search_text,
             bookSourceGroup = '',
             concurrentCount = concurrentCount,
             lastIndex = lastIndex,
             searchSize = searchSize,
             v = os.time()
-        })
-    end, nil, {
-        timeouts = {60, 80},
-        isServerOnly = true
-    }, 'searchBook')
+        }, {timeouts = {60, 80}})
+    end, nil, 'searchBook')
 end
 
 function M:deleteBook(bookinfo)
@@ -843,10 +709,9 @@ function M:deleteBook(bookinfo)
         return wrap_response(nil, "输入参数错误")
     end
 
-    return self:komgaSporeApi(function()
+    return self:komgaApi(function()
         -- {"isSuccess":true,"errorMsg":"","data":"删除书籍成功"}
-        return self.apiClient:deleteBook({
-
+        return self.api:post("/deleteBook", nil, {
             v = os.time(),
             name = bookinfo.name,
             author = bookinfo.author,
@@ -863,10 +728,8 @@ function M:deleteBook(bookinfo)
             booksCount = bookinfo.booksCount or 0,
             kind = bookinfo.kind or '',
             type = bookinfo.type or 0
-        })
-    end, nil, {
-        timeouts = {6, 8}
-    }, 'deleteBook')
+        }, {timeouts = {6, 8}})
+    end, nil, 'deleteBook')
 end
 
 local ffi = require("ffi")
@@ -2513,9 +2376,10 @@ function M:getNextBookOnServer(bookId)
     if not (H.is_str(bookId) and NetworkMgr:isConnected()) then
         return nil
     end
-    local response = self:komgaSporeApi(function()
-        return self.apiClient:getNextBook({bookId = bookId})
-    end, nil, {timeouts = {4, 6}}, 'getNextBook')
+    local response = self:komgaApi(function()
+        -- GET /api/v1/books/:id/next(404 = 无下一本)
+        return self.api:get("/api/v1/books/" .. bookId .. "/next", nil, {timeouts = {4, 6}})
+    end, nil, 'getNextBook')
     if H.is_tbl(response) and response.type == 'SUCCESS' and H.is_tbl(response.body)
         and H.is_str(response.body.id) then
         return response.body
@@ -3167,7 +3031,8 @@ function M:setEndpointUrl(new_setting_url)
 
     self:saveSettings()
 
-    self:loadSpore()
+    -- 服务器地址已变更, 重建 REST 客户端
+    self:loadApiClient()
 
     return wrap_response(self.settings_data.data)
 end

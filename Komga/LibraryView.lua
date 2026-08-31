@@ -343,6 +343,34 @@ function LibraryView:openBrowserMenu(file)
     UIManager:show(dialog)
 end
 
+-- Komga 浏览器根目录名: 设置项 browser_dir_name 覆盖默认名(含零宽空格)。
+-- 匹配同时接受默认名与自定义名(旧目录下的快捷方式仍可路由); 改名后重启生效。
+local DEFAULT_BROWSER_DIR_NAME = "Komga\u{200B}漫画"
+
+local function komga_browser_dir_names()
+    local names = {DEFAULT_BROWSER_DIR_NAME}
+    local ok, configured = pcall(function()
+        return Backend:getSettings().browser_dir_name
+    end)
+    if ok and H.is_str(configured) and configured ~= "" and configured ~= DEFAULT_BROWSER_DIR_NAME then
+        table.insert(names, (configured:gsub("[/\\]", "_")))
+    end
+    return names
+end
+
+-- 路径是否位于 Komga 浏览器目录(默认名或自定义名)之下
+local function is_komga_browser_dir_path(file_path)
+    if type(file_path) ~= "string" then
+        return false
+    end
+    for _, name in ipairs(komga_browser_dir_names()) do
+        if file_path:find("/" .. name .. "/", 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
 -- 流式双页/翻页方向的设置项显示文案
 local stream_dual_mode_label = function(settings)
     local mode = settings.stream_dual_page or "auto"
@@ -455,6 +483,40 @@ function LibraryView:openMenu()
             end, function(err_msg)
                 MessageBox:error('设置失败:', err_msg)
             end)
+        end
+    }}, {{
+        text = string.format("%s 浏览器目录名 [%s]", Icons.FA_FOLDER,
+            settings.browser_dir_name or "默认"),
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:input(nil, nil, {
+                title = "设置 Komga 快捷方式根目录名",
+                input = settings.browser_dir_name or DEFAULT_BROWSER_DIR_NAME,
+                description = [[书架快捷方式所在的根目录名(位于 KOReader Home 目录下)。
+修改后重启 KOReader 生效, 新目录会在下次打开书架时自动创建; 旧目录可自行删除或保留(仍可路由)。]],
+                use_available_height = true,
+                condensed = true,
+                save_callback = function(input_text)
+                    if not H.is_str(input_text) then
+                        MessageBox:notice('输入为空')
+                        return false
+                    end
+                    local new_name = util.trim(input_text):gsub("[/\\]", "_")
+                    if new_name == '' then
+                        MessageBox:notice('输入为空')
+                        return false
+                    end
+                    settings.browser_dir_name = new_name ~= DEFAULT_BROWSER_DIR_NAME and new_name or nil
+                    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                        MessageBox:notice("浏览器目录名已更新, 重启 KOReader 后生效")
+                        return true
+                    end, function(err_msg)
+                        MessageBox:notice('设置失败：' .. tostring(err_msg))
+                        return false
+                    end)
+                end,
+                allow_newline = false
+            })
         end
     }}, {{
         text = string.format("%s 自动生成快捷方式 %s", Icons.FA_FOLDER,
@@ -1334,7 +1396,7 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, number)
     end
     local file_manager = FileManager.instance
     local dir = file_manager and file_manager.file_chooser and file_manager.file_chooser.path
-    if not (H.is_str(dir) and dir:find("/Komga\u{200B}漫画/", 1, true)) then
+    if not (H.is_str(dir) and is_komga_browser_dir_path(dir)) then
         return
     end
     local found
@@ -1856,7 +1918,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
         end
-        return type(file_path) == 'string' and file_path:find("/Komga\u{200B}漫画/", 1, true) or false
+        return is_komga_browser_dir_path(file_path)
     end
     local get_chapter_event = function()
         if library_view_ref.instance then
@@ -2635,6 +2697,9 @@ local function init_book_browser(parent)
                 authors = (H.is_tbl(bookinfo) and bookinfo.author) or volume.author,
                 title = volume_title,
                 description = (H.is_tbl(bookinfo) and bookinfo.intro) or nil,
+                -- series/series_index: KOReader 文件管理器/封面浏览器按系列归组显示
+                series = (H.is_tbl(bookinfo) and bookinfo.name) or nil,
+                series_index = tostring(number),
                 type = "volume",
                 number = number,
                 bookId = volume.bookId
@@ -2802,6 +2867,8 @@ local function init_book_browser(parent)
                 authors = bookinfo.author,
                 title = bookinfo.name,
                 description = bookinfo.intro,
+                -- series: KOReader 文件管理器/封面浏览器按系列归组显示
+                series = bookinfo.name,
                 type = "serie"
                 --type = bookinfo.type(serie,volume)
             })
@@ -3062,7 +3129,12 @@ function LibraryView:getBrowserHomeDir(skip_check)
         logger.err("LibraryView.getBrowserHomeDir: home_dir is nil")
         return nil
     end
-    local browser_dir_name = "Komga\u{200B}漫画"
+    -- 根目录名可配置(设置项 browser_dir_name), 缺省用内置名; 不允许路径分隔符
+    local browser_dir_name = Backend:getSettings().browser_dir_name
+    if not (H.is_str(browser_dir_name) and browser_dir_name ~= "") then
+        browser_dir_name = DEFAULT_BROWSER_DIR_NAME
+    end
+    browser_dir_name = browser_dir_name:gsub("[/\\]", "_")
     local expected_path = H.joinPath(home_dir, browser_dir_name)
     -- nil or home_dir changed
     if not H.is_str(self.book_browser_homedir) or self.book_browser_homedir ~= expected_path then
