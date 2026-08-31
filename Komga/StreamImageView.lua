@@ -276,6 +276,20 @@ function M:turnDualPage(direction)
     return self:getTurnPageNextImage(direction > 0 and 'next' or 'prev', next_base)
 end
 
+-- 程序化旋转后的同步重绘: Screen:setRotationMode 只换坐标系, 布局与 dimen 要到
+-- 下一次 paintTo 才更新; 若不强制立即重绘, 旋转后的首个输入事件会拿着旧方向的
+-- main_frame.dimen 做"框外点击=关闭"判定, 造成旋转即退出。与 UIManager:onRotation
+-- 同款(setDirty all + forceRePaint), 外加先重建窗口部件。
+function M:repaintAfterRotation()
+    pcall(function()
+        self:update()
+    end)
+    UIManager:setDirty("all", "full")
+    pcall(function()
+        UIManager:forceRePaint()
+    end)
+end
+
 -- 双页与横屏绑定: 开双页自动转横屏(记住原方向); 关双页时若方向仍是我们
 -- 设置的(用户未再手动旋转)则恢复。竖排本/横屏设备已横屏时不动作。
 function M:autoRotateForDualMode(enabled)
@@ -302,11 +316,8 @@ function M:autoRotateForDualMode(enabled)
         end
     end)
     if rotated then
-        -- 旋转后全量重绘; ImageViewer.update 会按新屏幕尺寸重排
-        UIManager:setDirty("all", "full")
-        pcall(function()
-            self:update()
-        end)
+        -- 旋转后同步重绘, 消除旧方向布局的判定竞态
+        self:repaintAfterRotation()
     end
     return rotated
 end
@@ -396,10 +407,7 @@ function M:rotateScreenToggle()
         rotated = true
     end)
     if rotated then
-        UIManager:setDirty("all", "full")
-        pcall(function()
-            self:update()
-        end)
+        self:repaintAfterRotation()
         if (Backend:getSettings().stream_dual_page or "auto") == "auto" then
             self:redisplayCurrent()
         end
@@ -432,10 +440,15 @@ function M:onSwipe(_, ges)
     return ImageViewer.onSwipe(self, _, ges)
 end
 
--- 中间 1/3 点击 -> 双页/单页切换(替代原生"按钮栏显隐"; 关闭仍可用下滑/多次滑动/返回键)
+-- 中间 1/3 点击 -> 双页/单页切换(替代原生"按钮栏显隐"; 关闭仍可用下滑/多次滑动/返回键)。
+-- "框外点击=关闭"仅在布局与当前屏幕一致时生效: 旋转后 dimen 未刷新的短暂窗口内
+-- 拿旧方向矩形判定会把正常点击误判为框外, 造成旋转后一点就退出
 function M:onTap(_, ges)
-    if ges and ges.pos and self.main_frame then
-        if ges.pos:notIntersectWith(self.main_frame.dimen) then
+    if ges and ges.pos and self.main_frame and self.main_frame.dimen then
+        local d = self.main_frame.dimen
+        local layout_current = math.abs(d.w - Screen:getWidth()) <= 2
+            and math.abs(d.h - Screen:getHeight()) <= 2
+        if layout_current and ges.pos:notIntersectWith(d) then
             self:onClose()
             return true
         end
