@@ -262,6 +262,38 @@ function M:turnDualPage(direction)
     return self:getTurnPageNextImage(direction > 0 and 'next' or 'prev', next_base)
 end
 
+-- 双页与横屏绑定: 开双页自动转横屏(记住原方向); 关双页时若方向仍是我们
+-- 设置的(用户未再手动旋转)则恢复。竖排本/横屏设备已横屏时不动作。
+function M:autoRotateForDualMode(enabled)
+    local rotated = false
+    pcall(function()
+        if enabled then
+            if Screen:getWidth() > Screen:getHeight() then
+                return -- 已是横屏
+            end
+            self._dual_prev_rotation = Screen:getRotationMode()
+            self._dual_rotation_set = Screen.DEVICE_ROTATED_CLOCKWISE
+            Screen:setRotationMode(self._dual_rotation_set)
+            rotated = true
+        else
+            local prev = self._dual_prev_rotation
+            local ours = self._dual_rotation_set
+            self._dual_prev_rotation = nil
+            self._dual_rotation_set = nil
+            -- 仅当当前方向仍是我们设置的那个才恢复, 避免覆盖用户随后的手动旋转
+            if prev ~= nil and ours ~= nil and Screen:getRotationMode() == ours then
+                Screen:setRotationMode(prev)
+                rotated = true
+            end
+        end
+    end)
+    if rotated then
+        -- 旋转后全量重绘; ImageViewer.update 会按新屏幕尺寸重排
+        UIManager:setDirty("all", "full")
+    end
+    return rotated
+end
+
 -- 阅读中手动切换 双页/单页: 点击屏幕中间 1/3 立即以当前页为基页重渲染。
 -- 切换成功才落盘设置(在"自动·横屏"基础上切换会显式固定 on/off, 恢复自动走设置菜单);
 -- 页面获取失败不改动设置, 静默提示。
@@ -289,6 +321,9 @@ function M:toggleDualPageMode()
     pcall(function()
         Backend:saveSettings(settings)
     end)
+
+    -- 双页绑定横屏: 开→自动转横屏, 关→恢复原方向(用户未再手动旋转时)
+    self:autoRotateForDualMode(want_dual)
 
     if self.image and self.image.free then
         pcall(function()
