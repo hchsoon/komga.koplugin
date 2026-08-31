@@ -321,6 +321,8 @@ function M:initialize()
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
     -- 阅读中"后几页"预下载(EPUB 内部章节)的独立 pid 文件, 与整卷预下载互不阻塞
     self.pages_pid_file = H.getTempDirectory() .. '/pages.pid.lua'
+    -- 流式漫画页预取的 pid 文件
+    self.stream_pages_pid_file = H.getTempDirectory() .. '/stream_pages.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
 
     -- 兼容历史版本 <1.038
@@ -2319,6 +2321,147 @@ function M:preLoadEpubChapters(volume, count)
     end
 
     self:startTaskWatchdog(task_pid, self.pages_pid_file, PAGES_WATCHDOG_TIMEOUT)
+    return true
+end
+
+-- ---------------------------------------------------------------------------
+-- 流式漫画页预取(磁盘缓存 + 子进程后台下载)
+-- StreamImageView 每翻一页原本要同步下载一图; 预取把"后几页"提前落盘,
+-- 翻页时直接读本地。缓存按 img_src 的 md5 命名, 阅读中滑动窗口清理,
+-- 关卷时整目录清理, 不占用长期磁盘。
+-- ---------------------------------------------------------------------------
+local STREAM_PAGE_EXTS = {"jpg", "jpeg", "png", "webp", "gif"}
+
+-- 流式页缓存目录: <系列缓存>/resources/stream
+function M:getStreamPageCacheDir(bookCacheId)
+    if not H.is_str(bookCacheId) then
+        return nil
+    end
+    return H.joinPath(H.joinPath(H.getBookCachePath(bookCacheId), 'resources'), 'stream')
+end
+
+-- 查流式页缓存: 命中返回图片数据(string), 未命中返回 nil
+function M:lookupStreamPageCache(bookCacheId, img_src)
+    if not (H.is_str(bookCacheId) and H.is_str(img_src)) then
+        return nil
+    end
+    local dir = self:getStreamPageCacheDir(bookCacheId)
+    if not dir then
+        return nil
+    end
+    local base = H.joinPath(dir, md5(img_src))
+    for _, ext in ipairs(STREAM_PAGE_EXTS) do
+        local p = base .. '.' .. ext
+        if util.fileExists(p) then
+            local f = io.open(p, "rb")
+            if f then
+                local data = f:read("*a")
+                f:close()
+                if data and #data > 0 then
+                    return data
+                end
+            end
+            return nil
+        end
+    end
+    return nil
+end
+
+-- 删除单页缓存(滑动窗口淘汰用)
+function M:removeStreamPageCache(bookCacheId, img_src)
+    local dir = self:getStreamPageCacheDir(bookCacheId)
+    if not (dir and H.is_str(img_src)) then
+        return
+    end
+    local base = H.joinPath(dir, md5(img_src))
+    for _, ext in ipairs(STREAM_PAGE_EXTS) do
+        pcall(function()
+            util.removeFile(base .. '.' .. ext)
+        end)
+    end
+end
+
+-- 清空流式页缓存目录(关卷时调用)
+function M:clearStreamPageCache(bookCacheId)
+    local dir = self:getStreamPageCacheDir(bookCacheId)
+    if not dir then
+        return
+    end
+    pcall(function()
+        local lfs = require("libs/libkoreader-lfs")
+        for name in lfs.dir(dir) do
+            if name ~= "." and name ~= ".." then
+                util.removeFile(H.joinPath(dir, name))
+            end
+        end
+        lfs.rmdir(dir)
+    end)
+end
+
+-- 流式页预取是否进行中
+function M:isStreamPagesPreloading()
+    return self.stream_pages_pid_file ~= nil and util.fileExists(self.stream_pages_pid_file)
+end
+
+-- 后台预取流式漫画页(子进程顺序下载落盘)。
+-- 已有预取任务运行时跳过(翻得快时退回同步下载, 与现状一致); 全程静默失败。
+function M:preLoadStreamPages(bookCacheId, img_srcs)
+    if not (H.is_str(bookCacheId) and H.is_tbl(img_srcs) and #img_srcs > 0) then
+        return false
+    end
+    if self:isStreamPagesPreloading() == true then
+        return false
+    end
+    -- 过滤已缓存的页
+    local tasks = {}
+    for _, src in ipairs(img_srcs) do
+        if H.is_str(src) and src ~= "" and self:lookupStreamPageCache(bookCacheId, src) == nil then
+            table.insert(tasks, src)
+        end
+    end
+    if #tasks < 1 then
+        return false
+    end
+
+    local cache_id = bookCacheId
+    local task_pid = self:launchProcess(function()
+        pcall(function()
+            util.writeToFile('', self.stream_pages_pid_file, true)
+        end)
+        for i = 1, #tasks do
+            if not util.fileExists(self.stream_pages_pid_file) then
+                break -- 收到停止信号
+            end
+            local ok, res = pcall(function()
+                return self:pDownload_Image(tasks[i], 30)
+            end)
+            if ok and H.is_tbl(res) and res.type == 'SUCCESS' and H.is_tbl(res.body)
+                and H.is_str(res.body.data) and #res.body.data > 0 then
+                pcall(function()
+                    local dir = self:getStreamPageCacheDir(cache_id)
+                    H.checkAndCreateFolder(dir)
+                    -- 原子写 + 按 md5(url) 命名
+                    local base = H.joinPath(dir,
+                        md5(tasks[i]) .. '.' .. (H.is_str(res.body.ext) and res.body.ext or "jpg"))
+                    local tmp = base .. '.part'
+                    if util.writeToFile(res.body.data, tmp, true) then
+                        os.rename(tmp, base)
+                    end
+                end)
+            else
+                logger.err('preload stream page failed:', tostring(tasks[i]))
+            end
+        end
+        pcall(function()
+            util.removeFile(self.stream_pages_pid_file)
+        end)
+        return true
+    end)
+
+    if not task_pid then
+        return false
+    end
+    self:startTaskWatchdog(task_pid, self.stream_pages_pid_file, PAGES_WATCHDOG_TIMEOUT)
     return true
 end
 

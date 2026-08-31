@@ -40,6 +40,10 @@ end
 function M:onClose()
     ImageViewer.onClose(self)
     self.chapter.current_page = self.chapter_imglist_cur
+    -- 关卷清理流式页预取缓存(整目录删除, 不占长期磁盘)
+    pcall(function()
+        Backend:clearStreamPageCache(self.bookinfo and self.bookinfo.cache_id)
+    end)
     Backend:closeDbManager()
     if H.is_tbl(self.chapter) and H.is_num(self.chapter_imglist_cur) then
         Backend:saveVolumeProgress(self.chapter)
@@ -82,7 +86,15 @@ function M:onShowPrevImage()
     self:getTurnPageNextImage('prev', self.chapter_imglist_cur - 1)
 end
 
-local function downloadImage(img_src)
+-- 下载单页: 预取缓存命中直接读本地, 未命中走网络(与原行为一致)
+function M:downloadPageImage(img_src)
+    local cache_id = self.bookinfo and self.bookinfo.cache_id
+    if H.is_str(cache_id) then
+        local cached = Backend:lookupStreamPageCache(cache_id, img_src)
+        if H.is_str(cached) then
+            return cached
+        end
+    end
     return Backend:HandleResponse(Backend:pDownload_Image(img_src), function(data)
         if H.is_tbl(data) and data.data then
             return data.data
@@ -93,6 +105,35 @@ local function downloadImage(img_src)
     end, function(err_msg)
         return
     end)
+end
+
+-- 预取后几页(子进程后台, 静默失败) + 滑动窗口清理过旧缓存(保留当前页前 3 页供回翻)
+function M:scheduleStreamPreload()
+    local cache_id = self.bookinfo and self.bookinfo.cache_id
+    if not (H.is_str(cache_id) and H.is_tbl(self.chapter_imglist) and #self.chapter_imglist > 0) then
+        return
+    end
+    local cur = self.chapter_imglist_cur or 1
+    local upcoming = {}
+    for i = cur + 1, math.min(cur + 3, #self.chapter_imglist) do
+        local src = self.chapter_imglist[i]
+        if H.is_str(src) then
+            table.insert(upcoming, src)
+        end
+    end
+    for i = 1, cur - 4 do
+        local src = self.chapter_imglist[i]
+        if H.is_str(src) then
+            pcall(function()
+                Backend:removeStreamPageCache(cache_id, src)
+            end)
+        end
+    end
+    if #upcoming > 0 then
+        pcall(function()
+            Backend:preLoadStreamPages(cache_id, upcoming)
+        end)
+    end
 end
 
 function M:get_image_bb(imgData)
@@ -131,12 +172,14 @@ function M:loadChatperInitImage(chapter)
             end
         end
         local img_src = self.chapter_imglist[start_id]
-        local img_data = downloadImage(img_src)
+        local img_data = self:downloadPageImage(img_src)
 
         -- 渲染图片数据
         self.image = self:get_image_bb(img_data)
 
         self.chapter_imglist_cur = start_id
+
+        self:scheduleStreamPreload()
 
         return self.image
     else
@@ -174,7 +217,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
 
         if H.is_str(img_src) then
             -- 尝试下载当前图片
-            self.image = downloadImage(img_src)
+            self.image = self:downloadPageImage(img_src)
             if self.image then
                 self.chapter_imglist_cur = image_num
                 is_success = true
@@ -202,7 +245,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             new_image_num = (call_event_type == 'next') and 1 or #self.chapter_imglist
             local img_src = self.chapter_imglist[new_image_num]
 
-            self.image = downloadImage(img_src)
+            self.image = self:downloadPageImage(img_src)
             if self.image then
                 self.chapter_imglist_cur = new_image_num
                 is_success = true
@@ -231,6 +274,9 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         self.image = self:get_image_bb(self.image)
 
         self:update()
+
+        -- 显示后预取后几页(子进程后台, 静默失败)
+        self:scheduleStreamPreload()
     else
         logger.err("最终图片加载失败")
         Backend:show_notice("页面加载失败，请重试")
@@ -275,7 +321,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
         local retData = {}
         if H.is_str(current_img_src) then
 
-            local image_data = downloadImage(current_img_src)
+            local image_data = self:downloadPageImage(current_img_src)
             if image_data then
                 retData['chapter_imglist_cur'] = image_num
                 retData['self_image'] = image_data
@@ -291,7 +337,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
                 local new_image_num = (call_event_type == 'next') and 1 or #new_chapter_imglist
                 local img_src = self.chapter_imglist[new_image_num]
 
-                local image_data = downloadImage(img_src)
+                local image_data = self:downloadPageImage(img_src)
                 if image_data then
                     retData['chapter_imglist_cur'] = new_image_num
                     retData['self_image'] = image_data
