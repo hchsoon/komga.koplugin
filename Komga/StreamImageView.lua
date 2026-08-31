@@ -262,6 +262,75 @@ function M:turnDualPage(direction)
     return self:getTurnPageNextImage(direction > 0 and 'next' or 'prev', next_base)
 end
 
+-- 阅读中手动切换 双页/单页: 点击屏幕中间 1/3 立即以当前页为基页重渲染。
+-- 切换成功才落盘设置(在"自动·横屏"基础上切换会显式固定 on/off, 恢复自动走设置菜单);
+-- 页面获取失败不改动设置, 静默提示。
+function M:toggleDualPageMode()
+    local want_dual = not self:isDualPageEnabled()
+    local cur = self.chapter_imglist_cur or 1
+
+    local image, is_bb
+    if want_dual then
+        image = self:renderPagesAt(self:dualIndicesFor(cur))
+        is_bb = true
+    else
+        local src = self.chapter_imglist[cur]
+        local data = H.is_str(src) and self:downloadPageImage(src) or nil
+        image = data and self:get_image_bb(data) or nil
+        is_bb = nil
+    end
+    if not image then
+        Backend:show_notice("切换失败，页面获取失败")
+        return true
+    end
+
+    local settings = Backend:getSettings()
+    settings.stream_dual_page = want_dual and "on" or "off"
+    pcall(function()
+        Backend:saveSettings(settings)
+    end)
+
+    if self.image and self.image.free then
+        pcall(function()
+            self.image:free()
+        end)
+    end
+    self.image = image
+    self._image_is_bb = is_bb
+    self._images_list_cur = cur
+    if not self.images_keep_pan_and_zoom then
+        self._center_x_ratio = 0.5
+        self._center_y_ratio = 0.5
+        self.scale_factor = self._images_orig_scale_factor
+    end
+    self:update()
+    -- e-ink: 图像页全刷+抖动
+    if G_reader_settings and G_reader_settings:nilOrTrue("refresh_on_pages_with_images") then
+        UIManager:setDirty(self, function()
+            return "full", nil, true
+        end)
+    end
+    self:scheduleStreamPreload()
+
+    Backend:show_notice(want_dual and "双页模式：开" or "双页模式：关")
+    return true
+end
+
+-- 中间 1/3 点击 -> 双页/单页切换(替代原生"按钮栏显隐"; 关闭仍可用下滑/多次滑动/返回键)
+function M:onTap(_, ges)
+    if ges and ges.pos and self.main_frame then
+        if ges.pos:notIntersectWith(self.main_frame.dimen) then
+            self:onClose()
+            return true
+        end
+        local w = Screen:getWidth()
+        if ges.pos.x > w / 3 and ges.pos.x < w * 2 / 3 then
+            return self:toggleDualPageMode()
+        end
+    end
+    return ImageViewer.onTap(self, _, ges)
+end
+
 function M:get_image_bb(imgData)
     imgData = imgData or self.image
 
