@@ -441,8 +441,9 @@ function M:refreshVolumesCache(series, last_refresh_time)
 
     local book_cache_id = series.cache_id
     return self:komgaApi(function()
-        -- POST /api/v1/books/list(按系列条件查询分卷)
-        return self.api:post("/api/v1/books/list", nil, {
+        -- POST /api/v1/books/list(按系列条件查询分卷)。
+        -- 注意: Komga 分页参数 size 只认 query string, 放 body 会被忽略(默认页大小 20 截断)
+        return self.api:post("/api/v1/books/list", {size = 1000}, {
             condition = {
                 allOf = {
                     {
@@ -452,8 +453,7 @@ function M:refreshVolumesCache(series, last_refresh_time)
                         }
                     }
                 }
-            },
-            size = 1000
+            }
         }, {timeouts = {10, 12}})
     end, function(response)
 
@@ -480,10 +480,10 @@ function M:refreshLibraryCache(last_refresh_time)
         -- data=bookinfos
         dbg.v('Start refreshing library')
         logger.warn('Start refreshing library')
-        -- POST /api/v1/series/list(全量书架)
-        return self.api:post("/api/v1/series/list", nil, {
-            fullTextSearch = "",
-            size = 1000
+        -- POST /api/v1/series/list(全量书架)。
+        -- 注意: 分页参数 size 只认 query string, 放 body 会被忽略(默认页大小 20 截断)
+        return self.api:post("/api/v1/series/list", {size = 1000}, {
+            fullTextSearch = ""
         }, {timeouts = {8, 12}})
     end, function(response)
         local bookShelfId = self:getServerPathCode()
