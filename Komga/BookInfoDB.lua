@@ -606,7 +606,16 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
 
     local batch_data = {}
     for index, series in ipairs(seriesData) do
-        local coverUrl = server_address .. "/api/v1/series/" .. series.id .. "/thumbnail"
+        -- 封面 URL 带服务器 lastModified 版本号(?v=): download_cover_img 据此判断
+        -- 封面是否需要重新下载, Komga 换封面后随书架同步自动刷新
+        local cover_version = ""
+        if H.is_str(series.lastModified) and series.lastModified ~= "" then
+            cover_version = series.lastModified:gsub("[^%w]", function(c)
+                return string.format("%%%02X", string.byte(c))
+            end)
+        end
+        local coverUrl = server_address .. "/api/v1/series/" .. series.id ..
+            "/thumbnail" .. (cover_version ~= "" and ("?v=" .. cover_version) or "")
         batch_data[index] = {bookShelfId, series.id, series.metadata.title, series.author, series.url, series.id or "",
             series.metadata.title or "", series.originOrder or 0, series.durChapterIndex or 0,
             series.durChapterPos or 0, series.durChapterTime or 0, series.durChapterTitle or "",
@@ -959,6 +968,38 @@ function M:getSeriesLastUpdateTime(bookCacheId)
         ret = os.time()
     end
     return tonumber(ret)
+end
+
+-- 按 bookId 取卷记录(跨卷续读: 服务器"下一本书"映射回本地卷号/类型)
+function M:getVolumeByBookId(bookCacheId, bookId)
+    if not (H.is_str(bookCacheId) and H.is_str(bookId)) then
+        dbg.log('getVolumeByBookId Incorrect input parameters')
+        return nil
+    end
+    local sql_stmt = [[
+    SELECT
+    c.number,
+    c.title,
+    c.mediaType,
+    c.pages,
+    c.cacheFilePath
+FROM volume AS c
+WHERE c.bookCacheId = ? AND c.bookId = ? LIMIT 1;
+    ]]
+    local result = self:execute(sql_stmt, {bookCacheId, bookId})
+    if result and #result > 0 then
+        local row = result[1]
+        return {
+            book_cache_id = bookCacheId,
+            bookId = bookId,
+            number = tonumber(row[1]),
+            title = row[2],
+            mediaType = row[3],
+            pages = tonumber(row[4]),
+            cacheFilePath = row[5]
+        }
+    end
+    return nil
 end
 
 function M:getVolumeInfo(bookCacheId, number)

@@ -1581,6 +1581,26 @@ function LibraryView:loadAndRenderChapter(chapter)
     end
 end
 
+-- 跨卷续读: 当前卷翻到末尾时问服务器"同系列下一本书"(Komga /books/:id/next),
+-- 本地库有该卷记录则用分卷打开流程接着读(EPUB 走服务器进度续读, 漫画走流式/缓存)。
+-- 新卷尚未同步到本地库时回退目录(刷新书架后可读); 全程静默, 失败不弹窗。
+function LibraryView:openNextVolumeOnServer(chapter)
+    if not (H.is_tbl(chapter) and H.is_str(chapter.bookId) and H.is_str(chapter.book_cache_id)) then
+        return false
+    end
+    local ok, next_book = pcall(Backend.getNextBookOnServer, Backend, chapter.bookId)
+    if not ok or not H.is_tbl(next_book) then
+        return false
+    end
+    local next_volume = Backend:getVolumeByBookId(chapter.book_cache_id, next_book.id)
+    if not (H.is_tbl(next_volume) and H.is_num(next_volume.number)) then
+        return false
+    end
+    Backend:show_notice(string.format("接续下一卷: %s", tostring(next_volume.title or next_book.id)))
+    self:openVolumeShortcut(chapter.book_cache_id, next_volume.number, nil)
+    return true
+end
+
 function LibraryView:ReaderUIEventCallback(chapter_call_event)
     if not (H.is_str(chapter_call_event) and H.is_tbl(self.displayed_chapter)) then
         return
@@ -1611,6 +1631,14 @@ function LibraryView:ReaderUIEventCallback(chapter_call_event)
         nextChapter.booksCount = chapter.booksCount
         self:loadAndRenderChapter(nextChapter)
     else
+        -- 当前卷翻到末尾: 在线时先尝试跨卷续读(Komga /books/:id/next),
+        -- 离线/无下一卷/本地库无记录时静默回退目录
+        if chapter_call_event == 'next' and NetworkMgr:isConnected() then
+            local ok_next, opened = pcall(self.openNextVolumeOnServer, self, chapter)
+            if ok_next and opened == true then
+                return
+            end
+        end
         -- print("No more pages")
         self:openKomgaFolder(nil, nil, nil, function()
             if self.book_toc then

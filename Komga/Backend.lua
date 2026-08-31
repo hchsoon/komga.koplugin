@@ -319,6 +319,8 @@ end
 
 function M:initialize()
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
+    -- 阅读中"后几页"预下载(EPUB 内部章节)的独立 pid 文件, 与整卷预下载互不阻塞
+    self.pages_pid_file = H.getTempDirectory() .. '/pages.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
 
     -- 兼容历史版本 <1.038
@@ -1116,7 +1118,12 @@ local book_chapter_resources = function(book_cache_id, filename, res_data, overw
 
     if res_data and (overwrite or not util.fileExists(filepath or "")) then
         H.checkAndCreateFolder(catalogue)
-        util.writeToFile(res_data, filepath, true)
+        -- 原子写: 先写 .part 再 rename, 避免进程被杀/断电留下半写文件
+        -- 被存在性检查误判为有效缓存
+        local tmp_path = filepath .. '.part'
+        if util.writeToFile(res_data, tmp_path, true) then
+            os.rename(tmp_path, filepath)
+        end
     end
 
     return relpath, filepath, catalogue
@@ -1132,7 +1139,9 @@ local volume_writeToFile = function(volume, filePath, resources)
         end
     end
 
-    if util.writeToFile(resources, filePath, true) then
+    -- 原子写: 先写 .part 再 rename, 半写文件不会被存在性检查误判为有效缓存
+    local tmp_path = filePath .. '.part'
+    if util.writeToFile(resources, tmp_path, true) and os.rename(tmp_path, filePath) then
 
         if volume.is_pre_loading == true then
             dbg.v('Cache task completed volume.title', volume.title or '')
@@ -1927,6 +1936,11 @@ function M:downloadAllVolumes(volumes)
     end
 end
 
+-- 后台任务看门狗参数(须声明在使用点之前)
+local TASK_WATCHDOG_INTERVAL = 30 -- 轮询间隔(秒)
+local TASK_WATCHDOG_TIMEOUT = 600 -- 整卷预下载硬超时(秒)
+local PAGES_WATCHDOG_TIMEOUT = 300 -- 翻页预下载硬超时(秒)
+
 function M:preLoadVolumes(volume, download_volume_count)
 
     if not H.is_tbl(volume) then
@@ -2109,6 +2123,8 @@ function M:preLoadVolumes(volume, download_volume_count)
 
         dbg.v("Task started. PID:" .. tostring(task_pid))
 
+        self:startTaskWatchdog(task_pid, self.task_pid_file, TASK_WATCHDOG_TIMEOUT)
+
         local task_return_db_func = self.dbManager:transaction(
             function(task_return_volume, content)
 
@@ -2136,6 +2152,176 @@ function M:preLoadVolumes(volume, download_volume_count)
 
 end
 
+-- ---------------------------------------------------------------------------
+-- 后台子进程看门狗
+-- 子进程卡死(网络挂起等)时 pid 文件会残留, isExtractingInBackground 持续为真,
+-- 后续预下载被"Background tasks incomplete"拒绝、用户下载被"后台下载中"拦截。
+-- 看门狗在父进程周期检查: 进程已退出但 pid 文件未清理 → 复位状态;
+-- 超时 → 删 pid 文件(子进程在任务边界自行退出)并强制回收, 恢复 standby。
+-- ---------------------------------------------------------------------------
+function M:startTaskWatchdog(pid, pid_file, timeout_seconds)
+    if not (pid and pid_file) then
+        return
+    end
+    self._task_watchdogs = self._task_watchdogs or {}
+    self._task_watchdogs[pid_file] = {
+        pid = pid,
+        start = os.time(),
+        timeout = timeout_seconds or TASK_WATCHDOG_TIMEOUT
+    }
+    if self._task_watchdog_scheduled ~= true then
+        self._task_watchdog_scheduled = true
+        UIManager:scheduleIn(TASK_WATCHDOG_INTERVAL, function()
+            self:checkTaskWatchdogs()
+        end)
+    end
+end
+
+function M:checkTaskWatchdogs()
+    self._task_watchdog_scheduled = false
+    local watchdogs = self._task_watchdogs
+    if H.is_tbl(watchdogs) then
+        for pid_file, w in pairs(watchdogs) do
+            local file_exists = util.fileExists(pid_file)
+            -- ffiUtil.isSubProcessDone/terminateSubProcess 在旧版 KOReader 可能缺失, 先探测
+            local done = (H.is_func(ffiUtil.isSubProcessDone) and ffiUtil.isSubProcessDone(w.pid)) or false
+            if not file_exists then
+                -- 正常结束: pid 文件已清理; 进程若仍活着(收尾中)不再等待, 直接回收
+                watchdogs[pid_file] = nil
+                if not done and H.is_func(ffiUtil.terminateSubProcess) then
+                    pcall(function()
+                        ffiUtil.terminateSubProcess(w.pid)
+                    end)
+                end
+            elseif done then
+                -- 进程已退出但 pid 文件未清理(异常终止): 复位状态, 恢复 standby
+                pcall(function()
+                    util.removeFile(pid_file)
+                end)
+                watchdogs[pid_file] = nil
+                pcall(function()
+                    Device:enableCPUCores(1)
+                    UIManager:allowStandby()
+                end)
+            elseif (os.time() - w.start) > w.timeout then
+                dbg.log('background task timeout, terminate pid:', tostring(w.pid))
+                pcall(function()
+                    util.removeFile(pid_file)
+                end)
+                if H.is_func(ffiUtil.terminateSubProcess) then
+                    pcall(function()
+                        ffiUtil.terminateSubProcess(w.pid)
+                    end)
+                end
+                watchdogs[pid_file] = nil
+                pcall(function()
+                    Device:enableCPUCores(1)
+                    UIManager:allowStandby()
+                end)
+            end
+        end
+    end
+    if H.is_tbl(self._task_watchdogs) and next(self._task_watchdogs) then
+        self._task_watchdog_scheduled = true
+        UIManager:scheduleIn(TASK_WATCHDOG_INTERVAL, function()
+            self:checkTaskWatchdogs()
+        end)
+    end
+end
+
+-- 翻页预下载(EPUB 后几页/内部章节)是否进行中
+function M:isPagesPreloading()
+    return self.pages_pid_file ~= nil and util.fileExists(self.pages_pid_file)
+end
+
+-- 阅读中后台预下载当前 EPUB 卷的后几页(内部章节), 翻到时即开。
+-- 与 preLoadVolumes 不同: 内部章节缓存不写 volume 表下载状态,
+-- 全程静默——失败只记日志, 不弹窗、不打断阅读。
+function M:preLoadEpubChapters(volume, count)
+    if not (H.is_tbl(volume) and H.is_str(volume.book_cache_id) and H.is_str(volume.bookId) and
+        H.is_num(volume.number)) then
+        return false
+    end
+    if self:isExtractingInBackground() == true or self:isPagesPreloading() == true then
+        return false
+    end
+    count = H.is_num(count) and count or 3
+
+    local book_cache_id = volume.book_cache_id
+    local bookId = volume.bookId
+    local book_name = volume.name or ""
+    local cur_number = tonumber(volume.number) or 0
+
+    -- 组装后 count 个内部章节任务, 已缓存的(DB 有 url 且文件存在)跳过
+    local tasks = {}
+    for i = 1, count do
+        local num = cur_number + i
+        local ok_ch, chapter = pcall(function()
+            return self.dbManager:getEpubChapterInfo(bookId, num)
+        end)
+        if ok_ch and H.is_tbl(chapter) and H.is_str(chapter.url) and chapter.url ~= "" then
+            local base = H.getVolumeCacheFilePath(book_cache_id, bookId, num, book_name)
+            if not (util.fileExists(base .. ".xhtml") or util.fileExists(base .. ".html")) then
+                table.insert(tasks, {
+                    book_cache_id = book_cache_id,
+                    bookId = bookId,
+                    number = num,
+                    name = book_name,
+                    title = chapter.title or '',
+                    is_pre_loading = true
+                })
+            end
+        end
+    end
+    if #tasks < 1 then
+        return false
+    end
+
+    pcall(function()
+        Device:enableCPUCores(2)
+        UIManager:preventStandby()
+    end)
+
+    self:closeDbManager()
+
+    local task_pid = self:launchProcess(function()
+        pcall(function()
+            util.writeToFile('', self.pages_pid_file, true)
+        end)
+        for i = 1, #tasks do
+            if not util.fileExists(self.pages_pid_file) then
+                break -- 收到停止信号
+            end
+            local status, err = pcall(function()
+                return self:pDownloadVolume(tasks[i])
+            end)
+            if not status then
+                logger.err('preload epub chapter failed:', tostring(err))
+            end
+        end
+        pcall(function()
+            util.removeFile(self.pages_pid_file)
+        end)
+        self:closeDbManager()
+        pcall(function()
+            Device:enableCPUCores(1)
+            UIManager:allowStandby()
+        end)
+        return true
+    end)
+
+    if not task_pid then
+        pcall(function()
+            Device:enableCPUCores(1)
+            UIManager:allowStandby()
+        end)
+        return false
+    end
+
+    self:startTaskWatchdog(task_pid, self.pages_pid_file, PAGES_WATCHDOG_TIMEOUT)
+    return true
+end
+
 function M:getVolumeInfoCache(bookCacheId, number)
     local volume_data = self.dbManager:getVolumeInfo(bookCacheId, number)
     return volume_data
@@ -2152,6 +2338,30 @@ end
 
 function M:getEpubChapterCount(chapterId)
     return self.dbManager:getEpubChapterCount(chapterId)
+end
+
+-- 按 bookId 取卷记录(跨卷续读: 把服务器"下一本书"映射回本地卷号/类型)
+function M:getVolumeByBookId(bookCacheId, bookId)
+    if not (H.is_str(bookCacheId) and H.is_str(bookId)) then
+        return nil
+    end
+    return self.dbManager:getVolumeByBookId(bookCacheId, bookId)
+end
+
+-- Komga 原生"同系列下一本书"(/books/:id/next, 404=无下一本)。
+-- 在线跨卷续读用; 任何失败(离线/超时/无下一本)返回 nil, 调用方静默回退
+function M:getNextBookOnServer(bookId)
+    if not (H.is_str(bookId) and NetworkMgr:isConnected()) then
+        return nil
+    end
+    local response = self:komgaSporeApi(function()
+        return self.apiClient:getNextBook({bookId = bookId})
+    end, nil, {timeouts = {4, 6}}, 'getNextBook')
+    if H.is_tbl(response) and response.type == 'SUCCESS' and H.is_tbl(response.body)
+        and H.is_str(response.body.id) then
+        return response.body
+    end
+    return nil
 end
 
 function M:getSeriesInfoCache(bookCacheId)
@@ -2401,14 +2611,45 @@ function M:getVolumeCoverCachePath(book_cache_id, number)
     return H.joinPath(resources_path, 'cover_v' .. tostring(number))
 end
 
+-- 探测已缓存的封面文件(扩展名由下载时的 Content-Type 决定)
+local function findCachedCoverFile(path_no_ext)
+    for _, ext in ipairs({"jpg", "jpeg", "png", "webp", "gif"}) do
+        local p = string.format("%s.%s", path_no_ext, ext)
+        if util.fileExists(p) then
+            return p
+        end
+    end
+    return nil
+end
+
 function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
     if not (H.is_str(book_cache_id) and H.is_str(cover_url)) then
         logger.err("download_cover_img parameter error")
         return
     end
-    
+
     cover_path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
-    logger.err("download_cover_img", cover_url)
+
+    -- 封面版本缓存: cover_url 带 ?v=<服务器 lastModified>(见 upsertSeries)时,
+    -- 版本未变且本地已有封面文件则直接复用; Komga 换封面后随书架同步自动刷新
+    local cover_version = cover_url:match("[?&]v=([^&]*)") or nil
+    if cover_version and cover_version ~= "" then
+        local marker_path = cover_path_no_ext .. '.v'
+        local marker = nil
+        local f = io.open(marker_path, "rb")
+        if f then
+            marker = f:read("*a")
+            f:close()
+        end
+        if marker == cover_version then
+            local cached = findCachedCoverFile(cover_path_no_ext)
+            if cached then
+                local _, image_filename = util.splitFilePathName(cached)
+                return cached, image_filename
+            end
+        end
+    end
+
     local img_src = cover_url
     local status, err = pGetUrlContent({
                         url = img_src,
@@ -2438,7 +2679,16 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
             return
         end
         local safe_cover_img_path = H.joinPath(dir, image_filename)
-        util.writeToFile(cover_img_data, safe_cover_img_path, true)
+        -- 原子写: 半写封面文件会被当作有效缓存
+        local tmp_cover_path = safe_cover_img_path .. '.part'
+        if util.writeToFile(cover_img_data, tmp_cover_path, true) then
+            os.rename(tmp_cover_path, safe_cover_img_path)
+            if cover_version and cover_version ~= "" then
+                pcall(function()
+                    util.writeToFile(cover_version, path_no_ext .. '.v', true)
+                end)
+            end
+        end
 
         return cover_img_path, image_filename
     else
@@ -2602,13 +2852,19 @@ function M:after_reader_chapter_show(volume)
     end
 
     if volume.isRead ~= true and NetworkMgr:isConnected() then
-        local complete_count = self:getReadAheadVolumeCount(volume)
-        if complete_count < 40 then
-            local preDownloadNum = 3
-            if volume.cacheExt and volume.cacheExt == 'cbz' then
-                preDownloadNum = 1
+        if is_epub then
+            -- EPUB: 预下载当前卷的后几页(内部章节), 翻到时即开; 全程静默
+            self:preLoadEpubChapters(volume, 3)
+        else
+            -- 漫画: 预下载后续整卷(cbz 单文件较大, 只预下载 1 卷)
+            local complete_count = self:getReadAheadVolumeCount(volume)
+            if complete_count < 40 then
+                local preDownloadNum = 3
+                if volume.cacheExt and volume.cacheExt == 'cbz' then
+                    preDownloadNum = 1
+                end
+                self:preLoadVolumes(volume, preDownloadNum)
             end
-            self:preLoadVolumes(volume, preDownloadNum)
         end
     end
 

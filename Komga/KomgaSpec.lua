@@ -74,6 +74,13 @@ return {
             required_params = {"bookId"},
             expected_status = {200}
         },
+        -- 同系列按序的下一本书(404 = 无下一本): 跨卷续读用
+        getNextBook = {
+            path = "/api/v1/books/:bookId/next",
+            method = "GET",
+            required_params = {"bookId"},
+            expected_status = {200}
+        },
          getEpubManifest = {
              path = "/api/v1/books/:bookId/manifest/epub",
              method = "GET",
