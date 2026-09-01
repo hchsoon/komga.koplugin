@@ -24,14 +24,26 @@ local M = ImageViewer:extend{
     _image_is_bb = nil -- 本次取到的 self.image 已是 blitbuffer(双页拼合), 跳过再渲染
 }
 
--- ImageViewer 无自身 paintTo, 白色背景由 FrameContainer 只画在内容区(main_frame)
--- 矩形内——图像不满屏时(横屏双页上下留白)其余区域从不绘制, 全刷会透出下层
--- 窗口的旧画面(旋转后尤为明显)。这里先整屏铺白再交给原生绘制。
+-- 自绘: 整屏铺白 + main_frame 按"当前屏幕"手工居中。
+-- 不走原生 WidgetContainer 定位链——布局日志实测旋转后首帧仍拿旧方向宽度定位
+-- (x=-308=(旧宽1150-新内容1766)/2), 上游多处缓存(region/dimen/window 记录)在
+-- 旋转后并不全部失效; 自己计算偏移可彻底绕开。FrameContainer 只画内容区的白底
+-- 问题(留白透出旧画面)也一并由整屏铺白解决。
 function M:paintTo(bb, x, y)
-    pcall(function()
-        bb:paintRect(0, 0, Screen:getWidth(), Screen:getHeight(), Blitbuffer.COLOR_WHITE)
+    local ok = pcall(function()
+        local w = Screen:getWidth()
+        local h = Screen:getHeight()
+        bb:paintRect(0, 0, w, h, Blitbuffer.COLOR_WHITE)
+        if self.main_frame then
+            local content_size = self.main_frame:getSize()
+            self.main_frame:paintTo(bb,
+                math.floor((w - content_size.w) / 2),
+                math.floor((h - content_size.h) / 2))
+        end
     end)
-    ImageViewer.paintTo(self, bb, x, y)
+    if not ok then
+        ImageViewer.paintTo(self, bb, x, y)
+    end
 end
 
 function M:init()
@@ -323,7 +335,7 @@ end
 -- 出界。这里把当前画面包装回构造入参形态后整体重跑 M:init, 按当前屏幕重建
 -- 全部部件(含手势注册), 再全刷强制立即绘制。
 function M:repaintAfterRotation()
-    pcall(function()
+    local ok_rebuild, rebuild_err = pcall(function()
         if self.image == nil or (self.image.getWidth == nil and type(self.image) ~= "string" and type(self.image) ~= "function") then
             -- 此前渲染失败可能留下空画面: 重建前先恢复占位图,
             -- 否则 ImageWidget 对 nil 调 getWidth 直接崩溃
@@ -340,6 +352,10 @@ function M:repaintAfterRotation()
             self._images_list_cur = saved_cur
         end
     end)
+    if not ok_rebuild then
+        -- 重建失败不静默: 记录错误(paintTo 的手工居中仍可兜底显示)
+        logger.err("[komga-layout] rebuild after rotation failed:", tostring(rebuild_err))
+    end
     UIManager:setDirty("all", "full")
     pcall(function()
         UIManager:forceRePaint()
