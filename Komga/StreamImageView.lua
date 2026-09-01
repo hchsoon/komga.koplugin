@@ -45,6 +45,8 @@ function M:fetchAndShow(options)
     self.bookinfo = options.bookinfo
     self.chapter = options.chapter
     self.on_return_callback = options.on_return_callback
+    -- 方向隔离: 记录进入阅读器时的屏幕方向, 关闭时恢复, 阅读中的旋转不影响主界面
+    self._entry_rotation_mode = Screen:getRotationMode()
 
     local viewer = M:new{
         image = {self:loadChatperInitImage(self.chapter)},
@@ -58,6 +60,14 @@ function M:fetchAndShow(options)
 end
 
 function M:onClose()
+    -- 方向隔离: 关闭前恢复进入时的屏幕方向(背后的主界面按原方向重排后再关闭),
+    -- 阅读器内的双页/旋转操作不会把主界面留在横屏
+    if H.is_num(self._entry_rotation_mode)
+        and Screen:getRotationMode() ~= self._entry_rotation_mode then
+        self:setScreenRotation(self._entry_rotation_mode)
+    end
+    self._entry_rotation_mode = nil
+
     ImageViewer.onClose(self)
     self.chapter.current_page = self.chapter_imglist_cur
     -- 关卷清理流式页预取缓存(整目录删除, 不占长期磁盘)
@@ -321,6 +331,26 @@ function M:repaintAfterRotation()
     end)
 end
 
+-- 旋转屏幕并同步重绘: 优先广播 KOReader 标准 SetRotationMode 事件——背后的
+-- FileManager/ReaderUI 收到后自行重排, 否则它们保持旧方向布局, 全刷时旧内容
+-- 仍会透出(背景残影)、关闭后主界面错位; 无人处理时才兜底直设坐标。
+function M:setScreenRotation(mode)
+    if not H.is_num(mode) or Screen:getRotationMode() == mode then
+        return false
+    end
+    local ok = pcall(function()
+        local Event = require("ui/event")
+        UIManager:broadcastEvent(Event:new("SetRotationMode", mode))
+    end)
+    if not ok or Screen:getRotationMode() ~= mode then
+        pcall(function()
+            Screen:setRotationMode(mode)
+        end)
+    end
+    self:repaintAfterRotation()
+    return true
+end
+
 -- 双页与横屏绑定: 开双页自动转横屏(记住原方向); 关双页时若方向仍是我们
 -- 设置的(用户未再手动旋转)则恢复。竖排本/横屏设备已横屏时不动作。
 function M:autoRotateForDualMode(enabled)
@@ -332,7 +362,7 @@ function M:autoRotateForDualMode(enabled)
             end
             self._dual_prev_rotation = Screen:getRotationMode()
             self._dual_rotation_set = Screen.DEVICE_ROTATED_CLOCKWISE
-            Screen:setRotationMode(self._dual_rotation_set)
+            self:setScreenRotation(self._dual_rotation_set)
             rotated = true
         else
             local prev = self._dual_prev_rotation
@@ -341,15 +371,11 @@ function M:autoRotateForDualMode(enabled)
             self._dual_rotation_set = nil
             -- 仅当当前方向仍是我们设置的那个才恢复, 避免覆盖用户随后的手动旋转
             if prev ~= nil and ours ~= nil and Screen:getRotationMode() == ours then
-                Screen:setRotationMode(prev)
+                self:setScreenRotation(prev)
                 rotated = true
             end
         end
     end)
-    if rotated then
-        -- 旋转后同步重绘, 消除旧方向布局的判定竞态
-        self:repaintAfterRotation()
-    end
     return rotated
 end
 
@@ -430,18 +456,14 @@ function M:rotateScreenToggle()
         if Screen:getWidth() > Screen:getHeight() then
             -- 横屏 -> 竖屏(记住横屏变体)
             self._rotate_landscape_mode = cur_mode
-            Screen:setRotationMode(self._rotate_portrait_mode or Screen.DEVICE_ROTATED_UPRIGHT)
+            rotated = self:setScreenRotation(self._rotate_portrait_mode or Screen.DEVICE_ROTATED_UPRIGHT)
         else
             self._rotate_portrait_mode = cur_mode
-            Screen:setRotationMode(self._rotate_landscape_mode or Screen.DEVICE_ROTATED_CLOCKWISE)
+            rotated = self:setScreenRotation(self._rotate_landscape_mode or Screen.DEVICE_ROTATED_CLOCKWISE)
         end
-        rotated = true
     end)
-    if rotated then
-        self:repaintAfterRotation()
-        if (Backend:getSettings().stream_dual_page or "auto") == "auto" then
-            self:redisplayCurrent()
-        end
+    if rotated and (Backend:getSettings().stream_dual_page or "auto") == "auto" then
+        self:redisplayCurrent()
     end
     return true
 end
