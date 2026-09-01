@@ -259,7 +259,9 @@ local function pStreamToFile(options)
         }
 
         socketutil:set_timeout(timeout, maxtime)
-        local res, code, resp_headers = socket.skip(1, http.request(request))
+        -- skip(1) 丢弃首值(=1): 依次返回 code(number), headers(table), status(string)
+        -- 注意首个返回值就是状态码——此前误命名为 res 导致 code 拿到 headers 表
+        local code, resp_headers = socket.skip(1, http.request(request))
         socketutil:reset_timeout()
         f:close()
 
