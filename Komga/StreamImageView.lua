@@ -442,11 +442,11 @@ function M:redisplayCurrent(force_dual)
     self.image = image
     self._image_is_bb = is_bb
     self._images_list_cur = cur
-    if not self.images_keep_pan_and_zoom then
-        self._center_x_ratio = 0.5
-        self._center_y_ratio = 0.5
-        self.scale_factor = self._images_orig_scale_factor
-    end
+    -- 强制回到"适配屏幕"并重置取景中心: 双页拼合 bb 尺寸随页对变化,
+    -- 沿用旧 scale_factor/中心比会把大图按原始尺寸偏移绘制(表现为贴底/出界)
+    self._center_x_ratio = 0.5
+    self._center_y_ratio = 0.5
+    self.scale_factor = 0
     self:update()
     -- e-ink: 图像页全刷+抖动
     if G_reader_settings and G_reader_settings:nilOrTrue("refresh_on_pages_with_images") then
@@ -461,23 +461,56 @@ end
 function M:toggleDualPageMode()
     local want_dual = not self:isDualPageEnabled()
 
-    -- 先按目标模式渲染, 成功才落盘设置与转屏(失败静默提示, 状态不变)
+    local settings = Backend:getSettings()
+    local prev_mode = settings.stream_dual_page
+    -- 先落盘(临时), 让 isDualPageEnabled/fetchDisplayImage 在重渲染时按目标模式取图
+    settings.stream_dual_page = want_dual and "on" or "off"
+
+    -- 先转屏后渲染: 双页拼合应按最终屏幕方向布局(避免"竖屏渲染→横屏重排"
+    -- 的双重 update 留下过期尺寸, 造成图像偏移/贴底)
+    self:autoRotateForDualMode(want_dual)
+
+    -- 按目标模式渲染; 成功才保留设置, 失败回滚并静默提示
     if not self:redisplayCurrent(want_dual) then
+        settings.stream_dual_page = prev_mode
+        pcall(function()
+            Backend:saveSettings(settings)
+        end)
+        self:autoRotateForDualMode(not want_dual)
         Backend:show_notice("切换失败，页面获取失败")
         return true
     end
 
-    local settings = Backend:getSettings()
-    settings.stream_dual_page = want_dual and "on" or "off"
     pcall(function()
         Backend:saveSettings(settings)
     end)
 
-    -- 双页绑定横屏: 开→自动转横屏, 关→恢复原方向(用户未再手动旋转时)
-    self:autoRotateForDualMode(want_dual)
+    self:dumpLayoutState("toggle:" .. tostring(want_dual))
 
     Backend:show_notice(want_dual and "双页模式：开" or "双页模式：关")
     return true
+end
+
+-- 布局诊断日志(定位图像偏移/贴底问题): 打到 crash.log / stdout 的 logger.info,
+-- 排查完成后可整体删除
+function M:dumpLayoutState(tag)
+    pcall(function()
+        local mf = self.main_frame and self.main_frame.dimen
+        local ic = self.image_container and self.image_container.dimen
+        local img = self.image
+        logger.info(string.format(
+            "[komga-layout] %s screen=%dx%d self=%sx%s imgc_h=%s main_frame=%s img_ctr=%s img=%dx%d scale=%s c=(%s,%s)",
+            tostring(tag),
+            Screen:getWidth(), Screen:getHeight(),
+            tostring(self.width), tostring(self.height),
+            tostring(self.img_container_h),
+            mf and string.format("%dx%d@%d,%d", mf.w, mf.h, mf.x, mf.y) or "nil",
+            ic and string.format("%dx%d", ic.w, ic.h) or "nil",
+            (img and img.getWidth) and img:getWidth() or -1,
+            (img and img.getHeight) and img:getHeight() or -1,
+            tostring(self.scale_factor),
+            tostring(self._center_x_ratio), tostring(self._center_y_ratio)))
+    end)
 end
 
 -- 单独旋转屏幕(不影响双页设置): 竖屏系 <-> 横屏系, 记住各自的变体。
