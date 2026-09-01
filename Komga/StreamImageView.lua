@@ -316,50 +316,29 @@ function M:turnDualPage(direction)
     return self:getTurnPageNextImage(direction > 0 and 'next' or 'prev', next_base)
 end
 
--- 旋转后刷新 ImageViewer 在 init 时缓存的几何: self[1].dimen 指向 init 构建的
--- self.region(update() 只刷新 width/height 与 frame_elements, 不覆盖 region),
--- 不刷新则新画面仍按旧方向矩形排布——只占屏幕一角且旧画面残留; 手势范围
--- (ges_events 里的 GestureRange.range)同样按旧屏幕缓存, 部分区域会失灵。
-function M:refreshGeometryForRotation()
-    local Geom = require("ui/geometry")
-    self.region = Geom:new{
-        x = 0, y = 0,
-        w = Screen:getWidth(),
-        h = Screen:getHeight()
-    }
-    if self[1] then
-        self[1].dimen = self.region
-    end
-    -- 按钮容器宽度也按 init 时的屏幕缓存(按钮可见时用于居中)
-    if self.button_container and self.button_container.dimen then
-        self.button_container.dimen.w = self.width
-    end
-    if self.ges_events then
-        for _, def in pairs(self.ges_events) do
-            for _, gr in ipairs(def) do
-                if gr.range then
-                    gr.range.w = self.region.w
-                    gr.range.h = self.region.h
-                end
-            end
-        end
-    end
-end
-
--- 程序化旋转后的同步重绘: Screen:setRotationMode 只换坐标系, 布局与 dimen 要到
--- 下一次 paintTo 才更新; 若不强制立即重绘, 旋转后的首个输入事件会拿着旧方向的
--- main_frame.dimen 做"框外点击=关闭"判定, 造成旋转即退出。与 UIManager:onRotation
--- 同款(setDirty all + forceRePaint), 外加先重建窗口部件并刷新缓存的几何。
+-- 程序化旋转后的同步重绘。
+-- update() 不足以清掉布局链上的尺寸缓存(main_frame.dimen/region/手势范围都是
+-- init 时构建、要到下一次 paint 才更新, 而 paint 又拿旧 dimen 定位)——日志实测
+-- 旋转后首帧仍按旧方向布局(如横屏下 main_frame 还是竖屏尺寸), 表现为图像贴底/
+-- 出界。这里把当前画面包装回构造入参形态后整体重跑 M:init, 按当前屏幕重建
+-- 全部部件(含手势注册), 再全刷强制立即绘制。
 function M:repaintAfterRotation()
     pcall(function()
         if self.image == nil or (self.image.getWidth == nil and type(self.image) ~= "string" and type(self.image) ~= "function") then
-            -- 此前渲染失败可能留下空画面: update 前先恢复占位图,
+            -- 此前渲染失败可能留下空画面: 重建前先恢复占位图,
             -- 否则 ImageWidget 对 nil 调 getWidth 直接崩溃
             self.image = self:get_image_bb(nil)
             self._image_is_bb = nil
         end
-        self:update()
-        self:refreshGeometryForRotation()
+        if self.image and self.image.getWidth then
+            self.image = {self.image} -- 模拟构造入参(图片列表), 让 init 走列表分支
+        end
+        local saved_cur = self._images_list_cur
+        self:init()
+        -- init 会把列表游标重置为 1, 恢复当前页(进度条/后续翻页依据)
+        if H.is_num(saved_cur) then
+            self._images_list_cur = saved_cur
+        end
     end)
     UIManager:setDirty("all", "full")
     pcall(function()
