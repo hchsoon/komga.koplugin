@@ -356,24 +356,21 @@ function M:repaintAfterRotation()
     end)
 end
 
--- 旋转屏幕并同步重绘: 优先广播 KOReader 标准 SetRotationMode 事件——背后的
--- FileManager/ReaderUI 收到后自行重排, 否则它们保持旧方向布局, 全刷时旧内容
--- 仍会透出(背景残影)、关闭后主界面错位; 无人处理时才兜底直设坐标。
+-- 旋转屏幕并同步重绘。
+-- 注意: 不能广播 KOReader 的 SetRotationMode 事件——FileManager 的处理函数是
+-- rotate = reinit(filemanager.lua), 会关闭重建自身, 把叠在上面的本阅读器一并
+-- 关掉(且不走本类 onClose, 方向恢复也不会执行), 表现为"切双页立即退回主界面"。
+-- 直设坐标即可: 本阅读器全屏白底盖住背景, 背景旧布局不可见; 关闭时恢复进入
+-- 方向后, 背后窗口的布局缓存本就对应原方向, 重绘自然对齐。
 function M:setScreenRotation(mode)
     if not H.is_num(mode) or Screen:getRotationMode() == mode then
         return false
     end
     local ok = pcall(function()
-        local Event = require("ui/event")
-        UIManager:broadcastEvent(Event:new("SetRotationMode", mode))
+        Screen:setRotationMode(mode)
     end)
-    if not ok or Screen:getRotationMode() ~= mode then
-        pcall(function()
-            Screen:setRotationMode(mode)
-        end)
-    end
     self:repaintAfterRotation()
-    return true
+    return ok
 end
 
 -- 双页与横屏绑定: 开双页自动转横屏(记住原方向); 关双页时若方向仍是我们
