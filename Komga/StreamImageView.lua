@@ -28,11 +28,12 @@ local M = ImageViewer:extend{
     _image_is_bb = nil -- 本次取到的 self.image 已是 blitbuffer(双页拼合), 跳过再渲染
 }
 
--- 自绘: 整屏铺白 + main_frame 按"当前屏幕"手工居中。
+-- 自绘: 整屏铺白 + main_frame 按"当前屏幕"手工居中 + 顶部卷内进度条。
 -- 不走原生 WidgetContainer 定位链——布局日志实测旋转后首帧仍拿旧方向宽度定位
 -- (x=-308=(旧宽1150-新内容1766)/2), 上游多处缓存(region/dimen/window 记录)在
 -- 旋转后并不全部失效; 自己计算偏移可彻底绕开。FrameContainer 只画内容区的白底
 -- 问题(留白透出旧画面)也一并由整屏铺白解决。
+-- 进度条每次绘制都按当前屏幕尺寸计算, 旋转(含重力感应)后自动跟随。
 function M:paintTo(bb, x, y)
     local ok = pcall(function()
         local w = Screen:getWidth()
@@ -43,6 +44,19 @@ function M:paintTo(bb, x, y)
             self.main_frame:paintTo(bb,
                 math.floor((w - content_size.w) / 2),
                 math.floor((h - content_size.h) / 2))
+        end
+        -- 顶部进度条: 当前页在本卷中的位置(双页模式按页对基页)
+        local total = self.chapter_imglist and #self.chapter_imglist or 0
+        if total > 1 then
+            local cur = self.chapter_imglist_cur or 1
+            local pct = (cur - 1) / (total - 1)
+            local bar_h = math.max(4, math.floor(h / 240))
+            local y0 = math.max(2, math.floor(h / 320))
+            bb:paintRect(0, y0, w, bar_h, Blitbuffer.COLOR_GRAY)
+            local fw = math.floor(w * pct + 0.5)
+            if fw > 0 then
+                bb:paintRect(0, y0, fw, bar_h, Blitbuffer.COLOR_BLACK)
+            end
         end
     end)
     if not ok then
@@ -129,7 +143,9 @@ function M:fetchAndShow(options)
         fullscreen = true,
         with_title_bar = false,
         image_disposable = true,
-        images_list_nb = 4,
+        -- 不传 images_list_nb: 原生底部进度条按"图片列表序号/列表长度"计算,
+        -- 对"本卷第 N/183 页"毫无意义(此前还显示错误比例); 卷内进度改由
+        -- paintTo 顶部的自绘进度条呈现(随旋转自动适配)
         image_padding = 0
     }
     UIManager:show(viewer)

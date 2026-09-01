@@ -156,4 +156,166 @@ local function pGetUrlContent(options, is_create)
     }
 end
 
+--[[ 流式下载到文件(参考 koobone http_downloader 设计):
+- 边下边写盘, 不整载内存; 已有 .part 时发 Range 头断点续传
+- on_progress(downloaded, total) 每 256KB 回调(total 未知为 nil)
+- should_cancel() 返回 true 时中止并保留 .part 供下次续传
+- 成功后 .part → rename 原子落位; 服务器无视 Range(200 回全量)时自动重下
+options: { url, dest, headers, timeout, maxtime, on_progress, should_cancel, resume }
+返回 true, {bytes, resumed} 或 false, err ]]
+local function pStreamToFile(options)
+    local socket = require("socket")
+    local http = require("socket.http")
+    local socketutil = require("socketutil")
+    local socket_url = require("socket.url")
+
+    local url = options.url
+    local dest = options.dest
+    if type(url) ~= "string" or type(dest) ~= "string" or dest == "" then
+        return false, "bad params"
+    end
+    local parsed = socket_url.parse(url)
+    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
+        return false, "Unsupported protocol"
+    end
+
+    local tmp = dest .. ".part"
+    local timeout = options.timeout or 15
+    local maxtime = options.maxtime or 120
+    local on_progress = options.on_progress
+    local should_cancel = options.should_cancel
+
+    -- 单次尝试(含 Range); 服务器忽略 Range 回 200 时由调用侧重试一次
+    local function attempt(from_scratch)
+        local start_offset = 0
+        local mode = "wb"
+        if not from_scratch and options.resume ~= false then
+            local probe = io.open(tmp, "rb")
+            if probe then
+                start_offset = probe:seek("end")
+                probe:close()
+                if start_offset > 0 then
+                    mode = "ab"
+                end
+            end
+        end
+        local f = io.open(tmp, mode)
+        if not f then
+            return false, "cannot open part file"
+        end
+
+        local headers = {}
+        for k, v in pairs(options.headers or get_default_headers()) do
+            headers[k] = v
+        end
+        if start_offset > 0 then
+            headers["Range"] = "bytes=" .. start_offset .. "-"
+        end
+
+        local downloaded = start_offset
+        local last_cb = start_offset
+        local total = nil
+        local cancelled = false
+
+        local function notify()
+            if on_progress then
+                pcall(on_progress, downloaded, total)
+            end
+        end
+
+        local sink_obj = setmetatable({}, {
+            __call = function(_, chunk, sink_err)
+                if chunk == nil then
+                    -- ltn12 结束标记: sink_err 非 nil 表示出错
+                    if sink_err then
+                        return nil, tostring(sink_err)
+                    end
+                    return true
+                end
+                if chunk ~= "" then
+                    if not f:write(chunk) then
+                        return nil, "disk write failed"
+                    end
+                    downloaded = downloaded + #chunk
+                    if downloaded - last_cb >= 256 * 1024 then
+                        last_cb = downloaded
+                        notify()
+                    end
+                    if should_cancel and should_cancel() then
+                        cancelled = true
+                        return nil, "cancelled"
+                    end
+                end
+                return true
+            end
+        })
+
+        local request = {
+            url = url,
+            method = "GET",
+            headers = headers,
+            sink = sink_obj,
+            create = socketutil.tcp
+        }
+
+        socketutil:set_timeout(timeout, maxtime)
+        local res, code, resp_headers = socket.skip(1, http.request(request))
+        socketutil:reset_timeout()
+        f:close()
+
+        if cancelled then
+            return false, "cancelled"
+        end
+
+        if type(code) == "number" and code >= 200 and code < 300 then
+            -- Range 被忽略(回 200 全量)但本地已有半段: 清掉重下
+            if start_offset > 0 and code == 200 then
+                return nil, "restart"
+            end
+            if code == 206 then
+                -- Content-Range: bytes s-e/total; 无头时退回 content-length(剩余量)
+                local cr = resp_headers and resp_headers["content-range"]
+                local t = cr and tonumber(cr:match("/(%d+)%s*$"))
+                if not t then
+                    local cl = resp_headers and tonumber(resp_headers["content-length"])
+                    t = cl and (start_offset + cl) or nil
+                end
+                total = t
+            else
+                total = resp_headers and tonumber(resp_headers["content-length"]) or nil
+            end
+            if total and downloaded < total then
+                notify()
+                return false, "incomplete"
+            end
+            notify()
+            os.remove(dest)
+            if not os.rename(tmp, dest) then
+                return false, "rename failed"
+            end
+            -- 扩展名由 Content-Type 推导(调用方命名用; 无则 nil)
+            local ctype = resp_headers and resp_headers["content-type"]
+            ctype = ctype and ctype:gsub("%s*;.*$", "") or nil
+            local ext = ctype and get_extension_from_mimetype(ctype) or nil
+            return true, {bytes = downloaded, resumed = start_offset > 0, ext = ext,
+                headers = resp_headers}
+        end
+
+        return false, "HTTP " .. tostring(code)
+    end
+
+    local ok, res = attempt(false)
+    if ok then
+        return true, res
+    end
+    if res == "restart" then
+        -- 本地有半段但服务器不支持 Range: 清空重下
+        os.remove(tmp)
+        return attempt(true)
+    end
+    return false, res
+end
+
+-- 保持"require 即函数"的既有用法, pStreamToFile 挂为字段导出
+pGetUrlContent.pStreamToFile = pStreamToFile
 return pGetUrlContent

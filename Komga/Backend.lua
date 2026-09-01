@@ -33,6 +33,7 @@ local H = require("Komga/Helper")
 local Config = require("Komga/Config")
 local VolumePath = require("Komga/VolumePath")
 local ApiClient = require("Komga/ApiClient")
+local Async = require("Komga/Async")
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -299,10 +300,6 @@ end
 
 function M:initialize()
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
-    -- 阅读中"后几页"预下载(EPUB 内部章节)的独立 pid 文件, 与整卷预下载互不阻塞
-    self.pages_pid_file = H.getTempDirectory() .. '/pages.pid.lua'
-    -- 流式漫画页预取的 pid 文件
-    self.stream_pages_pid_file = H.getTempDirectory() .. '/stream_pages.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
 
     -- 旧版本设置迁移(集中管理, 见 ONE_TIME_MIGRATIONS)
@@ -1132,6 +1129,28 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy, callbac
     -- 已有缓存
     if ext ~= "" and resources_filepath and util.fileExists(resources_filepath) then
         return resources_relpath
+    end
+
+    -- 流式落盘快速路径: 扩展名已知且无需内容加工(非 css 级联)的资源直接下载到文件,
+    -- 不整载内存(大图内存峰值显著降低), 中断可 Range 续传; 失败回退下方内存路径
+    if ext ~= "" and resources_filepath and not callback then
+        local ok_dl = pcall(function()
+            if not M.httpReq then
+                M.httpReq = require("Komga.HttpRequest")
+            end
+            H.checkAndCreateFolder(resources_catalogue)
+            local ok, res = M.httpReq.pStreamToFile({
+                url = processed_src,
+                dest = resources_filepath,
+                timeout = 15,
+                maxtime = 60
+            })
+            return ok == true
+        end)
+        if ok_dl then
+            return resources_relpath
+        end
+        logger.dbg("processLink stream fallback to memory:", processed_src)
     end
 
     local status, err = pGetUrlContent({
@@ -2112,12 +2131,13 @@ end
 
 -- 翻页预下载(EPUB 后几页/内部章节)是否进行中
 function M:isPagesPreloading()
-    return self.pages_pid_file ~= nil and util.fileExists(self.pages_pid_file)
+    return self._pages_preload_busy == true
 end
 
 -- 阅读中后台预下载当前 EPUB 卷的后几页(内部章节), 翻到时即开。
 -- 与 preLoadVolumes 不同: 内部章节缓存不写 volume 表下载状态,
 -- 全程静默——失败只记日志, 不弹窗、不打断阅读。
+-- 经 Komga/Async 子进程执行(超时/回收由 Async 托管; fork 不可用时同步降级)。
 function M:preLoadEpubChapters(volume, count)
     if not (H.is_tbl(volume) and H.is_str(volume.book_cache_id) and H.is_str(volume.bookId) and
         H.is_num(volume.number)) then
@@ -2165,14 +2185,9 @@ function M:preLoadEpubChapters(volume, count)
 
     self:closeDbManager()
 
-    local task_pid = self:launchProcess(function()
-        pcall(function()
-            util.writeToFile('', self.pages_pid_file, true)
-        end)
+    self._pages_preload_busy = true
+    Async.run(function()
         for i = 1, #tasks do
-            if not util.fileExists(self.pages_pid_file) then
-                break -- 收到停止信号
-            end
             local status, err = pcall(function()
                 return self:pDownloadVolume(tasks[i])
             end)
@@ -2180,26 +2195,18 @@ function M:preLoadEpubChapters(volume, count)
                 logger.err('preload epub chapter failed:', tostring(err))
             end
         end
-        pcall(function()
-            util.removeFile(self.pages_pid_file)
-        end)
         self:closeDbManager()
-        pcall(function()
-            Device:enableCPUCores(1)
-            UIManager:allowStandby()
-        end)
         return true
-    end)
-
-    if not task_pid then
+    end, function(ok, result, err)
+        self._pages_preload_busy = nil
+        if not ok then
+            logger.err('preload epub chapters async err:', tostring(err))
+        end
         pcall(function()
             Device:enableCPUCores(1)
             UIManager:allowStandby()
         end)
-        return false
-    end
-
-    self:startTaskWatchdog(task_pid, self.pages_pid_file, PAGES_WATCHDOG_TIMEOUT)
+    end, {timeout = PAGES_WATCHDOG_TIMEOUT})
     return true
 end
 
@@ -2279,10 +2286,10 @@ end
 
 -- 流式页预取是否进行中
 function M:isStreamPagesPreloading()
-    return self.stream_pages_pid_file ~= nil and util.fileExists(self.stream_pages_pid_file)
+    return self._stream_preload_busy == true
 end
 
--- 后台预取流式漫画页(子进程顺序下载落盘)。
+-- 后台预取流式漫画页(Async 子进程 + 流式落盘 + Range 断点续传)。
 -- 已有预取任务运行时跳过(翻得快时退回同步下载, 与现状一致); 全程静默失败。
 function M:preLoadStreamPages(bookCacheId, img_srcs)
     if not (H.is_str(bookCacheId) and H.is_tbl(img_srcs) and #img_srcs > 0) then
@@ -2303,44 +2310,42 @@ function M:preLoadStreamPages(bookCacheId, img_srcs)
     end
 
     local cache_id = bookCacheId
-    local task_pid = self:launchProcess(function()
-        pcall(function()
-            util.writeToFile('', self.stream_pages_pid_file, true)
-        end)
+    local dir = self:getStreamPageCacheDir(cache_id)
+    H.checkAndCreateFolder(dir)
+
+    self._stream_preload_busy = true
+    Async.run(function()
+        if not self.httpReq then
+            self.httpReq = require("Komga.HttpRequest")
+        end
+        local pStreamToFile = self.httpReq.pStreamToFile
         for i = 1, #tasks do
-            if not util.fileExists(self.stream_pages_pid_file) then
-                break -- 收到停止信号
-            end
-            local ok, res = pcall(function()
-                return self:pDownload_Image(tasks[i], 30)
-            end)
-            if ok and H.is_tbl(res) and res.type == 'SUCCESS' and H.is_tbl(res.body)
-                and H.is_str(res.body.data) and #res.body.data > 0 then
-                pcall(function()
-                    local dir = self:getStreamPageCacheDir(cache_id)
-                    H.checkAndCreateFolder(dir)
-                    -- 原子写 + 按 md5(url) 命名
-                    local base = H.joinPath(dir,
-                        md5(tasks[i]) .. '.' .. (H.is_str(res.body.ext) and res.body.ext or "jpg"))
-                    local tmp = base .. '.part'
-                    if util.writeToFile(res.body.data, tmp, true) then
-                        os.rename(tmp, base)
-                    end
-                end)
+            local src = tasks[i]
+            local base_no_ext = H.joinPath(dir, md5(src))
+            -- 先流式落位到 .dl(扩展名下载后由 Content-Type 得知), 再改名为最终文件;
+            -- 中断留下的 .part/.dl 下次按 Range 续传
+            local ok, res = pcall(pStreamToFile, {
+                url = src,
+                dest = base_no_ext .. ".dl",
+                timeout = 30,
+                maxtime = 90
+            })
+            if ok and H.is_tbl(res) then
+                local ext = (H.is_str(res.ext) and res.ext ~= "") and res.ext or "jpg"
+                local final = base_no_ext .. "." .. ext
+                os.remove(final)
+                os.rename(base_no_ext .. ".dl", final)
             else
-                logger.err('preload stream page failed:', tostring(tasks[i]))
+                logger.err('preload stream page failed:', tostring(src), tostring(res))
             end
         end
-        pcall(function()
-            util.removeFile(self.stream_pages_pid_file)
-        end)
         return true
-    end)
-
-    if not task_pid then
-        return false
-    end
-    self:startTaskWatchdog(task_pid, self.stream_pages_pid_file, PAGES_WATCHDOG_TIMEOUT)
+    end, function(ok, result, err)
+        self._stream_preload_busy = nil
+        if not ok then
+            logger.err('preload stream pages async err:', tostring(err))
+        end
+    end, {timeout = PAGES_WATCHDOG_TIMEOUT})
     return true
 end
 
