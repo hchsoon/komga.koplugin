@@ -123,8 +123,6 @@ function M:fetchAndShow(options)
     self.bookinfo = options.bookinfo
     self.chapter = options.chapter
     self.on_return_callback = options.on_return_callback
-    -- 方向隔离: 记录进入阅读器时的屏幕方向, 关闭时恢复, 阅读中的旋转不影响主界面
-    self._entry_rotation_mode = Screen:getRotationMode()
 
     local viewer = M:new{
         image = {self:loadChatperInitImage(self.chapter)},
@@ -138,14 +136,6 @@ function M:fetchAndShow(options)
 end
 
 function M:onClose()
-    -- 方向隔离: 关闭前恢复进入时的屏幕方向(背后的主界面按原方向重排后再关闭),
-    -- 阅读器内的双页/旋转操作不会把主界面留在横屏
-    if H.is_num(self._entry_rotation_mode)
-        and Screen:getRotationMode() ~= self._entry_rotation_mode then
-        self:setScreenRotation(self._entry_rotation_mode)
-    end
-    self._entry_rotation_mode = nil
-
     ImageViewer.onClose(self)
     self.chapter.current_page = self.chapter_imglist_cur
     -- 关卷清理流式页预取缓存(整目录删除, 不占长期磁盘)
@@ -383,84 +373,6 @@ function M:turnDualPage(direction)
     return self:getTurnPageNextImage(direction > 0 and 'next' or 'prev', next_base)
 end
 
--- 程序化旋转后的同步重绘。
--- update() 不足以清掉布局链上的尺寸缓存(main_frame.dimen/region/手势范围都是
--- init 时构建、要到下一次 paint 才更新, 而 paint 又拿旧 dimen 定位)——日志实测
--- 旋转后首帧仍按旧方向布局(如横屏下 main_frame 还是竖屏尺寸), 表现为图像贴底/
--- 出界。这里把当前画面包装回构造入参形态后整体重跑 M:init, 按当前屏幕重建
--- 全部部件(含手势注册), 再全刷强制立即绘制。
-function M:repaintAfterRotation()
-    local ok_rebuild, rebuild_err = pcall(function()
-        if self.image == nil or (self.image.getWidth == nil and type(self.image) ~= "string" and type(self.image) ~= "function") then
-            -- 此前渲染失败可能留下空画面: 重建前先恢复占位图,
-            -- 否则 ImageWidget 对 nil 调 getWidth 直接崩溃
-            self.image = self:get_image_bb(nil)
-            self._image_is_bb = nil
-        end
-        if self.image and self.image.getWidth then
-            self.image = {self.image} -- 模拟构造入参(图片列表), 让 init 走列表分支
-        end
-        local saved_cur = self._images_list_cur
-        self:init()
-        -- init 会把列表游标重置为 1, 恢复当前页(进度条/后续翻页依据)
-        if H.is_num(saved_cur) then
-            self._images_list_cur = saved_cur
-        end
-    end)
-    if not ok_rebuild then
-        -- 重建失败不静默: 记录错误(paintTo 的手工居中仍可兜底显示)
-        logger.err("[komga-layout] rebuild after rotation failed:", tostring(rebuild_err))
-    end
-    UIManager:setDirty("all", "full")
-    pcall(function()
-        UIManager:forceRePaint()
-    end)
-end
-
--- 旋转屏幕并同步重绘。
--- 注意: 不能广播 KOReader 的 SetRotationMode 事件——FileManager 的处理函数是
--- rotate = reinit(filemanager.lua), 会关闭重建自身, 把叠在上面的本阅读器一并
--- 关掉(且不走本类 onClose, 方向恢复也不会执行), 表现为"切双页立即退回主界面"。
--- 直设坐标即可: 本阅读器全屏白底盖住背景, 背景旧布局不可见; 关闭时恢复进入
--- 方向后, 背后窗口的布局缓存本就对应原方向, 重绘自然对齐。
-function M:setScreenRotation(mode)
-    if not H.is_num(mode) or Screen:getRotationMode() == mode then
-        return false
-    end
-    local ok = pcall(function()
-        Screen:setRotationMode(mode)
-    end)
-    self:repaintAfterRotation()
-    return ok
-end
-
--- 双页与横屏绑定: 开双页自动转横屏(记住原方向); 关双页时若方向仍是我们
--- 设置的(用户未再手动旋转)则恢复。竖排本/横屏设备已横屏时不动作。
-function M:autoRotateForDualMode(enabled)
-    local rotated = false
-    pcall(function()
-        if enabled then
-            if Screen:getWidth() > Screen:getHeight() then
-                return -- 已是横屏
-            end
-            self._dual_prev_rotation = Screen:getRotationMode()
-            self._dual_rotation_set = Screen.DEVICE_ROTATED_CLOCKWISE
-            self:setScreenRotation(self._dual_rotation_set)
-            rotated = true
-        else
-            local prev = self._dual_prev_rotation
-            local ours = self._dual_rotation_set
-            self._dual_prev_rotation = nil
-            self._dual_rotation_set = nil
-            -- 仅当当前方向仍是我们设置的那个才恢复, 避免覆盖用户随后的手动旋转
-            if prev ~= nil and ours ~= nil and Screen:getRotationMode() == ours then
-                self:setScreenRotation(prev)
-                rotated = true
-            end
-        end
-    end)
-    return rotated
-end
 
 -- 阅读中手动切换 双页/单页: 点击屏幕中间 1/3 立即以当前页为基页重渲染。
 -- 切换成功才落盘设置(在"自动·横屏"基础上切换会显式固定 on/off, 恢复自动走设置菜单);
@@ -508,6 +420,8 @@ function M:redisplayCurrent(force_dual)
     return true
 end
 
+-- 阅读中切换 双页/单页(按钮栏快捷键): 不转屏——方向由用户自行控制,
+-- "自动·横屏"模式下双页仍会随当前方向自动启停。
 function M:toggleDualPageMode()
     local want_dual = not self:isDualPageEnabled()
 
@@ -516,17 +430,12 @@ function M:toggleDualPageMode()
     -- 先落盘(临时), 让 isDualPageEnabled/fetchDisplayImage 在重渲染时按目标模式取图
     settings.stream_dual_page = want_dual and "on" or "off"
 
-    -- 先转屏后渲染: 双页拼合应按最终屏幕方向布局(避免"竖屏渲染→横屏重排"
-    -- 的双重 update 留下过期尺寸, 造成图像偏移/贴底)
-    self:autoRotateForDualMode(want_dual)
-
     -- 按目标模式渲染; 成功才保留设置, 失败回滚并静默提示
     if not self:redisplayCurrent(want_dual) then
         settings.stream_dual_page = prev_mode
         pcall(function()
             Backend:saveSettings(settings)
         end)
-        self:autoRotateForDualMode(not want_dual)
         Backend:show_notice("切换失败，页面获取失败")
         return true
     end
