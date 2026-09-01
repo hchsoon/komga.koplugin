@@ -1,4 +1,5 @@
 local ffi = require("ffi")
+local bit = require("bit")
 require("ffi/lodepng_h")
 
 local lodepng = ffi.loadlib("lodepng")
@@ -6,26 +7,40 @@ local lodepng = ffi.loadlib("lodepng")
 local Png = {}
 
 function Png.toGrayscale(pixels, w, h, ncomp)
-
+    -- ncomp: 解码后每像素分量数(1=灰度, 2=灰度+alpha, 3=RGB, 4=RGBA)。
+    -- 此前对任意 ncomp 都做三分量加权: ncomp=1/2 时 index+1/+2 读到的是
+    -- 相邻像素/alpha, 结果错误; ncomp=1 直接整块 memcpy。
     local data = ffi.cast("uint8_t*", pixels)
     local width, height = w, h
-    local ncomp = ncomp or 8
+    ncomp = ncomp or 1
 
     local gray_data = ffi.new("uint8_t[?]", width * height)
+    local total = width * height
 
+    if ncomp == 1 then
+        ffi.copy(gray_data, data, total)
+        return gray_data
+    end
+
+    if ncomp == 2 then
+        -- (gray, alpha): 只取第 0 分量, 按步长 2 逐像素拷贝
+        for i = 0, total - 1 do
+            gray_data[i] = data[i * 2]
+        end
+        return gray_data
+    end
+
+    -- RGB/RGBA: 整数定点权值 (77,151,28)/256 ≈ (0.299,0.587,0.114),
+    -- 纯整数运算免去每像素浮点转换, 对 LuaJIT 更友好
     local width_ncomp = width * ncomp
-
     for y = 0, height - 1 do
-        local row_offset = y * width_ncomp
-        local gray_offset = y * width
-        for x = 0, width - 1 do
-            local index = row_offset + x * ncomp
-            local r = data[index]
-            local g = data[index + 1]
-            local b = data[index + 2]
-
-            local gray = 0.299 * r + 0.587 * g + 0.114 * b
-            gray_data[gray_offset + x] = gray
+        local index = y * width_ncomp
+        local out = y * width
+        for _ = 1, width do
+            gray_data[out] = bit.rshift(
+                data[index] * 77 + data[index + 1] * 151 + data[index + 2] * 28, 8)
+            index = index + ncomp
+            out = out + 1
         end
     end
     return gray_data
