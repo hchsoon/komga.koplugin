@@ -264,6 +264,25 @@ function M:renderPagesAt(indices)
     return self:composeDualPages(bbs)
 end
 
+-- 取指定页的显示内容: 双页模式取页对拼合 bb(失败退回单页数据), 单页模式取页数据。
+-- 返回 (image, is_bb); 全部失败返回 (nil, nil), 调用方须保留当前画面, 不能把
+-- nil 传给 update()(ImageWidget 会对 nil 调 getWidth 而崩溃)。
+function M:fetchDisplayImage(image_num)
+    local src = self.chapter_imglist[image_num]
+    if self:isDualPageEnabled() then
+        local pair_bb = self:renderPagesAt(self:dualIndicesFor(image_num))
+        if pair_bb then
+            return pair_bb, true
+        end
+        -- 页对失败: 退回单页(数据由尾部统一渲染), 避免整次翻页失败
+    end
+    local data = H.is_str(src) and self:downloadPageImage(src) or nil
+    if data then
+        return data, nil
+    end
+    return nil, nil
+end
+
 -- 双页模式翻页: 以页对为步进(direction = 1 下一对 / -1 上一对),
 -- 越出本卷时复用单页路径的换章逻辑。
 function M:turnDualPage(direction)
@@ -322,6 +341,12 @@ end
 -- 同款(setDirty all + forceRePaint), 外加先重建窗口部件并刷新缓存的几何。
 function M:repaintAfterRotation()
     pcall(function()
+        if self.image == nil or (self.image.getWidth == nil and type(self.image) ~= "string" and type(self.image) ~= "function") then
+            -- 此前渲染失败可能留下空画面: update 前先恢复占位图,
+            -- 否则 ImageWidget 对 nil 调 getWidth 直接崩溃
+            self.image = self:get_image_bb(nil)
+            self._image_is_bb = nil
+        end
         self:update()
         self:refreshGeometryForRotation()
     end)
@@ -558,9 +583,17 @@ function M:loadChatperInitImage(chapter)
         self.chapter_imglist_cur = start_id
 
         if self:isDualPageEnabled() then
-            -- 双页: 以续读页为基页渲染页对(已是 bb, 标记跳过尾部再渲染)
-            self.image = self:renderPagesAt(self:dualIndicesFor(start_id))
-            self._image_is_bb = true
+            -- 双页: 以续读页为基页渲染页对(已是 bb, 标记跳过尾部再渲染);
+            -- 页对失败退回单页, 再失败用占位图(update 前绝不能是 nil)
+            local pair_bb = self:renderPagesAt(self:dualIndicesFor(start_id))
+            if pair_bb then
+                self.image = pair_bb
+                self._image_is_bb = true
+            else
+                local img_data = self:downloadPageImage(img_src)
+                self.image = self:get_image_bb(img_data)
+                self._image_is_bb = nil
+            end
         else
             local img_data = self:downloadPageImage(img_src)
             -- 渲染图片数据
@@ -605,17 +638,17 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         local img_src = self.chapter_imglist[image_num]
 
         if H.is_str(img_src) then
-            -- 取当前页(双页模式下取整个页对并拼合)
-            if self:isDualPageEnabled() then
-                self.image = self:renderPagesAt(self:dualIndicesFor(image_num))
-                self._image_is_bb = true
-            else
-                self.image = self:downloadPageImage(img_src)
-                self._image_is_bb = nil
-            end
-            if self.image then
+            -- 取当前页(双页模式下取整个页对并拼合; 页对失败退回单页)
+            local display, is_bb = self:fetchDisplayImage(image_num)
+            if display then
+                self.image = display
+                self._image_is_bb = is_bb
                 self.chapter_imglist_cur = image_num
                 is_success = true
+            else
+                -- 获取失败: 保留当前画面并提示, 不落入下方换章分支
+                Backend:show_notice("页面加载失败，请重试")
+                return
             end
         else
             -- 处理章节末页翻页
@@ -638,18 +671,17 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             self.chapter_imglist = new_chapter_imglist
             -- 确定新章节的起始位置
             new_image_num = (call_event_type == 'next') and 1 or #self.chapter_imglist
-            local img_src = self.chapter_imglist[new_image_num]
 
-            if self:isDualPageEnabled() then
-                self.image = self:renderPagesAt(self:dualIndicesFor(new_image_num))
-                self._image_is_bb = true
-            else
-                self.image = self:downloadPageImage(img_src)
-                self._image_is_bb = nil
-            end
-            if self.image then
+            local display, is_bb = self:fetchDisplayImage(new_image_num)
+            if display then
+                self.image = display
+                self._image_is_bb = is_bb
                 self.chapter_imglist_cur = new_image_num
                 is_success = true
+            else
+                -- 获取失败: 不把 nil 交给尾部渲染(空画面崩溃), 提示后保留返回
+                Backend:show_notice("页面加载失败，请重试")
+                return
             end
         else
             logger.err("获取章节图片列表失败：", current_number)
@@ -672,7 +704,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         end
 
         self._images_list_cur = new_image_num
-        if self._image_is_bb then
+        if self._image_is_bb and self.image and self.image.getWidth then
             self._image_is_bb = nil -- 双页拼合已是 blitbuffer, 不再单独渲染
         else
             self.image = self:get_image_bb(self.image)
