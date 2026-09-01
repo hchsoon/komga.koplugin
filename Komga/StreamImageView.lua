@@ -276,13 +276,44 @@ function M:turnDualPage(direction)
     return self:getTurnPageNextImage(direction > 0 and 'next' or 'prev', next_base)
 end
 
+-- 旋转后刷新 ImageViewer 在 init 时缓存的几何: self[1].dimen 指向 init 构建的
+-- self.region(update() 只刷新 width/height 与 frame_elements, 不覆盖 region),
+-- 不刷新则新画面仍按旧方向矩形排布——只占屏幕一角且旧画面残留; 手势范围
+-- (ges_events 里的 GestureRange.range)同样按旧屏幕缓存, 部分区域会失灵。
+function M:refreshGeometryForRotation()
+    local Geom = require("ui/geometry")
+    self.region = Geom:new{
+        x = 0, y = 0,
+        w = Screen:getWidth(),
+        h = Screen:getHeight()
+    }
+    if self[1] then
+        self[1].dimen = self.region
+    end
+    -- 按钮容器宽度也按 init 时的屏幕缓存(按钮可见时用于居中)
+    if self.button_container and self.button_container.dimen then
+        self.button_container.dimen.w = self.width
+    end
+    if self.ges_events then
+        for _, def in pairs(self.ges_events) do
+            for _, gr in ipairs(def) do
+                if gr.range then
+                    gr.range.w = self.region.w
+                    gr.range.h = self.region.h
+                end
+            end
+        end
+    end
+end
+
 -- 程序化旋转后的同步重绘: Screen:setRotationMode 只换坐标系, 布局与 dimen 要到
 -- 下一次 paintTo 才更新; 若不强制立即重绘, 旋转后的首个输入事件会拿着旧方向的
 -- main_frame.dimen 做"框外点击=关闭"判定, 造成旋转即退出。与 UIManager:onRotation
--- 同款(setDirty all + forceRePaint), 外加先重建窗口部件。
+-- 同款(setDirty all + forceRePaint), 外加先重建窗口部件并刷新缓存的几何。
 function M:repaintAfterRotation()
     pcall(function()
         self:update()
+        self:refreshGeometryForRotation()
     end)
     UIManager:setDirty("all", "full")
     pcall(function()
