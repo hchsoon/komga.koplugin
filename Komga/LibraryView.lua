@@ -1692,30 +1692,23 @@ function LibraryView:loadAndRenderChapter(chapter)
         cache_chapter.volume_read = chapter.volume_read
         self:showReaderUI(cache_chapter)
     else
-        -- Backend:closeDbManager()
-        -- dismissable=true: 下载中可取消, 避免慢下载/挂起时卡住界面无法点击其他分卷
-        return MessageBox:loading("正在下载正文", function()
-            return Backend:downloadVolume(chapter)
-        end, function(state, response)
-            if state == false then
-                Backend:show_notice("已取消下载")
-                return
-            end
-            if state == true then
-                Backend:HandleResponse(response, function(data)
-                    if not H.is_tbl(data) or not H.is_str(data.cacheFilePath) then
-                        MessageBox:error('下载失败')
-                        return
-                    end
-                    data.volume_read = chapter.volume_read
-                    self:showReaderUI(data)
-                end, function(err_msg)
-                    Backend:show_notice("请检查并刷新书架")
-                    MessageBox:error(err_msg or '错误')
-                end)
-            end
-
-        end, {dismissable = true})
+        -- 静默下载: 章节切换不再弹"正在下载正文"对话框(预取命中时本就无需等待;
+        -- 未命中时同步下载, 失败仅轻提示, 不打断阅读/关书流程)
+        local okdl, dlresp = pcall(Backend.downloadVolume, Backend, chapter)
+        if okdl then
+            return Backend:HandleResponse(dlresp, function(data)
+                if not (H.is_tbl(data) and H.is_str(data.cacheFilePath)) then
+                    Backend:show_notice("章节下载失败")
+                    return
+                end
+                data.volume_read = chapter.volume_read
+                self:showReaderUI(data)
+            end, function(err_msg)
+                Backend:show_notice("章节下载失败" .. (H.is_str(err_msg) and (": " .. err_msg) or ""))
+            end)
+        else
+            Backend:show_notice("章节下载失败: " .. H.errorHandler(dlresp))
+        end
     end
 end
 

@@ -127,6 +127,13 @@ function M:init()
                         self:toggleRTLMode()
                     end,
                 },
+                {
+                    id = "cover",
+                    text = _("封面首页"),
+                    callback = function()
+                        self:toggleFirstCoverMode()
+                    end,
+                },
             },
         }
         self.button_table = ButtonTable:new{
@@ -514,6 +521,24 @@ function M:toggleRTLMode()
         end)
     end
     Backend:show_notice(self:isRTL() and "RTL：开" or "RTL：关")
+    return true
+end
+
+-- 封面首页开关(按钮栏快捷键): 开=封面独占一屏, 之后 (2,3)(4,5) 配对(漫画书标准拼页);
+-- 关=(1,2)(3,4)。双页模式下立即按新规则重排当前页对。与设置菜单项同源。
+function M:toggleFirstCoverMode()
+    local settings = Backend:getSettings()
+    local cur = settings.stream_dual_first_cover ~= false -- nil/true 视为开
+    settings.stream_dual_first_cover = not cur
+    pcall(function()
+        Backend:saveSettings(settings)
+    end)
+    if self:isDualPageEnabled() then
+        pcall(function()
+            self:redisplayCurrent()
+        end)
+    end
+    Backend:show_notice((not cur) and "封面首页：开" or "封面首页：关")
     return true
 end
 function M:get_image_bb(imgData)

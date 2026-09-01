@@ -537,18 +537,12 @@ M.install = function()
                     if Backend.show_notice then Backend:show_notice("章节下载失败" .. tostring(err_msg or "")) end
                 end)
             end
-            if okMsg and MessageBox then
-                MessageBox:loading("正在下载章节", function()
-                    return Backend:downloadVolume(chapter)
-                end, download_cb, {dismissable = true})
+            -- 静默下载: 不弹"正在下载章节"对话框(与章节切换路径一致, 失败仅轻提示)
+            local okdl, dlresp = pcall(Backend.downloadVolume, Backend, chapter)
+            if okdl then
+                download_cb(true, dlresp)
             else
-                -- MessageBox 不可用时的兜底: 直接下载(结果仍走 download_cb)
-                local okdl, dlresp = pcall(Backend.downloadVolume, Backend, chapter)
-                if okdl then
-                    download_cb(true, dlresp)
-                else
-                    download_cb(false, "下载失败: " .. tostring(dlresp))
-                end
+                download_cb(false, "下载失败: " .. tostring(dlresp))
             end
             return true
         end)
