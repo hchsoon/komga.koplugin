@@ -61,6 +61,8 @@ function M:init()
         -- 检测器只发 two_finger_swipe + direction 字段, 方向过滤用 GestureRange.direction
         self.ges_events.TwoFingerSwipeLeft = {GestureRange:new{ges = "two_finger_swipe", direction = "left", range = range}}
         self.ges_events.TwoFingerSwipeRight = {GestureRange:new{ges = "two_finger_swipe", direction = "right", range = range}}
+        -- 双击: 切换 RTL。检测器对单点 tap 本就全局启用双击缓冲(注册不增加点击延迟)
+        self.ges_events.DoubleTap = {GestureRange:new{ges = "double_tap", range = range}}
     end
 end
 
@@ -531,6 +533,33 @@ end
 
 function M:onTwoFingerSwipeLeft()
     return self:rotateScreenToggle()
+end
+
+-- 双击: 切换 RTL(右开本)。写入设置项 stream_rtl 显式强制开/关(恢复"按书自动"
+-- 走设置菜单); 双页模式立即镜像重排当前页对, 单页模式无视觉变化仅提示。
+-- 框外双击保持原生关闭行为。
+function M:onDoubleTap(_, ges)
+    if ges and ges.pos and self.main_frame and self.main_frame.dimen then
+        local d = self.main_frame.dimen
+        local layout_current = math.abs(d.w - Screen:getWidth()) <= 2
+            and math.abs(d.h - Screen:getHeight()) <= 2
+        if layout_current and ges.pos:notIntersectWith(d) then
+            self:onClose()
+            return true
+        end
+    end
+    local settings = Backend:getSettings()
+    settings.stream_rtl = not self:isRTL()
+    pcall(function()
+        Backend:saveSettings(settings)
+    end)
+    if self:isDualPageEnabled() then
+        pcall(function()
+            self:redisplayCurrent()
+        end)
+    end
+    Backend:show_notice(self:isRTL() and "RTL：开" or "RTL：关")
+    return true
 end
 
 function M:onTwoFingerSwipeRight()
