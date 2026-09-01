@@ -316,6 +316,9 @@ local function pStreamToFile(options)
     return false, res
 end
 
--- 保持"require 即函数"的既有用法, pStreamToFile 挂为字段导出
-pGetUrlContent.pStreamToFile = pStreamToFile
-return pGetUrlContent
+-- 表导出: pGetUrlContent(整载内存) / pStreamToFile(流式落盘+断点续传)
+-- (注意不能给函数值挂字段——Lua 函数不可索引, 此前因此炸过模块加载)
+return {
+    pGetUrlContent = pGetUrlContent,
+    pStreamToFile = pStreamToFile,
+}

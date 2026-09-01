@@ -58,8 +58,8 @@ function ApiClient:request(method, path, query, payload, opts)
     opts = opts or {}
     local transport = opts.transport or self.transport
     if type(transport) ~= "function" then
-        local pGetUrlContent = require("Komga/HttpRequest")
-        transport = pGetUrlContent
+        local Http = require("Komga/HttpRequest")
+        transport = Http.pGetUrlContent
         self.transport = transport
     end
 

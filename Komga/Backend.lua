@@ -141,10 +141,10 @@ local function convertToGrayscale(image_data)
 end
 
 local function pGetUrlContent(options)
-    if not M.httpReq then 
+    if not M.httpReq then
         M.httpReq = require("Komga.HttpRequest")
     end
-    return M.httpReq(options, true)
+    return M.httpReq.pGetUrlContent(options, true)
 end
 
 local function pDownload_CreateCBZ(filePath, img_sources)
