@@ -45,13 +45,25 @@ function M:paintTo(bb, x, y)
                 math.floor((w - content_size.w) / 2),
                 math.floor((h - content_size.h) / 2))
         end
-        -- 顶部进度条: 当前页在本卷中的位置(双页模式按页对基页)
+        -- 底部进度条: 与底部按钮栏同显同隐(中间点击呼出), 不常驻挡图;
+        -- 贴在按钮栏上方, 位置按当前屏幕尺寸计算(旋转后自动跟随)
         local total = self.chapter_imglist and #self.chapter_imglist or 0
-        if total > 1 then
+        if total > 1 and self.buttons_visible then
             local cur = self.chapter_imglist_cur or 1
             local pct = (cur - 1) / (total - 1)
             local bar_h = math.max(4, math.floor(h / 240))
-            local y0 = math.max(2, math.floor(h / 320))
+            local btn_h = 0
+            local ok_btn, btn_size = pcall(function()
+                return self.button_table and self.button_table:getSize()
+            end)
+            if ok_btn and H.is_tbl(btn_size) and H.is_num(btn_size.h) then
+                btn_h = btn_size.h
+            end
+            local gap = math.max(4, math.floor(h / 200))
+            local y0 = h - btn_h - bar_h - gap
+            if y0 < 0 then
+                y0 = h - bar_h - 2
+            end
             bb:paintRect(0, y0, w, bar_h, Blitbuffer.COLOR_GRAY)
             local fw = math.floor(w * pct + 0.5)
             if fw > 0 then
