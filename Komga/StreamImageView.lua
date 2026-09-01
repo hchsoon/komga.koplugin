@@ -6,6 +6,10 @@ local logger = require("logger")
 local dbg = require("dbg")
 local Device = require("device")
 local Blitbuffer = require("ffi/blitbuffer")
+local ButtonTable = require("ui/widget/buttontable")
+local CenterContainer = require("ui/widget/container/centercontainer")
+local Geom = require("ui/geometry")
+local _ = require("gettext")
 
 local MessageBox = require("Komga/MessageBox")
 local Backend = require("Komga/Backend")
@@ -48,21 +52,70 @@ end
 
 function M:init()
     ImageViewer.init(self)
-    -- 双指左右滑: 单独旋转屏幕(ImageViewer 未占用该手势;
-    -- 双击不可用——首击会先触发 Tap 的翻页/双页切换)
-    if Device:isTouchDevice() and self.ges_events then
-        local Geom = require("ui/geometry")
-        local GestureRange = require("ui/gesturerange")
-        local range = Geom:new{
-            x = 0, y = 0,
-            w = Screen:getWidth(),
-            h = Screen:getHeight()
+    -- 在原生按钮栏(缩放/旋转/关闭)基础上追加 双页/RTL 快捷按钮。
+    -- 原生按钮表在 ImageViewer.init 内部是局部量无法追加, 这里按同参数重建
+    -- ButtonTable(保留 scale/rotate/close 的 id, update() 会按 id 刷新其文案)。
+    -- 不改任何手势: 点击/滑动/双指均为 KOReader 原生行为(中间点击呼出本按钮栏)。
+    if self.button_table and self.button_container then
+        local buttons = {
+            {
+                {
+                    id = "scale",
+                    text = self._scale_to_fit and _("Original size") or _("Scale"),
+                    callback = function()
+                        self.scale_factor = self._scale_to_fit and 1 or 0
+                        self._scale_to_fit = not self._scale_to_fit
+                        self._center_x_ratio = 0.5
+                        self._center_y_ratio = 0.5
+                        self:update()
+                    end,
+                },
+                {
+                    id = "rotate",
+                    text = self.rotated and _("No rotation") or _("Rotate"),
+                    callback = function()
+                        self.rotated = not self.rotated and true or false
+                        self:update()
+                    end,
+                },
+                {
+                    id = "close",
+                    text = _("Close"),
+                    callback = function()
+                        self:onClose()
+                    end,
+                },
+            },
+            {
+                {
+                    id = "dual",
+                    text = _("双页"),
+                    callback = function()
+                        self:toggleDualPageMode()
+                    end,
+                },
+                {
+                    id = "rtl",
+                    text = _("RTL"),
+                    callback = function()
+                        self:toggleRTLMode()
+                    end,
+                },
+            },
         }
-        -- 检测器只发 two_finger_swipe + direction 字段, 方向过滤用 GestureRange.direction
-        self.ges_events.TwoFingerSwipeLeft = {GestureRange:new{ges = "two_finger_swipe", direction = "left", range = range}}
-        self.ges_events.TwoFingerSwipeRight = {GestureRange:new{ges = "two_finger_swipe", direction = "right", range = range}}
-        -- 双击: 切换 RTL。检测器对单点 tap 本就全局启用双击缓冲(注册不增加点击延迟)
-        self.ges_events.DoubleTap = {GestureRange:new{ges = "double_tap", range = range}}
+        self.button_table = ButtonTable:new{
+            width = self.width - 2 * self.button_padding,
+            buttons = buttons,
+            zero_sep = true,
+            show_parent = self,
+        }
+        self.button_container = CenterContainer:new{
+            dimen = Geom:new{
+                w = self.width,
+                h = self.button_table:getSize().h,
+            },
+            self.button_table,
+        }
     end
 end
 
@@ -510,44 +563,9 @@ function M:dumpLayoutState(tag)
     end)
 end
 
--- 单独旋转屏幕(不影响双页设置): 竖屏系 <-> 横屏系, 记住各自的变体。
--- auto 模式下双页随方向自动联动, 旋转后重渲染当前页以匹配。
-function M:rotateScreenToggle()
-    local rotated = false
-    pcall(function()
-        local cur_mode = Screen:getRotationMode()
-        if Screen:getWidth() > Screen:getHeight() then
-            -- 横屏 -> 竖屏(记住横屏变体)
-            self._rotate_landscape_mode = cur_mode
-            rotated = self:setScreenRotation(self._rotate_portrait_mode or Screen.DEVICE_ROTATED_UPRIGHT)
-        else
-            self._rotate_portrait_mode = cur_mode
-            rotated = self:setScreenRotation(self._rotate_landscape_mode or Screen.DEVICE_ROTATED_CLOCKWISE)
-        end
-    end)
-    if rotated and (Backend:getSettings().stream_dual_page or "auto") == "auto" then
-        self:redisplayCurrent()
-    end
-    return true
-end
-
-function M:onTwoFingerSwipeLeft()
-    return self:rotateScreenToggle()
-end
-
--- 双击: 切换 RTL(右开本)。写入设置项 stream_rtl 显式强制开/关(恢复"按书自动"
--- 走设置菜单); 双页模式立即镜像重排当前页对, 单页模式无视觉变化仅提示。
--- 框外双击保持原生关闭行为。
-function M:onDoubleTap(_, ges)
-    if ges and ges.pos and self.main_frame and self.main_frame.dimen then
-        local d = self.main_frame.dimen
-        local layout_current = math.abs(d.w - Screen:getWidth()) <= 2
-            and math.abs(d.h - Screen:getHeight()) <= 2
-        if layout_current and ges.pos:notIntersectWith(d) then
-            self:onClose()
-            return true
-        end
-    end
+-- RTL 切换(按钮栏快捷键): 写入设置项 stream_rtl 显式强制开/关
+-- (恢复"按书自动"走设置菜单); 双页模式立即镜像重排当前页对。
+function M:toggleRTLMode()
     local settings = Backend:getSettings()
     settings.stream_rtl = not self:isRTL()
     pcall(function()
@@ -561,48 +579,6 @@ function M:onDoubleTap(_, ges)
     Backend:show_notice(self:isRTL() and "RTL：开" or "RTL：关")
     return true
 end
-
-function M:onTwoFingerSwipeRight()
-    return self:rotateScreenToggle()
-end
-
--- 上滑=旋转 / 下滑=关闭(中间 6/8 区域; 两侧 1/8 保留原竖滑缩放, 兼容无多点触控设备;
--- 缩放后的竖向平移请用慢速拖动 Pan, 快速竖向轻扫已被旋转/关闭占用)
-function M:onSwipe(_, ges)
-    if ges and ges.pos and (ges.direction == "north" or ges.direction == "south") then
-        local w = Screen:getWidth()
-        local on_edge = ges.pos.x < w / 8 or ges.pos.x > w * 7 / 8
-        if not on_edge then
-            if ges.direction == "north" then
-                return self:rotateScreenToggle()
-            end
-            self:onClose()
-            return true
-        end
-    end
-    return ImageViewer.onSwipe(self, _, ges)
-end
-
--- 中间 1/3 点击 -> 双页/单页切换(替代原生"按钮栏显隐"; 关闭仍可用下滑/多次滑动/返回键)。
--- "框外点击=关闭"仅在布局与当前屏幕一致时生效: 旋转后 dimen 未刷新的短暂窗口内
--- 拿旧方向矩形判定会把正常点击误判为框外, 造成旋转后一点就退出
-function M:onTap(_, ges)
-    if ges and ges.pos and self.main_frame and self.main_frame.dimen then
-        local d = self.main_frame.dimen
-        local layout_current = math.abs(d.w - Screen:getWidth()) <= 2
-            and math.abs(d.h - Screen:getHeight()) <= 2
-        if layout_current and ges.pos:notIntersectWith(d) then
-            self:onClose()
-            return true
-        end
-        local w = Screen:getWidth()
-        if ges.pos.x > w / 3 and ges.pos.x < w * 2 / 3 then
-            return self:toggleDualPageMode()
-        end
-    end
-    return ImageViewer.onTap(self, _, ges)
-end
-
 function M:get_image_bb(imgData)
     imgData = imgData or self.image
 
