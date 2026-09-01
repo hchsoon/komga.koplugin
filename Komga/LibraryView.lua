@@ -744,8 +744,75 @@ function LibraryView:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
         MessageBox:notice("创建分卷目录失败")
         return
     end
-    self.book_browser:syncSeriesVolumes(book_cache_id, bookinfo, volume_folder)
+    -- 点击系列后目录秒开(异步优化):
+    -- 1) 先把全部快捷方式落盘(轻量写, 不做元数据加工), 目录内容立即可见
+    local volumes = KomgaModel:new(book_cache_id):getVolumes()
+    if H.is_tbl(volumes) then
+        for _, volume in ipairs(volumes) do
+            if H.is_num(volume.number) then
+                pcall(function()
+                    self.book_browser:writeVolLnk(volume, volume_folder, book_cache_id)
+                end)
+            end
+        end
+    end
+    -- 2) 立即打开目录(此前要等全部卷的元数据同步完才打开, 大系列卡顿数秒到数十秒)
     self:openKomgaFolder(volume_folder)
+    -- 3) 元数据/封面在后台分块补齐(块间让出 UI, 不 fork——本工作纯磁盘/DB,
+    --    且本项目已验证 fork+网络/嵌套在部分平台不可靠)
+    self:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volume_folder)
+end
+
+-- 后台分块执行每卷 refreshVolumeMetadata/封面下载(每块 chunk_size 卷, 块间让出主循环)。
+-- 完成后一次性 onRefresh 上屏最终元数据(中间不逐卷重绘, 避免 e-ink 闪烁)。
+-- 同一系列去重: 上一次分块未跑完时跳过重复触发。
+function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volume_folder, chunk_size)
+    if not (H.is_str(book_cache_id) and H.is_tbl(bookinfo) and H.is_str(volume_folder)) then
+        return
+    end
+    self._bg_volume_sync = self._bg_volume_sync or {}
+    if self._bg_volume_sync[book_cache_id] then
+        return
+    end
+    local volumes = KomgaModel:new(book_cache_id):getVolumes()
+    if not (H.is_tbl(volumes) and #volumes > 0) then
+        return
+    end
+    chunk_size = H.is_num(chunk_size) and chunk_size or 4
+    self._bg_volume_sync[book_cache_id] = true
+    local total = #volumes
+    local idx = 1
+    local function step()
+        local last = math.min(idx + chunk_size - 1, total)
+        while idx <= last do
+            local volume = volumes[idx]
+            idx = idx + 1
+            if H.is_num(volume.number) then
+                pcall(function()
+                    local lnk_path, lnk_name = self.book_browser:writeVolLnk(volume, volume_folder, book_cache_id)
+                    if lnk_path and util.fileExists(lnk_path) then
+                        self.book_browser:refreshVolumeMetadata(lnk_name, lnk_path, book_cache_id,
+                            volume.number, bookinfo)
+                        if not DocSettings:findCustomCoverFile(lnk_path) then
+                            self.book_browser:asyncDownloadVolumeCover(book_cache_id, volume, lnk_path)
+                        end
+                    end
+                end)
+            end
+        end
+        if idx <= total then
+            UIManager:scheduleIn(0.03, step)
+        else
+            self._bg_volume_sync[book_cache_id] = nil
+            local fm = FileManager.instance
+            if fm and fm.onRefresh then
+                pcall(function()
+                    fm:onRefresh()
+                end)
+            end
+        end
+    end
+    UIManager:scheduleIn(0.03, step)
 end
 
 -- 章节内进度分数(0..1): 优先 KOReader 写入的 percent_finished, 否则 last_page/doc_pages
