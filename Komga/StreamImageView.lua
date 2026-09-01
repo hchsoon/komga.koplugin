@@ -5,6 +5,7 @@ local ImageViewer = require("ui/widget/imageviewer")
 local logger = require("logger")
 local dbg = require("dbg")
 local Device = require("device")
+local Blitbuffer = require("ffi/blitbuffer")
 
 local MessageBox = require("Komga/MessageBox")
 local Backend = require("Komga/Backend")
@@ -22,6 +23,16 @@ local M = ImageViewer:extend{
     stream_rtl_auto = nil, -- 自动 RTL: 由书籍 metadata.readingDirection 判定
     _image_is_bb = nil -- 本次取到的 self.image 已是 blitbuffer(双页拼合), 跳过再渲染
 }
+
+-- ImageViewer 无自身 paintTo, 白色背景由 FrameContainer 只画在内容区(main_frame)
+-- 矩形内——图像不满屏时(横屏双页上下留白)其余区域从不绘制, 全刷会透出下层
+-- 窗口的旧画面(旋转后尤为明显)。这里先整屏铺白再交给原生绘制。
+function M:paintTo(bb, x, y)
+    pcall(function()
+        bb:paintRect(0, 0, Screen:getWidth(), Screen:getHeight(), Blitbuffer.COLOR_WHITE)
+    end)
+    ImageViewer.paintTo(self, bb, x, y)
+end
 
 function M:init()
     ImageViewer.init(self)
