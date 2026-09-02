@@ -224,6 +224,75 @@ function LibraryView:openInstalledReadSource()
 end
 
 -- 配置 X-API-Key(请求头), 默认值取自 Config.DEFAULT_API_KEY
+-- 缓存管理: 显示可清理缓存占用/上限, 设置上限(MB), 立即执行 LRU 清理。
+-- 范围为可再生资源(resources/ 与流式页缓存); 章节缓存与封面不自动清理。
+function LibraryView:openCacheManager()
+    self:getInstance()
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local settings = Backend:getSettings()
+    local usage = Backend:getCacheUsage()
+    local used_mb = math.floor((usage.used_bytes or 0) / 1024 / 1024)
+    local max_mb = math.floor((usage.max_bytes or 0) / 1024 / 1024)
+    local dialog
+    local buttons = {}
+
+    table.insert(buttons, {{
+        text = string.format("可清理缓存占用: %d MB / 上限 %d MB", used_mb, max_mb),
+        callback = function() end,
+    }})
+    table.insert(buttons, {{
+        text = Icons.FA_FOLDER .. " 设置上限 (MB)",
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:input(nil, nil, {
+                title = "设置缓存上限 (MB)",
+                input = tostring(max_mb),
+                description = "超过上限时按最久未访问优先清理可再生资源(图片/流式页缓存)。章节缓存与封面不受影响。",
+                condensed = true,
+                save_callback = function(input_text)
+                    local n = tonumber(input_text)
+                    if not n or n < 50 or n > 10240 then
+                        MessageBox:notice('请输入 50-10240 的数字')
+                        return false
+                    end
+                    settings.cache_max_mb = math.floor(n)
+                    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                        MessageBox:notice("缓存上限已更新")
+                        return true
+                    end, function(err_msg)
+                        MessageBox:notice('设置失败：' .. tostring(err_msg))
+                        return false
+                    end)
+                end,
+                allow_newline = false
+            })
+        end,
+    }})
+    table.insert(buttons, {{
+        text = Icons.UNICODE_STAR_OUTLINE .. " 立即清理",
+        callback = function()
+            UIManager:close(dialog)
+            local on_done = function(ok, res)
+                if ok and H.is_tbl(res) then
+                    MessageBox:notice(string.format("清理完成: 删除 %d 个文件, 释放 %.1f MB",
+                        res.removed or 0, (res.freed or 0) / 1024 / 1024))
+                end
+            end
+            return Backend:HandleResponse(Backend:runCacheJanitor(on_done), function(data)
+                MessageBox:notice("清理已在后台执行, 完成后提示")
+            end, function(err_msg)
+                MessageBox:notice('清理失败：' .. tostring(err_msg))
+            end)
+        end,
+    }})
+
+    dialog = ButtonDialog:new{
+        title = "缓存管理",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
 -- 多服务器配置管理: 列出已存配置(点击切换), 保存当前/删除。
 -- 切换即时生效(重建 REST 客户端), 无需重启。
 function LibraryView:openServerProfileManager()
@@ -507,6 +576,12 @@ function LibraryView:openMenu()
         callback = function()
             UIManager:close(dialog)
             self:openServerProfileManager()
+        end
+    }}, {{
+        text = Icons.FA_FOLDER .. " 缓存管理",
+        callback = function()
+            UIManager:close(dialog)
+            self:openCacheManager()
         end
     }}, {{
         text = string.format("%s 预载数量 [%s]", Icons.FA_BOOK,

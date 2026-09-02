@@ -36,6 +36,8 @@ local ApiClient = require("Komga/ApiClient")
 local Async = require("Komga/Async")
 local TaskQueue = require("Komga/TaskQueue")
 local KLog = require("Komga/Logger")
+local StreamPageCache = require("Komga/StreamPageCache")
+local CacheJanitor = require("Komga/CacheJanitor")
 local ContentProcessor = require("Komga/ContentProcessor")
 local get_img_src = ContentProcessor.get_img_src
 local get_url_extension = ContentProcessor.get_url_extension
@@ -165,6 +167,21 @@ function M:initialize()
     end)
 
     KLog.init(H.getTempDirectory() .. "/komga.log", self.settings_data.data.debug_log == true)
+
+    -- 缓存上限 LRU(启动 8s 后在 janitor 通道后台执行, 全程静默)
+    UIManager:scheduleIn(8, function()
+        pcall(function()
+            local max_bytes = (tonumber(self.settings_data.data.cache_max_mb) or 1024) * 1024 * 1024
+            local root = H.joinPath(H.getTempDirectory(), "cache/komga.cache")
+            TaskQueue.getChannel("janitor", 1):push(function()
+                return CacheJanitor.enforceLimit(root, max_bytes)
+            end, function(ok, res)
+                if ok and H.is_tbl(res) and (res.removed or 0) > 0 then
+                    KLog.info("cache janitor removed", res.removed, "files, freed", res.freed)
+                end
+            end, {timeout = 300, tag = "lru"})
+        end)
+    end)
 
     -- 旧版本设置迁移(集中管理, 见 ONE_TIME_MIGRATIONS)
     self:runOneTimeMigrations()
@@ -718,6 +735,23 @@ end
 
 
 
+
+-- 流式页预取缓存已迁至 Komga/StreamPageCache(薄委托保持 StreamImageView 调用面不变)
+function M:getStreamPageCacheDir(bookCacheId)
+    return StreamPageCache.getStreamPageCacheDir(bookCacheId)
+end
+function M:lookupStreamPageCache(bookCacheId, img_src)
+    return StreamPageCache.lookupStreamPageCache(bookCacheId, img_src)
+end
+function M:removeStreamPageCache(bookCacheId, img_src)
+    StreamPageCache.removeStreamPageCache(bookCacheId, img_src)
+end
+function M:clearStreamPageCache(bookCacheId)
+    StreamPageCache.clearStreamPageCache(bookCacheId)
+end
+function M:preLoadStreamPages(bookCacheId, img_srcs)
+    return StreamPageCache.preLoadStreamPages(bookCacheId, img_srcs)
+end
 
 -- chapter content pipeline moved to Komga/ContentProcessor; thin delegates here
 local processLink = function(book_cache_id, resources_src, base_url, is_porxy, callback)
@@ -1285,138 +1319,6 @@ function M:preLoadEpubChapters(volume, count)
     return true
 end
 
--- ---------------------------------------------------------------------------
--- 流式漫画页预取(磁盘缓存 + 子进程后台下载)
--- StreamImageView 每翻一页原本要同步下载一图; 预取把"后几页"提前落盘,
--- 翻页时直接读本地。缓存按 img_src 的 md5 命名, 阅读中滑动窗口清理,
--- 关卷时整目录清理, 不占用长期磁盘。
--- ---------------------------------------------------------------------------
-local STREAM_PAGE_EXTS = {"jpg", "jpeg", "png", "webp", "gif"}
-
--- 流式页缓存目录: <系列缓存>/resources/stream
-function M:getStreamPageCacheDir(bookCacheId)
-    if not H.is_str(bookCacheId) then
-        return nil
-    end
-    return H.joinPath(H.joinPath(H.getBookCachePath(bookCacheId), 'resources'), 'stream')
-end
-
--- 查流式页缓存: 命中返回图片数据(string), 未命中返回 nil
-function M:lookupStreamPageCache(bookCacheId, img_src)
-    if not (H.is_str(bookCacheId) and H.is_str(img_src)) then
-        return nil
-    end
-    local dir = self:getStreamPageCacheDir(bookCacheId)
-    if not dir then
-        return nil
-    end
-    local base = H.joinPath(dir, md5(img_src))
-    for _, ext in ipairs(STREAM_PAGE_EXTS) do
-        local p = base .. '.' .. ext
-        if util.fileExists(p) then
-            local f = io.open(p, "rb")
-            if f then
-                local data = f:read("*a")
-                f:close()
-                if data and #data > 0 then
-                    return data
-                end
-            end
-            return nil
-        end
-    end
-    return nil
-end
-
--- 删除单页缓存(滑动窗口淘汰用)
-function M:removeStreamPageCache(bookCacheId, img_src)
-    local dir = self:getStreamPageCacheDir(bookCacheId)
-    if not (dir and H.is_str(img_src)) then
-        return
-    end
-    local base = H.joinPath(dir, md5(img_src))
-    for _, ext in ipairs(STREAM_PAGE_EXTS) do
-        pcall(function()
-            util.removeFile(base .. '.' .. ext)
-        end)
-    end
-end
-
--- 清空流式页缓存目录(关卷时调用)
-function M:clearStreamPageCache(bookCacheId)
-    local dir = self:getStreamPageCacheDir(bookCacheId)
-    if not dir then
-        return
-    end
-    pcall(function()
-        local lfs = require("libs/libkoreader-lfs")
-        for name in lfs.dir(dir) do
-            if name ~= "." and name ~= ".." then
-                util.removeFile(H.joinPath(dir, name))
-            end
-        end
-        lfs.rmdir(dir)
-    end)
-end
-
--- 流式页预取是否进行中
-function M:isStreamPagesPreloading()
-    return TaskQueue.getChannel("stream", 1):hasTasks()
-end
-
--- 后台预取流式漫画页(Async 子进程 + 流式落盘 + Range 断点续传)。
--- 已有预取任务运行时跳过(翻得快时退回同步下载, 与现状一致); 全程静默失败。
-function M:preLoadStreamPages(bookCacheId, img_srcs)
-    if not (H.is_str(bookCacheId) and H.is_tbl(img_srcs) and #img_srcs > 0) then
-        return false
-    end
-    if self:isStreamPagesPreloading() == true then
-        return false
-    end
-    -- 过滤已缓存的页
-    local tasks = {}
-    for _, src in ipairs(img_srcs) do
-        if H.is_str(src) and src ~= "" and self:lookupStreamPageCache(bookCacheId, src) == nil then
-            table.insert(tasks, src)
-        end
-    end
-    if #tasks < 1 then
-        return false
-    end
-
-    local cache_id = bookCacheId
-    local dir = self:getStreamPageCacheDir(cache_id)
-    H.checkAndCreateFolder(dir)
-
-    TaskQueue.getChannel("stream", 1):push(function()
-        if not self.httpReq then
-            self.httpReq = require("Komga.HttpRequest")
-        end
-        local pStreamToFile = self.httpReq.pStreamToFile
-        for i = 1, #tasks do
-            local src = tasks[i]
-            local base_no_ext = H.joinPath(dir, md5(src))
-            -- 先流式落位到 .dl(扩展名下载后由 Content-Type 得知), 再改名为最终文件;
-            -- 中断留下的 .part/.dl 下次按 Range 续传
-            local ok, res = pcall(pStreamToFile, {
-                url = src,
-                dest = base_no_ext .. ".dl",
-                timeout = 30,
-                maxtime = 90
-            })
-            if ok and H.is_tbl(res) then
-                local ext = (H.is_str(res.ext) and res.ext ~= "") and res.ext or "jpg"
-                local final = base_no_ext .. "." .. ext
-                os.remove(final)
-                os.rename(base_no_ext .. ".dl", final)
-            else
-                logger.err('preload stream page failed:', tostring(src), tostring(res))
-            end
-        end
-        return true
-    end, nil, {timeout = PAGES_WATCHDOG_TIMEOUT, tag = "stream_pages"})
-    return true
-end
 
 function M:getVolumeInfoCache(bookCacheId, number)
     local volume_data = self.dbManager:getVolumeInfo(bookCacheId, number)
@@ -1994,6 +1896,30 @@ end
 
 function M:getSettings()
     return self.settings_data.data
+end
+
+-- 缓存占用(可清理子集)与上限, 供设置菜单展示
+function M:getCacheUsage()
+    local root = H.joinPath(H.getTempDirectory(), "cache/komga.cache")
+    local max_mb = tonumber(self.settings_data.data.cache_max_mb) or 1024
+    return {
+        used_bytes = CacheJanitor.totalBytes(root),
+        max_bytes = max_mb * 1024 * 1024,
+        root = root,
+    }
+end
+
+-- 手动触发 LRU 清理(janitor 通道后台), on_done(ok, res) 可选回调
+function M:runCacheJanitor(on_done)
+    local usage = self:getCacheUsage()
+    TaskQueue.getChannel("janitor", 1):push(function()
+        return CacheJanitor.enforceLimit(usage.root, usage.max_bytes)
+    end, function(ok, res)
+        if H.is_func(on_done) then
+            pcall(on_done, ok, res)
+        end
+    end, {timeout = 300, tag = "manual_janitor"})
+    return wrap_response(true)
 end
 
 -- 当前生效的 X-API-Key: 设置项 api_key, 未设置/为空时回落代码预设值
