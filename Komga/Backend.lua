@@ -1385,7 +1385,7 @@ end
 
 function M:getBookShelfCache()
     local bookShelfId = self:getServerPathCode()
-    return self.dbManager:getAllSeriesByUI(bookShelfId)
+    return self.dbManager:getAllSeriesByUI(bookShelfId, self:getSettings().series_sort_mode)
 end
 
 function M:getAllEpubChapters(volume)
@@ -1774,6 +1774,8 @@ function M:isExtractingInBackground(task_pid)
 end
 
 function M:after_reader_chapter_show(volume)
+    -- 书架"按最后阅读"排序打点
+    self:touchSeriesLastRead(book_cache_id)
 
     local number = volume.number
     local cache_file_path = volume.cacheFilePath
@@ -1962,6 +1964,13 @@ end
 
 function M:getSettings()
     return self.settings_data.data
+end
+
+-- 打点系列"最后阅读"时间(静默, 失败不影响阅读)
+function M:touchSeriesLastRead(book_cache_id)
+    pcall(function()
+        self.dbManager:touchSeriesLastRead(book_cache_id)
+    end)
 end
 
 -- 缓存占用(可清理子集)与上限, 供设置菜单展示

@@ -154,6 +154,10 @@ function M:init()
 end
 
 function M:fetchAndShow(options)
+    -- 书架"按最后阅读"排序打点(流式阅读不经过 after_reader_chapter_show)
+    pcall(function()
+        Backend:touchSeriesLastRead(options.bookinfo and options.bookinfo.cache_id)
+    end)
     self.bookinfo = options.bookinfo
     self.chapter = options.chapter
     self.on_return_callback = options.on_return_callback

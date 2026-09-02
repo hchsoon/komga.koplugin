@@ -241,6 +241,10 @@ function M:_initDB(is_repair)
             db:exec("DROP TABLE IF EXISTS books; DROP TABLE IF EXISTS chapters; DROP TABLE IF EXISTS epubchapters;")
         end
         db:exec(string.format("PRAGMA user_version=%d;", BOOKINFO_DB_VERSION))
+        -- 增量列迁移(幂等): 列已存在时 ALTER 报错, pcall 吞掉即可
+        pcall(function()
+            db:exec("ALTER TABLE series ADD COLUMN lastRead INTEGER DEFAULT 0;")
+        end)
         return db:exec(BOOKINFO_DB_SCHEMA)
     end)
     if success and rc == SQ3.OK then
@@ -638,6 +642,14 @@ function M:getAllSeries(bookShelfId)
     SELECT bookCacheId, name, author, url, origin, originName, 
     originOrder, durChapterIndex, durChapterPos FROM series WHERE isEnabled = 1 AND bookShelfId = ?;
     ]]
+    -- 排序模式: updated=更新时间(默认)/name=名称/last_read=最后阅读; 手动置顶恒优先
+    local order_by = {
+        updated = "lastUpdated DESC",
+        name = "name COLLATE NOCASE ASC",
+        last_read = "lastRead DESC",
+    }
+    sql_stmt = sql_stmt .. " ORDER BY (sortOrder = 0) DESC, " ..
+        (order_by[sort_mode] or order_by.updated)
     local result = self:execute(sql_stmt, {bookShelfId})
     local series = {}
     if result and #result > 0 then
@@ -665,12 +677,12 @@ function M:getAllSeries(bookShelfId)
     return series
 end
 
-function M:getAllSeriesByUI(bookShelfId)
+function M:getAllSeriesByUI(bookShelfId, sort_mode)
     if bookShelfId == nil then
         return {}
     end
     local sql_stmt = [[
-    SELECT bookCacheId, name, author, originName FROM series WHERE isEnabled = 1 AND bookShelfId = ? ORDER BY sortOrder = 0 DESC, sortOrder DESC;
+    SELECT bookCacheId, name, author, originName, lastRead FROM series WHERE isEnabled = 1 AND bookShelfId = ?
     ]]
     local result = self:execute(sql_stmt, {bookShelfId})
     local series = {}
@@ -681,7 +693,8 @@ function M:getAllSeriesByUI(bookShelfId)
                 cache_id = row[1],
                 name = row[2],
                 author = row[3],
-                originName = row[4]
+                originName = row[4],
+                lastRead = tonumber(row[5])
             }
         end
     end
@@ -1812,6 +1825,19 @@ function M:setSeriesTopStatus(bookShelfId, book_cache_id, isPinnedManually, isPi
         bookShelfId = bookShelfId,
         sortOrder = where_sortorder
     })
+end
+
+-- 打点系列"最后阅读"时间(打开分卷/流式阅读时调用), 供书架按最后阅读排序
+function M:touchSeriesLastRead(bookCacheId)
+    if not H.is_str(bookCacheId) then
+        return false
+    end
+    local ok = pcall(function()
+        self:execute(
+            "UPDATE series SET lastRead = strftime('%s', 'now') WHERE bookCacheId = ?;",
+            {bookCacheId})
+    end)
+    return ok
 end
 
 return M

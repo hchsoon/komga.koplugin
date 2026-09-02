@@ -584,6 +584,26 @@ function LibraryView:openMenu()
             self:openCacheManager()
         end
     }}, {{
+        text = string.format("%s 书架排序 [%s]", Icons.FA_BOOK,
+            (settings.series_sort_mode == "name" and "名称" or
+            settings.series_sort_mode == "last_read" and "最后阅读" or "更新时间")),
+        callback = function()
+            UIManager:close(dialog)
+            local order = { updated = "name", name = "last_read", last_read = "updated" }
+            settings.series_sort_mode = order[settings.series_sort_mode or "updated"]
+            return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                if LibraryView.instance and LibraryView.instance.onRefreshLibrary then
+                    LibraryView.instance:onRefreshLibrary()
+                end
+                MessageBox:notice("书架排序：" .. (settings.series_sort_mode == "name" and "名称" or
+                    settings.series_sort_mode == "last_read" and "最后阅读" or "更新时间"))
+                return true
+            end, function(err_msg)
+                MessageBox:notice('设置失败：' .. tostring(err_msg))
+                return false
+            end)
+        end
+    }}, {{
         text = Icons.FA_BOOK .. " 网格视图切换",
         callback = function()
             UIManager:close(dialog)
