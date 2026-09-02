@@ -321,18 +321,41 @@ function M:refreshVolumesCache(series, last_refresh_time)
     return self:komgaApi(function()
         -- POST /api/v1/books/list(按系列条件查询分卷)。
         -- 注意: Komga 分页参数 size 只认 query string, 放 body 会被忽略(默认页大小 20 截断)
-        return self.api:post("/api/v1/books/list", {size = 1000}, {
-            condition = {
-                allOf = {
-                    {
-                        seriesId = {
-                            operator = "is",
-                            value = series.cache_id
+        local all_content, total_pages, page = {}, 1, 0
+        local first
+        while page < total_pages do
+            local r = self.api:post("/api/v1/books/list",
+                {size = 1000, page = page}, {
+                    condition = {
+                        allOf = {
+                            {
+                                seriesId = {
+                                    operator = "is",
+                                    value = series.cache_id
+                                }
+                            }
                         }
                     }
-                }
-            }
-        }, {timeouts = {10, 12}})
+                }, {timeouts = {10, 12}})
+            if not H.is_tbl(r) then
+                return r
+            end
+            if not first then
+                first = r
+            end
+            local content = r.body and r.body.content
+            if H.is_tbl(content) then
+                for _, item in ipairs(content) do
+                    all_content[#all_content + 1] = item
+                end
+            end
+            total_pages = tonumber(r.body and r.body.totalPages) or 1
+            page = page + 1
+        end
+        if first then
+            first.body.content = all_content
+        end
+        return first
     end, function(response)
 
         local status, err = pcall(function()
@@ -360,9 +383,32 @@ function M:refreshLibraryCache(last_refresh_time)
         logger.warn('Start refreshing library')
         -- POST /api/v1/series/list(全量书架)。
         -- 注意: 分页参数 size 只认 query string, 放 body 会被忽略(默认页大小 20 截断)
-        return self.api:post("/api/v1/series/list", {size = 1000}, {
-            fullTextSearch = ""
-        }, {timeouts = {8, 12}})
+        -- 分页循环: size 只认 query; >1000 系列时逐页拉齐(每页 1000),
+        -- 汇总为单一响应交给回调(与旧单页语义一致, 上游无感知)
+        local all_content, total_pages, page = {}, 1, 0
+        local first
+        while page < total_pages do
+            local r = self.api:post("/api/v1/series/list",
+                {size = 1000, page = page}, {fullTextSearch = ""}, {timeouts = {8, 12}})
+            if not H.is_tbl(r) then
+                return r
+            end
+            if not first then
+                first = r
+            end
+            local content = r.body and r.body.content
+            if H.is_tbl(content) then
+                for _, item in ipairs(content) do
+                    all_content[#all_content + 1] = item
+                end
+            end
+            total_pages = tonumber(r.body and r.body.totalPages) or 1
+            page = page + 1
+        end
+        if first then
+            first.body.content = all_content
+        end
+        return first
     end, function(response)
         local bookShelfId = self:getServerPathCode()
         local status, err = pcall(function()
