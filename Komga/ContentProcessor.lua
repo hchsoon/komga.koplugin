@@ -6,6 +6,8 @@ _processVolumeContent 整体迁入。Backend 通过局部别名保持全部调�
 ]]
 local socket_url = require("socket.url")
 local util = require("util")
+local VolumePath = require("Komga/VolumePath")
+local ffiUtil = require("ffi/util")
 
 local M = {}
 function M.plain_text_replace(text, pattern, replacement, count)
@@ -50,10 +52,10 @@ function M.get_chapter_content_type(txt, first_line)
 
         local has_img_in_first_line = string.find(first_line, "<img", 1, true)
         if has_img_in_first_line then
-            local is_other_content = has_other_content(txt)
+            local is_other_content = M.has_other_content(txt)
             page_type = is_other_content and 3 or 2
-        elseif has_img_tag(txt) then
-            local is_other_content = has_other_content(txt)
+        elseif M.has_img_tag(txt) then
+            local is_other_content = M.has_other_content(txt)
             page_type = is_other_content and 3 or 2
         else
             page_type = 1
@@ -74,6 +76,71 @@ function M.has_img_tag(text)
     end
     return text:find("<[iI][mM][gG][^>]*>") ~= nil
 end
+function M.utf8_trim(str)
+    if type(str) ~= "string" or str == "" then
+        return ""
+    end
+
+    local whitespace = {
+        [0x00A0] = true, [0x1680] = true,
+        [0x2000] = true, [0x2001] = true, [0x2002] = true, [0x2003] = true,
+        [0x2004] = true, [0x2005] = true, [0x2006] = true, [0x2007] = true,
+        [0x2008] = true, [0x2009] = true, [0x200A] = true, [0x200B] = true,
+        [0x202F] = true, [0x205F] = true, [0x3000] = true,
+        [0x0009] = true, [0x000A] = true, [0x000B] = true,
+        [0x000C] = true, [0x000D] = true, [0x0020] = true,
+    }
+
+    -- 字节级 UTF-8 遍历: 首字节定长, 逐字符取码点
+    local function each_char(str, from)
+        local b = string.byte(str, from)
+        if not b then
+            return nil
+        end
+        local len
+        if b < 0x80 then len = 1
+        elseif b >= 0xF0 then len = 4
+        elseif b >= 0xE0 then len = 3
+        elseif b >= 0xC0 then len = 2
+        else len = 1 end -- 孤立续字节按单字节容错
+        local char = str:sub(from, from + len - 1)
+        return from, ffiUtil.utf8charcode(char), char, from + len
+    end
+
+    local start
+    local pos = 1
+    while pos <= #str do
+        local _, cp, _, next_pos = each_char(str, pos)
+        if not cp then break end
+        if not whitespace[cp] then
+            start = pos
+            break
+        end
+        pos = next_pos
+    end
+    if not start then
+        return ""
+    end
+
+    local finish
+    pos = #str
+    while pos >= start do
+        -- 从尾部回退到字符首字节
+        while pos > 1 and string.byte(str, pos) >= 0x80 and string.byte(str, pos) < 0xC0 do
+            pos = pos - 1
+        end
+        local _, cp, char, next_pos = each_char(str, pos)
+        if not cp then break end
+        if not whitespace[cp] then
+            finish = next_pos - 1
+            break
+        end
+        pos = pos - 1
+    end
+
+    return (finish and finish >= start) and str:sub(start, finish) or ""
+end
+
 function M.splitParagraphsPreserveBlank(text)
     if not text or text == "" then
         return {}
@@ -94,12 +161,12 @@ function M.splitParagraphsPreserveBlank(text)
 
     -- 保留空行，清理前后空白
     for line in util.gsplit(text, "\n", false, true) do
-        line = M:utf8_trim(line)
+        line = M.utf8_trim(line)
         table.insert(lines, line)
     end
 
     -- 常见标点符号判断
-    function M.isPunctuation(char)
+    local isPunctuation = function(char)
         if not char then
             return false
         end
