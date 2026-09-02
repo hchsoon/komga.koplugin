@@ -1862,6 +1862,66 @@ function M:after_reader_chapter_show(volume)
     volume.isDownLoaded = true
 end
 
+-- P3-9 双轨渲染: 整卷原文件模式 —— 直接下载 /api/v1/books/:id/file,
+-- 交 KOReader 原生引擎渲染(EPUB=CRE, zip/cbz=图片文档)。成功返回 volume
+-- (cacheFilePath 指向整卷文件), 失败返回 nil(调用方回退逐章管线)。
+function M:downloadVolumeWholeFile(volume)
+    local bookId = volume.bookId
+    if not (H.is_str(bookId) and H.is_str(volume.url)) then
+        return nil
+    end
+    local ext = volume.url:match("%.([%w]+)$") or "epub"
+    ext = ext:lower()
+    if ext == "zip" then
+        ext = "cbz"
+    end
+    if ext ~= "epub" and ext ~= "cbz" and ext ~= "pdf" then
+        return nil
+    end
+    local base = H.getVolumeCacheFilePath(volume.book_cache_id, bookId, volume.number, volume.name)
+    local dest = base .. "." .. ext
+    if util.fileExists(dest) then
+        volume.cacheFilePath = dest
+        return volume
+    end
+    local dir = util.splitFilePathName(dest)
+    if H.is_str(dir) then
+        H.checkAndCreateFolder(dir)
+    end
+    local url = (self.settings_data.data.server_address or "") .. "/api/v1/books/" .. bookId .. "/file"
+    if not self.httpReq then
+        self.httpReq = require("Komga.HttpRequest")
+    end
+    local ok, res = self.httpReq.pStreamToFile({
+        url = url,
+        dest = dest,
+        headers = {
+            ["X-API-Key"] = self:getApiKey(),
+            ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
+        },
+        timeout = 30,
+        maxtime = 600,
+    })
+    if not ok then
+        KLog.warn("whole-file download failed:", tostring(res))
+        return nil
+    end
+    volume.cacheFilePath = dest
+    pcall(function()
+        self.dbManager:transaction(function()
+            return self.dbManager:dynamicUpdateVolume({
+                book_cache_id = volume.book_cache_id,
+                bookId = bookId,
+                number = volume.number,
+            }, {
+                content = "downloaded",
+                cacheFilePath = dest,
+            })
+        end)()
+    end)
+    return volume
+end
+
 function M:downloadVolume(volume, message_dialog)
 
     local bookCacheId = volume.book_cache_id
@@ -1874,7 +1934,13 @@ function M:downloadVolume(volume, message_dialog)
     end
 
     local status, err = pcall(function()
-        -- print("Download 1.")
+        -- P3-9 双轨: 开启整卷模式且类型受支持时走原文件下载, 失败回退逐章管线
+        if self:getSettings().whole_file_mode == true then
+            local wf = self:downloadVolumeWholeFile(volume)
+            if wf then
+                return wf
+            end
+        end
         return self:pDownloadVolume(volume, message_dialog)
     end)
     if not status then

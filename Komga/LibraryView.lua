@@ -584,6 +584,26 @@ function LibraryView:openMenu()
             self:openCacheManager()
         end
     }}, {{
+        text = string.format("%s 整卷原文件模式 %s", Icons.FA_BOOK,
+            (settings.whole_file_mode and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:confirm(string.format(
+                "当前: %s \r\n \r\n开启后 EPUB/漫画分卷直接下载原文件(.epub/.cbz)交 KOReader 原生引擎渲染：兼容性最好(原生目录/内链/字体), 但进度定位精度降为整卷比例, 且章节级预载/按需下载失效。关闭则走逐章管线。",
+                (settings.whole_file_mode and '[整卷原文件]' or '[逐章管线]')), function(result)
+                if result then
+                    settings.whole_file_mode = not settings.whole_file_mode and true or nil
+                    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                        MessageBox:notice("已切换, 下次下载生效")
+                        return true
+                    end, function(err_msg)
+                        MessageBox:notice('设置失败：' .. tostring(err_msg))
+                        return false
+                    end)
+                end
+            end)
+        end
+    }}, {{
         text = string.format("%s 预载数量 [%s]", Icons.FA_BOOK,
             tostring(settings.preload_count or 3)),
         callback = function()
@@ -1337,6 +1357,11 @@ function LibraryView:uploadCurrentProgress()
         -- 内部章节缓存扩展名随源页面 URL(.xhtml 或 .html), 统一经 VolumePath 解析;
         -- 解析失败会导致 locator 恒为"第 1 章 0%", 服务器进度冻结在卷首
         local cur_idx = VolumePath.chapterIndex(file)
+        if cur_idx == nil and H.is_num(frac) then
+            -- 整卷原文件模式(.epub): 文件名无内部章节号, 实时比例即整卷比例,
+            -- 经 positions 插值为 locator(与逐章模式同源)
+            vol_frac = math.min(math.max(frac, 0), 1)
+        end
         local map, _ = self:epubChapterHrefMap(chapter.bookId)
         local href = cur_idx and map[cur_idx]
         local loc
