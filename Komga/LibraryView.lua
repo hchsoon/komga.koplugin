@@ -224,6 +224,101 @@ function LibraryView:openInstalledReadSource()
 end
 
 -- 配置 X-API-Key(请求头), 默认值取自 Config.DEFAULT_API_KEY
+-- 多服务器配置管理: 列出已存配置(点击切换), 保存当前/删除。
+-- 切换即时生效(重建 REST 客户端), 无需重启。
+function LibraryView:openServerProfileManager()
+    self:getInstance()
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local profiles = Backend:getServerProfiles()
+    local dialog
+    local buttons = {}
+
+    for _, profile in ipairs(profiles) do
+        local p = profile
+        table.insert(buttons, {{
+            text = string.format("%s 切换到: %s (%s)", Icons.FA_GLOBE,
+                tostring(p.name), tostring(p.server_address)),
+            callback = function()
+                UIManager:close(dialog)
+                Backend:HandleResponse(Backend:switchServerProfile(p.name), function(data)
+                    MessageBox:notice(string.format("已切换到 %s, 请刷新书架", tostring(p.name)))
+                end, function(err_msg)
+                    MessageBox:notice('切换失败：' .. tostring(err_msg))
+                end)
+            end,
+        }})
+    end
+
+    table.insert(buttons, {{
+        text = Icons.FA_BOOK .. " 保存当前服务器为新配置",
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:input(nil, nil, {
+                title = "保存当前服务器配置",
+                input = "",
+                description = "为当前生效的 WEB 地址与 API Key 命名(同名覆盖)。切换即时生效, 无需重启。",
+                condensed = true,
+                save_callback = function(input_text)
+                    if not H.is_str(input_text) or util.trim(input_text) == '' then
+                        MessageBox:notice('输入为空')
+                        return false
+                    end
+                    local name = util.trim(input_text)
+                    return Backend:HandleResponse(Backend:saveServerProfile(name), function(data)
+                        MessageBox:notice("配置已保存: " .. name)
+                        return true
+                    end, function(err_msg)
+                        MessageBox:notice('保存失败：' .. tostring(err_msg))
+                        return false
+                    end)
+                end,
+                allow_newline = false
+            })
+        end,
+    }})
+
+    if #profiles > 0 then
+        table.insert(buttons, {{
+            text = Icons.UNICODE_STAR_OUTLINE .. " 删除配置",
+            callback = function()
+                UIManager:close(dialog)
+                local del_dialog
+                local del_buttons = {}
+                for _, profile in ipairs(Backend:getServerProfiles()) do
+                    local p = profile
+                    table.insert(del_buttons, {{
+                        text = "删除: " .. tostring(p.name),
+                        callback = function()
+                            UIManager:close(del_dialog)
+                            Backend:HandleResponse(Backend:deleteServerProfile(p.name), function(data)
+                                MessageBox:notice("已删除: " .. tostring(p.name))
+                            end, function(err_msg)
+                                MessageBox:notice('删除失败：' .. tostring(err_msg))
+                            end)
+                        end,
+                    }})
+                end
+                del_dialog = ButtonDialog:new{
+                    title = "删除服务器配置",
+                    buttons = del_buttons,
+                }
+                UIManager:show(del_dialog)
+            end,
+        }})
+    else
+        table.insert(buttons, 1, {{
+            text = "(暂无已存配置, 请先保存当前服务器)",
+            callback = function() end,
+        }})
+    end
+
+    dialog = ButtonDialog:new{
+        title = "服务器配置管理",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
 function LibraryView:openApiKeySetting()
     local setting_data = Backend:getSettings()
     local current_key = H.is_str(setting_data.api_key) and setting_data.api_key or Config.DEFAULT_API_KEY
@@ -406,6 +501,12 @@ function LibraryView:openMenu()
         callback = function()
             UIManager:close(dialog)
             self:openApiKeySetting()
+        end
+    }}, {{
+        text = Icons.FA_GLOBE .. " 服务器配置",
+        callback = function()
+            UIManager:close(dialog)
+            self:openServerProfileManager()
         end
     }}, {{
         text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,

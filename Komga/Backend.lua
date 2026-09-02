@@ -2857,6 +2857,105 @@ function M:setApiKey(new_api_key)
     return wrap_response(self.settings_data.data)
 end
 
+-- ---------------------------------------------------------------------------
+-- 多服务器配置(场景: 家里局域网地址 ↔ 外网域名 一键切换)
+-- 配置存于设置项 server_profiles = { {name, server_address, api_key}, ... };
+-- 当前生效值仍为 server_address/api_key 两个字段(向后兼容)。
+-- ---------------------------------------------------------------------------
+function M:getServerProfiles()
+    if not self.settings_data then
+        return {}
+    end
+    local profiles = self.settings_data.data.server_profiles
+    if not H.is_tbl(profiles) then
+        return {}
+    end
+    return profiles
+end
+
+-- 保存当前生效的服务器为一份具名配置(同名覆盖)
+function M:saveServerProfile(name)
+    if not (H.is_str(name) and name ~= "") then
+        return wrap_response(nil, '配置名不能为空')
+    end
+    local data = self.settings_data and self.settings_data.data
+    if not (H.is_tbl(data) and H.is_str(data.server_address)) then
+        return wrap_response(nil, '设置未初始化')
+    end
+    local profiles = H.is_tbl(data.server_profiles) and data.server_profiles or {}
+    local entry = {
+        name = name,
+        server_address = data.server_address,
+        api_key = H.is_str(data.api_key) and data.api_key or "",
+    }
+    local replaced = false
+    for i, p in ipairs(profiles) do
+        if p.name == name then
+            profiles[i] = entry
+            replaced = true
+            break
+        end
+    end
+    if not replaced then
+        table.insert(profiles, entry)
+    end
+    data.server_profiles = profiles
+    self.settings_data:flush()
+    return wrap_response(profiles)
+end
+
+-- 删除具名配置
+function M:deleteServerProfile(name)
+    if not H.is_str(name) then
+        return wrap_response(nil, '参数错误')
+    end
+    local data = self.settings_data and self.settings_data.data
+    local profiles = H.is_tbl(data and data.server_profiles) and data.server_profiles or {}
+    local kept = {}
+    for _, p in ipairs(profiles) do
+        if p.name ~= name then
+            table.insert(kept, p)
+        end
+    end
+    data.server_profiles = kept
+    self.settings_data:flush()
+    return wrap_response(kept)
+end
+
+-- 切换到具名配置(立即生效: 重建 REST 客户端, 无需重启)
+function M:switchServerProfile(name)
+    if not H.is_str(name) then
+        return wrap_response(nil, '参数错误')
+    end
+    local data = self.settings_data and self.settings_data.data
+    if not H.is_tbl(data) then
+        return wrap_response(nil, '设置未初始化')
+    end
+    local target
+    for _, p in ipairs(self:getServerProfiles()) do
+        if p.name == name then
+            target = p
+            break
+        end
+    end
+    if not H.is_tbl(target) then
+        return wrap_response(nil, '配置不存在: ' .. name)
+    end
+    -- 地址无变化时仅同步 key, 避免无谓的客户端重建
+    local address_changed = (data.server_address ~= target.server_address)
+    data.server_address = target.server_address
+    if H.is_str(target.api_key) and target.api_key ~= "" then
+        data.api_key = target.api_key
+    end
+    -- 书架分组键按主机 md5 派生, 换服务器必须失效重算
+    data.server_address_md5 = nil
+    self.settings_data:flush()
+    if address_changed then
+        self:loadApiClient()
+    end
+    return wrap_response(self.settings_data.data)
+end
+
 function M:saveSettings(settings)
     if H.is_tbl(settings) and H.is_str(self.settings_data.data.server_address) then
         if not H.is_str(settings.server_address) or not H.is_str(settings.chapter_sorting_mode) then
