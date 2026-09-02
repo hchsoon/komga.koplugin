@@ -584,6 +584,24 @@ function LibraryView:openMenu()
             self:openCacheManager()
         end
     }}, {{
+        text = Icons.FA_BOOK .. " 网格视图切换",
+        callback = function()
+            UIManager:close(dialog)
+            local ok_plugin, PluginLoader = pcall(require, "pluginloader")
+            local cb = ok_plugin and PluginLoader.getPluginInstance and PluginLoader:getPluginInstance("coverbrowser")
+            if not (cb and cb.setDisplayMode) then
+                MessageBox:notice('未找到 CoverBrowser 插件, 网格视图不可用')
+                return
+            end
+            local ok_bm, BookInfoManager = pcall(require, "plugins/coverbrowser.koplugin/bookinfomanager")
+            local curr = ok_bm and BookInfoManager.getSetting and BookInfoManager:getSetting("filemanager_display_mode")
+            local next_mode = (curr == "grid") and "list_image_meta" or "grid"
+            pcall(function()
+                cb:setDisplayMode(next_mode)
+            end)
+            MessageBox:notice(next_mode == "grid" and "已切换到网格视图" or "已切换到列表视图")
+        end
+    }}, {{
         text = string.format("%s 整卷原文件模式 %s", Icons.FA_BOOK,
             (settings.whole_file_mode and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
