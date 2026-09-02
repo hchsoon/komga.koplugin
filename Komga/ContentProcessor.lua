@@ -767,7 +767,7 @@ function M.process_volume_content(ctx, volume, content)
                 end
                 for _, el in ipairs(root("head > link[href]")) do
                     if el and el.attributes and el.attributes["href"] then
-                        local relpath = processLink(book_cache_id, el.attributes["href"], html_url)
+                        local relpath = processLink(ctx, book_cache_id, el.attributes["href"], html_url)
                         local el_text = el:gettext()
                         if H.is_str(relpath) and el_text then
                             local replace_text = M.plain_text_replace(el_text, el.attributes["href"], relpath)
@@ -777,7 +777,7 @@ function M.process_volume_content(ctx, volume, content)
                 end
                 for _, el in ipairs(body[1]:select("img[src]")) do
                     if el and el.attributes and el.attributes["src"] then
-                        local relpath = processLink(book_cache_id, el.attributes["src"], html_url)
+                        local relpath = processLink(ctx, book_cache_id, el.attributes["src"], html_url)
                         local el_text = el:gettext()
                         if relpath and el_text then
                             local replace_text = M.plain_text_replace(el_text, el.attributes["src"], relpath)
@@ -794,7 +794,7 @@ function M.process_volume_content(ctx, volume, content)
                                 return
                             end
                             open = open .. r2 or ""
-                            local relpath = processLink(book_cache_id, path, html_url)
+                            local relpath = processLink(ctx, book_cache_id, path, html_url)
                             if H.is_str(relpath) then
                                 local replace_text = M.plain_text_replace(el_text, open .. path, open .. relpath)
                                 content = M.plain_text_replace(content, el_text, replace_text)
@@ -810,7 +810,7 @@ function M.process_volume_content(ctx, volume, content)
                     if not (open and open ~= "" and path and path ~= "" and string.find(path, "^resources/") == nil) then
                         return
                     end
-                    local relpath = processLink(book_cache_id, path, html_url)
+                    local relpath = processLink(ctx, book_cache_id, path, html_url)
                     if H.is_str(relpath) then
                         r2 = r2 or ""
                         close = close or ""
@@ -821,7 +821,7 @@ function M.process_volume_content(ctx, volume, content)
                     local open, path, close = r1, r3, r4
                     -- 前面处理过了这里就跳过
                     if open and open ~= "" and path and string.find(path, "^resources/") == nil then
-                        local relpath = processLink(book_cache_id, path, html_url)
+                        local relpath = processLink(ctx, book_cache_id, path, html_url)
                         if H.is_str(relpath) then
                             r2 = r2 or ""
                             close = close or ""
@@ -834,7 +834,7 @@ function M.process_volume_content(ctx, volume, content)
                         return
                     end
                     local path = r3
-                    local relpath = processLink(book_cache_id, path, html_url)
+                    local relpath = processLink(ctx, book_cache_id, path, html_url)
                     if H.is_str(relpath) then
                         return table.concat({r1, r2, relpath, r2, r4})
                     end
@@ -902,7 +902,7 @@ function M.process_volume_content(ctx, volume, content)
                         if not H.is_str(u) or u == "" or u:sub(1, 1) == "#" or u:lower():find("^data:") then
                             return nil
                         end
-                        local relpath = processLink(book_cache_id, u, html_url)
+                        local relpath = processLink(ctx, book_cache_id, u, html_url)
                         if H.is_str(relpath) then
                             return string.format("url(%s%s%s)", q or "", relpath, q or "")
                         end
@@ -925,7 +925,7 @@ function M.process_volume_content(ctx, volume, content)
                     return
                 end
                 local path = r3
-                local relpath = processLink(book_cache_id, path, url, true)
+                local relpath = processLink(ctx, book_cache_id, path, url, true)
                 if H.is_str(relpath) then
                     -- 随文图
                     return string.format('<div class="duokan-image-single">%s</div>',
