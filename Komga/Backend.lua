@@ -35,6 +35,7 @@ local VolumePath = require("Komga/VolumePath")
 local ApiClient = require("Komga/ApiClient")
 local Async = require("Komga/Async")
 local TaskQueue = require("Komga/TaskQueue")
+local KLog = require("Komga/Logger")
 local ContentProcessor = require("Komga/ContentProcessor")
 local get_img_src = ContentProcessor.get_img_src
 local get_url_extension = ContentProcessor.get_url_extension
@@ -162,6 +163,8 @@ function M:initialize()
     pcall(function()
         util.removeFile(self.task_pid_file)
     end)
+
+    KLog.init(H.getTempDirectory() .. "/komga.log", self.settings_data.data.debug_log == true)
 
     -- 旧版本设置迁移(集中管理, 见 ONE_TIME_MIGRATIONS)
     self:runOneTimeMigrations()
@@ -1937,12 +1940,12 @@ function M:after_reader_chapter_show(volume)
     if volume.isRead ~= true and NetworkMgr:isConnected() then
         if is_epub then
             -- EPUB: 预下载当前卷的后几页(内部章节), 翻到时即开; 全程静默
-            self:preLoadEpubChapters(volume, 3)
+            self:preLoadEpubChapters(volume, tonumber(self:getSettings().preload_count) or 3)
         else
             -- 漫画: 预下载后续整卷(cbz 单文件较大, 只预下载 1 卷)
             local complete_count = self:getReadAheadVolumeCount(volume)
             if complete_count < 40 then
-                local preDownloadNum = 3
+                local preDownloadNum = tonumber(self:getSettings().preload_count) or 3
                 if volume.cacheExt and volume.cacheExt == 'cbz' then
                     preDownloadNum = 1
                 end

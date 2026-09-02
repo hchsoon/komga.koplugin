@@ -14,6 +14,7 @@ local _ = require("gettext")
 local MessageBox = require("Komga/MessageBox")
 local Backend = require("Komga/Backend")
 local H = require("Komga/Helper")
+local KLog = require("Komga/Logger")
 local VolumePath = require("Komga/VolumePath")
 
 local Screen = Device.screen
@@ -488,6 +489,7 @@ end
 -- 布局诊断日志(定位图像偏移/贴底问题): 打到 crash.log / stdout 的 logger.info,
 -- 排查完成后可整体删除
 function M:dumpLayoutState(tag)
+    if not (Backend:getSettings().debug_log == true) then return end
     pcall(function()
         local mf = self.main_frame and self.main_frame.dimen
         local ic = self.image_container and self.image_container.dimen

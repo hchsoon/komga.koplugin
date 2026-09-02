@@ -509,6 +509,50 @@ function LibraryView:openMenu()
             self:openServerProfileManager()
         end
     }}, {{
+        text = string.format("%s 预载数量 [%s]", Icons.FA_BOOK,
+            tostring(settings.preload_count or 3)),
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:input(nil, nil, {
+                title = "设置预载数量",
+                input = tostring(settings.preload_count or 3),
+                description = "阅读时后台预载的后几页(EPUB)或后几卷(漫画), 1-10。",
+                condensed = true,
+                save_callback = function(input_text)
+                    local n = tonumber(input_text)
+                    if not n or n < 1 or n > 10 then
+                        MessageBox:notice('请输入 1-10 的数字')
+                        return false
+                    end
+                    settings.preload_count = math.floor(n)
+                    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                        MessageBox:notice("预载数量已更新")
+                        return true
+                    end, function(err_msg)
+                        MessageBox:notice('设置失败：' .. tostring(err_msg))
+                        return false
+                    end)
+                end,
+                allow_newline = false
+            })
+        end
+    }}, {{
+        text = string.format("%s 调试日志 %s", Icons.FA_PLUG,
+            (settings.debug_log and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        callback = function()
+            UIManager:close(dialog)
+            settings.debug_log = not settings.debug_log and true or nil
+            return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                require("Komga/Logger").setDebug(settings.debug_log == true)
+                MessageBox:notice(string.format("调试日志：%s（写入 komga.log）",
+                    settings.debug_log and "开" or "关"))
+                return true
+            end, function(err_msg)
+                MessageBox:notice('设置失败：' .. tostring(err_msg))
+                return false
+            end)
+        end
+    }}, {{
         text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,
             (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
