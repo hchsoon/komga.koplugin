@@ -20,6 +20,7 @@ local Backend = require("Komga/Backend")
 local KomgaModel = require("Komga/KomgaModel")
 local MessageBox = require("Komga/MessageBox")
 local H = require("Komga/Helper")
+local TaskQueue = require("Komga/TaskQueue")
 local Config = require("Komga/Config")
 local VolumePath = require("Komga/VolumePath")
 
@@ -2607,12 +2608,15 @@ local function init_book_browser(parent)
                     return true
                 end
             end, 12000, 2000)
-            Backend:launchProcess(function()
-                local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url)
-                if cover_path and util.fileExists(cover_path) then
-                    DocSettings:flushCustomCover(book_lnk_path, cover_path)
+            TaskQueue.getChannel("cover", 2):push(function()
+                return Backend:download_cover_img(book_cache_id, cover_url)
+            end, function(ok, cover_path)
+                if ok and H.is_str(cover_path) and util.fileExists(cover_path) then
+                    pcall(function()
+                        DocSettings:flushCustomCover(book_lnk_path, cover_path)
+                    end)
                 end
-            end)
+            end, {timeout = 120, tag = "series_cover"})
         end
     end
 
@@ -2817,14 +2821,16 @@ local function init_book_browser(parent)
                 return true
             end
         end, 12000, 2000)
-        Backend:launchProcess(function()
+        TaskQueue.getChannel("cover", 2):push(function()
             local cover_path_no_ext = Backend:getVolumeCoverCachePath(book_cache_id, chapter.number)
-            local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
-            if cover_path and util.fileExists(cover_path) then
-                DocSettings:flushCustomCover(lnk_path, cover_path)
-                local after = DocSettings:open(lnk_path)
+            local cover_path = Backend:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
+            if H.is_str(cover_path) and util.fileExists(cover_path) then
+                pcall(function()
+                    DocSettings:flushCustomCover(lnk_path, cover_path)
+                end)
             end
-        end)
+            return cover_path
+        end, nil, {timeout = 120, tag = "volume_cover"})
     end
 
     function book_browser:ensureVolumeFolder(book_cache_id, bookinfo)

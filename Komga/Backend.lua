@@ -34,6 +34,7 @@ local Config = require("Komga/Config")
 local VolumePath = require("Komga/VolumePath")
 local ApiClient = require("Komga/ApiClient")
 local Async = require("Komga/Async")
+local TaskQueue = require("Komga/TaskQueue")
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -301,6 +302,10 @@ end
 function M:initialize()
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
+    -- 上个进程异常退出可能遗留 pid 文件(通道状态在内存, 重启即复位), 清理防误判
+    pcall(function()
+        util.removeFile(self.task_pid_file)
+    end)
 
     -- 旧版本设置迁移(集中管理, 见 ONE_TIME_MIGRATIONS)
     self:runOneTimeMigrations()
@@ -1836,9 +1841,7 @@ function M:downloadAllVolumes(volumes)
     end
 end
 
--- 后台任务看门狗参数(须声明在使用点之前)
-local TASK_WATCHDOG_INTERVAL = 30 -- 轮询间隔(秒)
-local TASK_WATCHDOG_TIMEOUT = 600 -- 整卷预下载硬超时(秒)
+-- 后台任务超时(通道任务经 Async 托管超时与回收)
 local PAGES_WATCHDOG_TIMEOUT = 300 -- 翻页预下载硬超时(秒)
 
 function M:preLoadVolumes(volume, download_volume_count)
@@ -1877,7 +1880,9 @@ function M:preLoadVolumes(volume, download_volume_count)
 
     self:closeDbManager()
 
-    local task_pid, err = self:launchProcess(function()
+    -- 经 TaskQueue "volume" 通道执行(1 worker, 串行; 超时/回收由通道+Async 托管)。
+    -- 任务体内仍读写 task.pid.lua: 供 quit_the_background_download_job 协作式停止
+    local task_pid = TaskQueue.getChannel("volume", 1):push(function()
 
         pcall(function()
 
@@ -2013,125 +2018,44 @@ function M:preLoadVolumes(volume, download_volume_count)
     end)
 
     if not task_pid then
-        dbg.log("Multithreaded task creation failed:" .. tostring(err))
         pcall(function()
             Device:enableCPUCores(1)
             UIManager:allowStandby()
         end)
-        return false, "Background download task failed" .. tostring(err)
-    else
-
-        dbg.v("Task started. PID:" .. tostring(task_pid))
-
-        self:startTaskWatchdog(task_pid, self.task_pid_file, TASK_WATCHDOG_TIMEOUT)
-
-        local task_return_db_func = self.dbManager:transaction(
-            function(task_return_volume, content)
-
-                self.dbManager:cleanVolumeDownloading()
-
-                for i = 1, #task_return_volume do
-                    local task_volume = task_return_volume[i]
-                    if H.is_tbl(task_volume) and task_volume.number ~= nil and task_volume.book_cache_id ~=
-                        nil then
-                        self.dbManager:updateVolumeDownloadState(task_volume, content)
-                    end
-                end
-            end)
-
-        local status, err = pcall(function()
-
-            task_return_db_func(volume_down_tasks, 'downloading_')
-        end)
-        if not status and err then
-            dbg.v("Download flag write error:", tostring(err))
-        end
-
-        return true, volume_down_tasks
+        return false, "Background download task failed"
     end
 
-end
+    dbg.v("Task queued on volume channel")
 
--- ---------------------------------------------------------------------------
--- 后台子进程看门狗
--- 子进程卡死(网络挂起等)时 pid 文件会残留, isExtractingInBackground 持续为真,
--- 后续预下载被"Background tasks incomplete"拒绝、用户下载被"后台下载中"拦截。
--- 看门狗在父进程周期检查: 进程已退出但 pid 文件未清理 → 复位状态;
--- 超时 → 删 pid 文件(子进程在任务边界自行退出)并强制回收, 恢复 standby。
--- ---------------------------------------------------------------------------
-function M:startTaskWatchdog(pid, pid_file, timeout_seconds)
-    if not (pid and pid_file) then
-        return
-    end
-    self._task_watchdogs = self._task_watchdogs or {}
-    self._task_watchdogs[pid_file] = {
-        pid = pid,
-        start = os.time(),
-        timeout = timeout_seconds or TASK_WATCHDOG_TIMEOUT
-    }
-    if self._task_watchdog_scheduled ~= true then
-        self._task_watchdog_scheduled = true
-        UIManager:scheduleIn(TASK_WATCHDOG_INTERVAL, function()
-            self:checkTaskWatchdogs()
-        end)
-    end
-end
+    local task_return_db_func = self.dbManager:transaction(
+        function(task_return_volume, content)
 
-function M:checkTaskWatchdogs()
-    self._task_watchdog_scheduled = false
-    local watchdogs = self._task_watchdogs
-    if H.is_tbl(watchdogs) then
-        for pid_file, w in pairs(watchdogs) do
-            local file_exists = util.fileExists(pid_file)
-            -- ffiUtil.isSubProcessDone/terminateSubProcess 在旧版 KOReader 可能缺失, 先探测
-            local done = (H.is_func(ffiUtil.isSubProcessDone) and ffiUtil.isSubProcessDone(w.pid)) or false
-            if not file_exists then
-                -- 正常结束: pid 文件已清理; 进程若仍活着(收尾中)不再等待, 直接回收
-                watchdogs[pid_file] = nil
-                if not done and H.is_func(ffiUtil.terminateSubProcess) then
-                    pcall(function()
-                        ffiUtil.terminateSubProcess(w.pid)
-                    end)
+            self.dbManager:cleanVolumeDownloading()
+
+            for i = 1, #task_return_volume do
+                local task_volume = task_return_volume[i]
+                if H.is_tbl(task_volume) and task_volume.number ~= nil and task_volume.book_cache_id ~=
+                    nil then
+                    self.dbManager:updateVolumeDownloadState(task_volume, content)
                 end
-            elseif done then
-                -- 进程已退出但 pid 文件未清理(异常终止): 复位状态, 恢复 standby
-                pcall(function()
-                    util.removeFile(pid_file)
-                end)
-                watchdogs[pid_file] = nil
-                pcall(function()
-                    Device:enableCPUCores(1)
-                    UIManager:allowStandby()
-                end)
-            elseif (os.time() - w.start) > w.timeout then
-                dbg.log('background task timeout, terminate pid:', tostring(w.pid))
-                pcall(function()
-                    util.removeFile(pid_file)
-                end)
-                if H.is_func(ffiUtil.terminateSubProcess) then
-                    pcall(function()
-                        ffiUtil.terminateSubProcess(w.pid)
-                    end)
-                end
-                watchdogs[pid_file] = nil
-                pcall(function()
-                    Device:enableCPUCores(1)
-                    UIManager:allowStandby()
-                end)
             end
-        end
-    end
-    if H.is_tbl(self._task_watchdogs) and next(self._task_watchdogs) then
-        self._task_watchdog_scheduled = true
-        UIManager:scheduleIn(TASK_WATCHDOG_INTERVAL, function()
-            self:checkTaskWatchdogs()
         end)
+
+    local status, err = pcall(function()
+
+        task_return_db_func(volume_down_tasks, 'downloading_')
+    end)
+    if not status and err then
+        dbg.v("Download flag write error:", tostring(err))
     end
+
+    return true, volume_down_tasks
+
 end
 
 -- 翻页预下载(EPUB 后几页/内部章节)是否进行中
 function M:isPagesPreloading()
-    return self._pages_preload_busy == true
+    return TaskQueue.getChannel("pages", 1):hasTasks()
 end
 
 -- 阅读中后台预下载当前 EPUB 卷的后几页(内部章节), 翻到时即开。
@@ -2185,8 +2109,7 @@ function M:preLoadEpubChapters(volume, count)
 
     self:closeDbManager()
 
-    self._pages_preload_busy = true
-    Async.run(function()
+    TaskQueue.getChannel("pages", 1):push(function()
         for i = 1, #tasks do
             local status, err = pcall(function()
                 return self:pDownloadVolume(tasks[i])
@@ -2197,16 +2120,7 @@ function M:preLoadEpubChapters(volume, count)
         end
         self:closeDbManager()
         return true
-    end, function(ok, result, err)
-        self._pages_preload_busy = nil
-        if not ok then
-            logger.err('preload epub chapters async err:', tostring(err))
-        end
-        pcall(function()
-            Device:enableCPUCores(1)
-            UIManager:allowStandby()
-        end)
-    end, {timeout = PAGES_WATCHDOG_TIMEOUT})
+    end, nil, {timeout = PAGES_WATCHDOG_TIMEOUT, tag = "epub_pages"})
     return true
 end
 
@@ -2286,7 +2200,7 @@ end
 
 -- 流式页预取是否进行中
 function M:isStreamPagesPreloading()
-    return self._stream_preload_busy == true
+    return TaskQueue.getChannel("stream", 1):hasTasks()
 end
 
 -- 后台预取流式漫画页(Async 子进程 + 流式落盘 + Range 断点续传)。
@@ -2313,8 +2227,7 @@ function M:preLoadStreamPages(bookCacheId, img_srcs)
     local dir = self:getStreamPageCacheDir(cache_id)
     H.checkAndCreateFolder(dir)
 
-    self._stream_preload_busy = true
-    Async.run(function()
+    TaskQueue.getChannel("stream", 1):push(function()
         if not self.httpReq then
             self.httpReq = require("Komga.HttpRequest")
         end
@@ -2340,12 +2253,7 @@ function M:preLoadStreamPages(bookCacheId, img_srcs)
             end
         end
         return true
-    end, function(ok, result, err)
-        self._stream_preload_busy = nil
-        if not ok then
-            logger.err('preload stream pages async err:', tostring(err))
-        end
-    end, {timeout = PAGES_WATCHDOG_TIMEOUT})
+    end, nil, {timeout = PAGES_WATCHDOG_TIMEOUT, tag = "stream_pages"})
     return true
 end
 
@@ -2714,6 +2622,7 @@ function M:quit_the_background_download_job()
     if util.fileExists(self.task_pid_file) then
         util.removeFile(self.task_pid_file)
     end
+    TaskQueue.getChannel("volume", 1):clear()
     return true
 end
 
@@ -2785,17 +2694,20 @@ function M:check_the_background_download_job(volume_down_tasks)
 end
 
 function M:isExtractingInBackground(task_pid)
-    -- ffiUtil.isSubProcessDone(task_pid)
+    -- 以 volume 通道状态为准(通道任务自带超时, 不会永久卡住);
+    -- pid 文件仅作为上个版本崩溃遗留的兜底: 超过 24h 视为孤儿并清理
+    if TaskQueue.getChannel("volume", 1):hasTasks() then
+        return true
+    end
     local pid_file = self.task_pid_file
-    if not util.fileExists(pid_file) then
-        return false
+    if util.fileExists(pid_file) then
+        if H.isFileOlderThan(pid_file, 24 * 60 * 60) then
+            util.removeFile(pid_file)
+        else
+            return true
+        end
     end
-    if H.isFileOlderThan(pid_file, 24 * 60 * 60) then
-        util.removeFile(pid_file)
-        return false
-    end
-
-    return true
+    return false
 end
 
 function M:after_reader_chapter_show(volume)
