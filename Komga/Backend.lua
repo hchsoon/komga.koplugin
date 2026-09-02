@@ -2658,24 +2658,14 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
 
     cover_path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
 
-    -- 封面版本缓存: cover_url 带 ?v=<服务器 lastModified>(见 upsertSeries)时,
-    -- 版本未变且本地已有封面文件则直接复用; Komga 换封面后随书架同步自动刷新
-    local cover_version = VolumePath.coverVersion(cover_url)
-    if cover_version and cover_version ~= "" then
-        local marker_path = cover_path_no_ext .. '.v'
-        local marker = nil
-        local f = io.open(marker_path, "rb")
-        if f then
-            marker = f:read("*a")
-            f:close()
-        end
-        if marker == cover_version then
-            local cached = findCachedCoverFile(cover_path_no_ext)
-            if cached then
-                local _, image_filename = util.splitFilePathName(cached)
-                return cached, image_filename
-            end
-        end
+    -- 本地已有封面文件直接复用, 仅缺失时联网下载。
+    -- 此前的 ?v=<lastModified> 版本比对: 服务器侧 lastModified 随书籍活动(进度/扫描)
+    -- 变化会导致标记失配、图片未变也反复重下, 与"已有缓存不刷新"相悖, 故移除。
+    -- (?v= 仍由 upsertSeries 附加在 URL 上, 仅作缓存未命中时的请求参数, 无害。)
+    local cached = findCachedCoverFile(cover_path_no_ext)
+    if cached then
+        local _, image_filename = util.splitFilePathName(cached)
+        return cached, image_filename
     end
 
     local img_src = cover_url
@@ -2711,11 +2701,6 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
         local tmp_cover_path = safe_cover_img_path .. '.part'
         if util.writeToFile(cover_img_data, tmp_cover_path, true) then
             os.rename(tmp_cover_path, safe_cover_img_path)
-            if cover_version and cover_version ~= "" then
-                pcall(function()
-                    util.writeToFile(cover_version, path_no_ext .. '.v', true)
-                end)
-            end
         end
 
         return cover_img_path, image_filename

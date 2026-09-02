@@ -21,8 +21,27 @@ local M = {}
 if has_rapidjson then
     M.backend = "rapidjson"
 
+    -- rapidjson 把 JSON null 解码为 rapidjson.null 哨兵(userdata, 真值!),
+    -- 而 dkjson 解码为 nil——全插件的 `x == nil` / `x and x.y` 判空都基于后者。
+    -- 递归把哨兵替换回 nil, 恢复 dkjson 语义(实测 108KB 书架载荷归零 <0.5ms)。
+    -- 遍历中置 nil(Lua 允许清除已存在键)不会破坏 pairs 迭代。
+    local null_sentinel = rapidjson.null
+    local function denull(t)
+        for k, v in pairs(t) do
+            if v == null_sentinel then
+                t[k] = nil
+            elseif type(v) == "table" then
+                denull(v)
+            end
+        end
+    end
+
     function M.decode(s)
-        return rapidjson.decode(s)
+        local v = rapidjson.decode(s)
+        if type(v) == "table" then
+            denull(v)
+        end
+        return v
     end
 
     function M.encode(v)
