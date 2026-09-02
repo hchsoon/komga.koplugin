@@ -223,6 +223,17 @@ function M:_openDB()
 
     self:_setJournalMode()
 
+    -- 增量列迁移: 每次连接都尝试(幂等), 保证任何查询前列已存在;
+    -- 此前只在 _initDB 做一次且失败被吞, 会出现列缺失后全部查询报 no such column
+    local ok_col, err_col = pcall(function()
+        self.db:exec("ALTER TABLE series ADD COLUMN lastRead INTEGER DEFAULT 0;")
+    end)
+    if not ok_col then
+        if not tostring(err_col):find("duplicate column", 1, false) then
+            dbg.log("ensure lastRead column failed:", tostring(err_col))
+        end
+    end
+
     return self.db
 end
 
