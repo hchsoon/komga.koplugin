@@ -9,8 +9,7 @@ Komga/Async.lua — runInSubProcess 异步执行封装(设计参考 koobone.kopl
 local ffiUtil = require("ffi/util")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
-
-local has_dkjson, dkjson = pcall(require, "dkjson")
+local Json = require("Komga/Json")
 
 local M = {}
 
@@ -58,14 +57,11 @@ function M.run(work_func, on_done, opts)
 
     local function child_entry(pid, child_write_fd)
         local ok, result = pcall(work_func)
-        local payload
-        if has_dkjson then
-            if ok then
-                payload = dkjson.encode({ok = true, result = (result ~= nil) and result or true})
-            else
-                payload = dkjson.encode({ok = false, err = sanitize_err(result)})
-            end
-        else
+        local payload = ok
+            and Json.encode({ok = true, result = (result ~= nil) and result or true})
+            or Json.encode({ok = false, err = sanitize_err(result)})
+        if not payload then
+            -- 编码兜底(Json.backend == "none" 的极端环境): 至少回传成败标记
             payload = ok and '{"ok":true}' or '{"ok":false}'
         end
         pcall(ffiUtil.writeToFD, child_write_fd, payload, true)
@@ -127,7 +123,7 @@ function M.run(work_func, on_done, opts)
             if has_data then
                 local raw = ffiUtil.readAllFromFD(handle.fd)
                 handle.fd = nil
-                local decoded = (has_dkjson and raw) and dkjson.decode(raw)
+                local decoded = raw and Json.decode(raw)
                 if type(decoded) == "table" then
                     if decoded.ok then
                         ok, val = true, decoded.result

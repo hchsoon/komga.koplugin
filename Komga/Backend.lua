@@ -1,7 +1,7 @@
 --[[
 Komga/Backend.lua — Komga HTTP 层与业务编排
 
-封装 Komga 服务器的 HTTP 请求(经 Komga/ApiClient 单一 REST 客户端, socket.http + dkjson)
+封装 Komga 服务器的 HTTP 请求(经 Komga/ApiClient 单一 REST 客户端, socket.http, 编解码 Komga/Json: rapidjson 优先)
 与本地缓存编排, 是插件对外的主要服务入口。
 
 ━━━ 名词对照(重要: 插件内部命名与 Komga 官方名词不同)━━━

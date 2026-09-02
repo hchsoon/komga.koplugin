@@ -1,7 +1,7 @@
 --[[
 Komga/ApiClient.lua — Komga REST 单一 HTTP 客户端(取代 Spore + KomgaSpec 双栈)
 
-- 底层复用 Komga/HttpRequest.pGetUrlContent(socket.http), dkjson 编解码
+- 底层复用 Komga/HttpRequest.pGetUrlContent(socket.http), 编解码经 Komga/Json(rapidjson 优先)
 - 请求头与旧 KomgaAuth/ForceJSON/FormatEpubJSON 中间件等价:
   X-API-Key / user-agent / Accept(含 Readium 媒体类型, /positions 与
   /progression 端点没有对应 Accept 会 406 Not Acceptable)
@@ -10,7 +10,7 @@ Komga/ApiClient.lua — Komga REST 单一 HTTP 客户端(取代 Spore + KomgaSpe
   非 JSON 体原样返回字符串
 - 供 Backend:komgaApi 包装(超时/错误映射/content 摘取语义不变)
 ]]
-local dkjson = require("dkjson")
+local Json = require("Komga/Json")
 local ltn12 = require("ltn12")
 local socket_url = require("socket.url")
 
@@ -84,7 +84,7 @@ function ApiClient:request(method, path, query, payload, opts)
 
     local body
     if payload ~= nil then
-        body = dkjson.encode(payload)
+        body = Json.encode(payload)
         headers["content-type"] = "application/json"
         headers["content-length"] = tostring(#body)
     end
@@ -118,7 +118,7 @@ function ApiClient:request(method, path, query, payload, opts)
         or content_type:find("application/webpub+json", 1, true)
         or content_type:find("application/vnd.readium.position-list+json", 1, true)
         or content_type:find("application/vnd.readium.progression+json", 1, true) then
-        local decoded = dkjson.decode(data)
+        local decoded = Json.decode(data)
         if type(decoded) ~= "table" then
             return nil, "JSON decode failed"
         end
