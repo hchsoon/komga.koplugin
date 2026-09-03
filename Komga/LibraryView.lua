@@ -598,22 +598,30 @@ function LibraryView:openMenu()
             end)
         end
     }}, {{
-        text = Icons.FA_BOOK .. " 网格视图切换",
+        text_func = function()
+            local ok_bm, BookInfoManager = pcall(require, "plugins/coverbrowser.koplugin/bookinfomanager")
+            local curr = ok_bm and BookInfoManager.getSetting and BookInfoManager:getSetting("filemanager_display_mode")
+            local label = curr == "grid" and "网格" or curr == "list_image_meta" and "列表(元数据)" or "经典列表"
+            return Icons.FA_BOOK .. " 视图模式 [" .. label .. "]"
+        end,
         callback = function()
             UIManager:close(dialog)
             local ok_plugin, PluginLoader = pcall(require, "pluginloader")
             local cb = ok_plugin and PluginLoader.getPluginInstance and PluginLoader:getPluginInstance("coverbrowser")
             if not (cb and cb.setDisplayMode) then
-                MessageBox:notice('未找到 CoverBrowser 插件, 网格视图不可用')
+                MessageBox:notice('未找到 CoverBrowser 插件, 视图切换不可用')
                 return
             end
             local ok_bm, BookInfoManager = pcall(require, "plugins/coverbrowser.koplugin/bookinfomanager")
             local curr = ok_bm and BookInfoManager.getSetting and BookInfoManager:getSetting("filemanager_display_mode")
-            local next_mode = (curr == "grid") and "list_image_meta" or "grid"
+            -- 三态循环: 经典列表 -> 列表(元数据, kokomga 观感: 封面+标题+进度) -> 网格 -> ...
+            local cycle = { classic = "list_image_meta", list_image_meta = "grid", grid = "classic" }
+            local next_mode = cycle[curr or "classic"] or "list_image_meta"
             pcall(function()
                 cb:setDisplayMode(next_mode)
             end)
-            MessageBox:notice(next_mode == "grid" and "已切换到网格视图" or "已切换到列表视图")
+            local label = next_mode == "grid" and "网格" or next_mode == "list_image_meta" and "列表(元数据)" or "经典列表"
+            MessageBox:notice("视图模式：" .. label)
         end
     }}, {{
         text = string.format("%s 整卷原文件模式 %s", Icons.FA_BOOK,
@@ -2569,6 +2577,7 @@ local function init_book_browser(parent)
             end
             doc_settings:flushCustomMetadata(lnk_path)
             doc_settings:flush()
+            self:emitMetadataChanged(lnk_path)
         end
         -- 主 sidecar 也写入 number, 便于 openFile 读取
         local lnk_config = Backend:getLuaConfig(lnk_path)
@@ -2674,14 +2683,14 @@ local function init_book_browser(parent)
 
 
     function book_browser:emitMetadataChanged(path)
-        --[[
-        local prop_updated = {
-            filepath = file,
-            doc_props = book_props,
-            metadata_key_updated = prop_updated,
-            metadata_value_old = prop_value_old,
-        }
-        ]]
+        -- CoverBrowser 对每个文件有独立缓存行, 写完 sidecar 后必须删缓存行,
+        -- 否则列表/网格一直显示旧元数据(文件名/无进度)
+        pcall(function()
+            local BookInfoManager = require("plugins/coverbrowser.koplugin/bookinfomanager")
+            if BookInfoManager and BookInfoManager.deleteBookInfo then
+                BookInfoManager:deleteBookInfo(path)
+            end
+        end)
         UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", path))
         UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
     end
@@ -2722,7 +2731,16 @@ local function init_book_browser(parent)
             doc_settings:saveSetting("doc_props", {
                 pages = bookinfo.booksCount,
                 pageno = bookinfo.durChapterIndex
-            }):flushCustomMetadata(lnk_path)
+            })
+            -- 系列行进度: 已读卷数/总卷数 -> CoverBrowser 列表进度条
+            if H.is_num(bookinfo.booksCount) and bookinfo.booksCount > 0
+                and H.is_num(bookinfo.durChapterIndex) and bookinfo.durChapterIndex > 0 then
+                doc_settings:saveSetting("percent_finished",
+                    math.min(bookinfo.durChapterIndex / bookinfo.booksCount, 1))
+                doc_settings:saveSetting("doc_pages", bookinfo.booksCount)
+            end
+            doc_settings:flushCustomMetadata(lnk_path)
+            self:emitMetadataChanged(lnk_path)
         end
 
         self:emitMetadataChanged(lnk_path)
