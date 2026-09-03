@@ -27,10 +27,35 @@ function TaskQueue.getChannel(name, max_workers)
             queue = {},
             paused = false,
             seq = 0,
+            tasks = {}, -- id -> task(queued/running + handle)
         }, Channel)
         TaskQueue.channels[name] = ch
     end
     return ch
+end
+
+function TaskQueue.listAll()
+    local out = {}
+    for name, ch in pairs(TaskQueue.channels) do
+        for _, t in ipairs(ch:list()) do
+            out[#out + 1] = t
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.channel ~= b.channel then
+            return a.channel < b.channel
+        end
+        return a.id < b.id
+    end)
+    return out
+end
+
+function TaskQueue.cancel(channel_name, id)
+    local ch = TaskQueue.channels[channel_name]
+    if not ch then
+        return false
+    end
+    return ch:cancelTask(id)
 end
 
 function TaskQueue.hasAnyTasks()
@@ -80,7 +105,10 @@ function Channel:push(func, callback, opts)
         callback = callback,
         opts = opts,
         retries = 0,
+        status = "queued",
+        channel = self.name,
     }
+    self.tasks[task.id] = task
     if opts.insert_at_head then
         table.insert(self.queue, 1, task)
     else
@@ -102,13 +130,20 @@ function Channel:_pump()
 end
 
 function Channel:_run(task)
-    Async_run_guarded(task.func, function(ok, result, err)
+    task.status = "running"
+    task.handle = Async_run_guarded(task.func, function(ok, result, err)
         self.active = self.active - 1
+        -- 任务终结(完成/失败/取消/超时)即离册; 重试的重新入册由下方 queue 插入时补回
+        if not (not ok and task.retries < (task.opts.max_retries or 0)) then
+            self.tasks[task.id] = nil
+        end
         local max_retries = task.opts.max_retries or 0
         if not ok and task.retries < max_retries then
             task.retries = task.retries + 1
             logger.warn(string.format("[task:%s] #%d(%s) 失败, 重试 %d/%d: %s",
                 self.name, task.id, tostring(task.tag), task.retries, max_retries, tostring(err)))
+            task.status = "queued"
+            self.tasks[task.id] = task
             table.insert(self.queue, task)
         else
             if not ok and task.opts.tag then
@@ -139,7 +174,46 @@ function Channel:resume()
 end
 
 -- 清空待处理队列(已启动的子进程任务不受影响, 由其超时/完成自行收敛)
+function Channel:list()
+    local out = {}
+    for _, task in pairs(self.tasks) do
+        out[#out + 1] = {
+            id = task.id,
+            tag = task.tag,
+            status = task.status,
+            channel = self.name,
+        }
+    end
+    table.sort(out, function(a, b)
+        if a.status ~= b.status then
+            return a.status == "running"
+        end
+        return a.id < b.id
+    end)
+    return out
+end
+
+function Channel:cancelTask(id)
+    for i, task in ipairs(self.queue) do
+        if task.id == id then
+            table.remove(self.queue, i)
+            self.tasks[id] = nil
+            return true
+        end
+    end
+    local task = self.tasks[id]
+    if task and task.status == "running" and task.handle and task.handle.cancel then
+        task.handle.cancel()
+        self.tasks[id] = nil
+        return true
+    end
+    return false
+end
+
 function Channel:clear()
+    for _, task in ipairs(self.queue) do
+        self.tasks[task.id] = nil
+    end
     self.queue = {}
 end
 

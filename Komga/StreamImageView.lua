@@ -182,6 +182,10 @@ function M:onClose()
     pcall(function()
         Backend:clearStreamPageCache(self.bookinfo and self.bookinfo.cache_id)
     end)
+    -- 内存清理: 长会话(页缓存+图片 bb)后归还分配器
+    pcall(function()
+        require("Komga/MemCleaner").sweep()
+    end)
     Backend:closeDbManager()
     if H.is_tbl(self.chapter) and H.is_num(self.chapter_imglist_cur) then
         Backend:saveVolumeProgress(self.chapter)

@@ -61,7 +61,7 @@ function Store:getAllSeriesByUI(bookShelfId, sort_mode)
         return {}
     end
     local sql_stmt = [[
-    SELECT bookCacheId, name, author, originName, lastRead FROM series WHERE isEnabled = 1 AND bookShelfId = ?
+    SELECT bookCacheId, name, author, originName, lastRead, durChapterIndex, durChapterPos FROM series WHERE isEnabled = 1 AND bookShelfId = ?
     ]]
     local result = self:execute(sql_stmt, {bookShelfId})
     local series = {}
@@ -73,7 +73,9 @@ function Store:getAllSeriesByUI(bookShelfId, sort_mode)
                 name = row[2],
                 author = row[3],
                 originName = row[4],
-                lastRead = tonumber(row[5])
+                lastRead = tonumber(row[5]),
+                durChapterIndex = tonumber(row[6]),
+                durChapterPos = tonumber(row[7])
             }
         end
     end

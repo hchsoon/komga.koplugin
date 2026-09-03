@@ -564,6 +564,20 @@ function LibraryView:openMenu()
             self:openCacheManager()
         end
     }}, {{
+        text = Icons.FA_MAGNIFYING_GLASS .. " 任务管理",
+        callback = function()
+            UIManager:close(dialog)
+            require("Komga/TaskManagerView").show()
+        end
+    }}, {{
+        text = Icons.FA_PLUG .. " 内存清理",
+        callback = function()
+            UIManager:close(dialog)
+            local res = require("Komga/MemCleaner").sweep()
+            MessageBox:notice(string.format("内存清理完成: %.1f MB -> %.1f MB (释放 %.1f MB)",
+                res.before / 1024, res.after / 1024, res.freed / 1024))
+        end
+    }}, {{
         text = string.format("%s 书架排序 [%s]", Icons.FA_BOOK,
             (settings.series_sort_mode == "name" and "名称" or
             settings.series_sort_mode == "last_read" and "最后阅读" or "更新时间")),
@@ -2791,6 +2805,11 @@ local function init_book_menu(parent)
     end
 
     function book_menu:onPrimaryMenuChoice(item)
+        if item.continue_read then
+            -- 直达上次阅读的那卷(走完整分卷打开/续读流程)
+            self.parent_ref:openVolumeShortcut(item.cache_id, item.number, nil)
+            return
+        end
         local model = KomgaModel:new(item.cache_id)
         local bookinfo = model and model:getSeries() or nil
         self.parent_ref.selected_item = item
@@ -2819,6 +2838,14 @@ local function init_book_menu(parent)
     end
 
     function book_menu:onRefreshLibrary()
+        -- beforeWifi 模式: 离线时提示联网, 联网后自动补跑(而非静默失败)
+        if not NetworkMgr:isConnected() then
+            MessageBox:notice("当前离线：连接网络后将自动刷新书架")
+            NetworkMgr:runWhenOnline(function()
+                pcall(function() self:onRefreshLibrary() end)
+            end)
+            return
+        end
             Backend:closeDbManager()
             MessageBox:loading("Refreshing Library", function()
                 return Backend:refreshLibraryCache(parent.ui_refresh_time)
@@ -2924,6 +2951,21 @@ local function init_book_menu(parent)
 
     function book_menu:generateItemTableFromMangas(books)
         local item_table = {}
+        -- 书架顶部"继续阅读": 最近读过且有进度定位的系列, 直达上次那卷
+        for _, b in ipairs(books) do
+            if H.is_num(b.durChapterIndex) and b.durChapterIndex > 0
+                and H.is_num(b.lastRead) and b.lastRead > 0 then
+                item_table[1] = {
+                    continue_read = true,
+                    cache_id = b.cache_id,
+                    number = b.durChapterIndex,
+                    text = string.format("%s 继续阅读: %s (卷 %s)", Icons.FA_PLAY,
+                        tostring(b.name), tostring(b.durChapterIndex)),
+                    mandatory = Icons.FA_PLAY,
+                }
+                break
+            end
+        end
         if self.show_search_item == true then
             item_table[1] = {
                 text = string.format('%s Search...', Icons.FA_MAGNIFYING_GLASS),

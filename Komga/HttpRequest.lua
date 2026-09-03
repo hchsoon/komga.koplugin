@@ -79,15 +79,29 @@ local function get_image_format_head8(image_data)
     end
 end
 
+-- 按 URL scheme 选择传输(socket.http / ssl.https, 接口同构)
+local function pick_http(url)
+    if url:find("^https://") then
+        local ok, https = pcall(require, "ssl.https")
+        if ok and https then
+            return https
+        end
+        return nil, "https unavailable"
+    end
+    return require("socket.http")
+end
 local function pGetUrlContent(options, is_create)
 
     local ltn12 = require("ltn12")
     local socket = require("socket")
-    local http = require("socket.http")
     local socketutil = require("socketutil")
     local socket_url = require("socket.url")
 
     local url = options.url
+    local http, http_err = pick_http(url)
+    if not http then
+        return false, http_err
+    end
     local timeout = options.timeout or 10
     local maxtime = options.maxtime or options.timeout + 20
     local file_fp = options.file
@@ -165,11 +179,14 @@ options: { url, dest, headers, timeout, maxtime, on_progress, should_cancel, res
 返回 true, {bytes, resumed} 或 false, err ]]
 local function pStreamToFile(options)
     local socket = require("socket")
-    local http = require("socket.http")
     local socketutil = require("socketutil")
     local socket_url = require("socket.url")
 
     local url = options.url
+    local http, http_err = pick_http(url)
+    if not http then
+        return false, http_err
+    end
     local dest = options.dest
     if type(url) ~= "string" or type(dest) ~= "string" or dest == "" then
         return false, "bad params"
