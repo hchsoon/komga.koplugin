@@ -413,45 +413,186 @@ function LibraryView:openMenu()
     local dialog
     self:getInstance()
     local settings = Backend:getSettings()
-    local buttons = {{{
+    -- 多级菜单: 子菜单复用主菜单对话框样式; dialog 为所有按钮闭包共享的 upvalue,
+    -- 各按钮内原有的 UIManager:close(dialog) 关闭的是当前所在层
+    local function showSubmenu(title, btns)
+        dialog = require("ui/widget/buttondialog"):new{
+            title = title,
+            title_align = "center",
+            title_face = Font:getFace("x_smalltfont"),
+            info_face = Font:getFace("tfont"),
+            buttons = btns,
+        }
+        UIManager:show(dialog)
+    end
+
+    local function backRow()
+        return {{
+            text = Icons.UNICODE_ARROW_LEFT .. " 返回主菜单",
+            callback = function()
+                UIManager:close(dialog)
+                self:openMenu()
+            end
+        }}
+    end
+
+    -- 服务器
+    local function serverButtons()
+        local rows = {
+            {
         text = Icons.FA_GLOBE .. " Komga WEB地址",
         callback = function()
             UIManager:close(dialog)
             self:openInstalledReadSource()
         end
-    }}, {{
+            },
+            {
         text = Icons.FA_PLUG .. " Komga API Key",
         callback = function()
             UIManager:close(dialog)
             self:openApiKeySetting()
         end
-    }}, {{
+            },
+            {
         text = Icons.FA_GLOBE .. " 服务器配置",
         callback = function()
             UIManager:close(dialog)
             self:openServerProfileManager()
         end
-    }}, {{
-        text = Icons.FA_FOLDER .. " 缓存管理",
+            },
+        }
+        table.insert(rows, backRow())
+        return rows
+    end
+
+    -- 阅读偏好
+    local function readingButtons()
+        local rows = {
+            {
+        text = string.format("%s 整卷原文件模式 %s", Icons.FA_BOOK,
+            (settings.whole_file_mode and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
-            self:openCacheManager()
+            MessageBox:confirm(string.format(
+                "当前: %s \r\n \r\n开启后 EPUB/漫画分卷直接下载原文件(.epub/.cbz)交 KOReader 原生引擎渲染：兼容性最好(原生目录/内链/字体), 但进度定位精度降为整卷比例, 且章节级预载/按需下载失效。关闭则走逐章管线。",
+                (settings.whole_file_mode and '[整卷原文件]' or '[逐章管线]')), function(result)
+                if result then
+                    settings.whole_file_mode = not settings.whole_file_mode and true or nil
+                    return saveSettingsAndNotify(settings, function(data)
+                        MessageBox:notice("已切换, 下次下载生效")
+                    end)
+                end
+            end)
         end
-    }}, {{
-        text = Icons.FA_MAGNIFYING_GLASS .. " 任务管理",
+            },
+            {
+        text = string.format("%s 预载数量 [%s]", Icons.FA_BOOK,
+            tostring(settings.preload_count or 3)),
         callback = function()
             UIManager:close(dialog)
-            require("Komga/TaskManagerView").show()
+            MessageBox:input(nil, nil, {
+                title = "设置预载数量",
+                input = tostring(settings.preload_count or 3),
+                description = "阅读时后台预载的后几页(EPUB)或后几卷(漫画), 1-10。",
+                condensed = true,
+                save_callback = function(input_text)
+                    local n = tonumber(input_text)
+                    if not n or n < 1 or n > 10 then
+                        MessageBox:notice('请输入 1-10 的数字')
+                        return false
+                    end
+                    settings.preload_count = math.floor(n)
+                    return saveSettingsAndNotify(settings, function(data)
+                        MessageBox:notice("预载数量已更新")
+                    end)
+                end,
+                allow_newline = false
+            })
         end
-    }}, {{
-        text = Icons.FA_PLUG .. " 内存清理",
+            },
+            {
+        text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,
+            (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
-            local res = require("Komga/MemCleaner").sweep()
-            MessageBox:notice(string.format("内存清理完成: %.1f MB -> %.1f MB (释放 %.1f MB)",
-                res.before / 1024, res.after / 1024, res.freed / 1024))
+            MessageBox:confirm(string.format(
+                "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
+                (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
+                if result then
+                    settings.stream_image_view = not settings.stream_image_view or nil
+                    saveSettingsAndNotify(settings, function(data)
+                        MessageBox:notice("设置成功")
+                        self:closeMenu()
+                    end)
+                end
+            end, {
+                ok_text = "切换",
+                cancel_text = "取消"
+            })
         end
-    }}, {{
+            },
+            {
+        text = string.format("%s 流式双页模式 %s", Icons.FA_BOOK, stream_dual_mode_label(settings)),
+        callback = function()
+            UIManager:close(dialog)
+            -- 三态循环: 自动(横屏开) -> 常开 -> 关闭
+            local order = {"auto", "on", "off"}
+            local cur = settings.stream_dual_page or "auto"
+            local next_mode = "auto"
+            for i, m in ipairs(order) do
+                if m == cur and order[i + 1] then
+                    next_mode = order[i + 1]
+                end
+            end
+            settings.stream_dual_page = next_mode ~= "auto" and next_mode or nil
+            saveSettingsAndNotify(settings, function(data)
+                MessageBox:notice("流式双页: " .. stream_dual_mode_label(settings) ..
+                    " (重新打开分卷生效)")
+            end)
+        end
+            },
+            {
+        text = string.format("%s 双页首页为封面 %s", Icons.FA_BOOK,
+            (settings.stream_dual_first_cover ~= false and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        callback = function()
+            UIManager:close(dialog)
+            -- 开启: 封面独占一屏, 之后 (2,3)(4,5) 配对(漫画书标准拼页); 关闭: (1,2)(3,4)
+            settings.stream_dual_first_cover = settings.stream_dual_first_cover == false and true or false
+            saveSettingsAndNotify(settings, function(data)
+                MessageBox:notice("双页首页为封面: " ..
+                    (settings.stream_dual_first_cover ~= false and "开" or "关") ..
+                    " (重新打开分卷生效)")
+            end)
+        end
+            },
+            {
+        text = string.format("%s 流式翻页方向 %s", Icons.FA_BOOK, stream_rtl_label(settings)),
+        callback = function()
+            UIManager:close(dialog)
+            -- 三态循环: 按书自动 -> 右开(RTL) -> 左开(LTR)
+            local forced = settings.stream_rtl
+            if forced == nil then
+                settings.stream_rtl = true
+            elseif forced == true then
+                settings.stream_rtl = false
+            else
+                settings.stream_rtl = nil
+            end
+            saveSettingsAndNotify(settings, function(data)
+                MessageBox:notice("流式翻页方向: " .. stream_rtl_label(settings) ..
+                    " (重新打开分卷生效)")
+            end)
+        end
+            },
+        }
+        table.insert(rows, backRow())
+        return rows
+    end
+
+    -- 书架
+    local function shelfButtons()
+        local rows = {
+            {
         text = string.format("%s 书架排序 [%s]", Icons.FA_BOOK,
             (settings.series_sort_mode == "name" and "名称" or
             settings.series_sort_mode == "updated" and "更新时间" or "最后阅读")),
@@ -468,7 +609,8 @@ function LibraryView:openMenu()
                     settings.series_sort_mode == "updated" and "更新时间" or "最后阅读"))
             end)
         end
-    }}, {{
+            },
+            {
         text_func = function()
             local ok_bm, BookInfoManager = pcall(require, "plugins/coverbrowser.koplugin/bookinfomanager")
             local curr = ok_bm and BookInfoManager.getSetting and BookInfoManager:getSetting("filemanager_display_mode")
@@ -494,129 +636,27 @@ function LibraryView:openMenu()
             local label = next_mode == "grid" and "网格" or next_mode == "list_image_meta" and "列表(元数据)" or "经典列表"
             MessageBox:notice("视图模式：" .. label)
         end
-    }}, {{
-        text = string.format("%s 整卷原文件模式 %s", Icons.FA_BOOK,
-            (settings.whole_file_mode and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm(string.format(
-                "当前: %s \r\n \r\n开启后 EPUB/漫画分卷直接下载原文件(.epub/.cbz)交 KOReader 原生引擎渲染：兼容性最好(原生目录/内链/字体), 但进度定位精度降为整卷比例, 且章节级预载/按需下载失效。关闭则走逐章管线。",
-                (settings.whole_file_mode and '[整卷原文件]' or '[逐章管线]')), function(result)
-                if result then
-                    settings.whole_file_mode = not settings.whole_file_mode and true or nil
-                    return saveSettingsAndNotify(settings, function(data)
-                        MessageBox:notice("已切换, 下次下载生效")
-                    end)
-                end
-            end)
-        end
-    }}, {{
-        text = string.format("%s 预载数量 [%s]", Icons.FA_BOOK,
-            tostring(settings.preload_count or 3)),
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:input(nil, nil, {
-                title = "设置预载数量",
-                input = tostring(settings.preload_count or 3),
-                description = "阅读时后台预载的后几页(EPUB)或后几卷(漫画), 1-10。",
-                condensed = true,
-                save_callback = function(input_text)
-                    local n = tonumber(input_text)
-                    if not n or n < 1 or n > 10 then
-                        MessageBox:notice('请输入 1-10 的数字')
-                        return false
-                    end
-                    settings.preload_count = math.floor(n)
-                    return saveSettingsAndNotify(settings, function(data)
-                        MessageBox:notice("预载数量已更新")
-                    end)
-                end,
-                allow_newline = false
-            })
-        end
-    }}, {{
-        text = string.format("%s 调试日志 %s", Icons.FA_PLUG,
-            (settings.debug_log and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
-        callback = function()
-            UIManager:close(dialog)
-            settings.debug_log = not settings.debug_log and true or nil
-            return saveSettingsAndNotify(settings, function(data)
-                require("Komga/Logger").setDebug(settings.debug_log == true)
-                MessageBox:notice(string.format("调试日志：%s（写入 komga.log）",
-                    settings.debug_log and "开" or "关"))
-            end)
-        end
-    }}, {{
-        text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,
-            (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm(string.format(
-                "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
-                (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
-                if result then
-                    settings.stream_image_view = not settings.stream_image_view or nil
-                    saveSettingsAndNotify(settings, function(data)
-                        MessageBox:notice("设置成功")
-                        self:closeMenu()
-                    end)
-                end
-            end, {
-                ok_text = "切换",
-                cancel_text = "取消"
-            })
-        end
-    }}, {{
-        text = string.format("%s 流式双页模式 %s", Icons.FA_BOOK, stream_dual_mode_label(settings)),
-        callback = function()
-            UIManager:close(dialog)
-            -- 三态循环: 自动(横屏开) -> 常开 -> 关闭
-            local order = {"auto", "on", "off"}
-            local cur = settings.stream_dual_page or "auto"
-            local next_mode = "auto"
-            for i, m in ipairs(order) do
-                if m == cur and order[i + 1] then
-                    next_mode = order[i + 1]
-                end
+            },
+        }
+    -- 非触屏设备无下拉刷新, 书架子菜单提供显式同步入口
+    if not Device:isTouchDevice() then
+        table.insert(rows, {{
+            text = Icons.FA_EXCLAMATION_CIRCLE .. ' ' .. " 同步书架",
+            callback = function()
+                UIManager:close(dialog)
+                self:onRefreshLibrary()
             end
-            settings.stream_dual_page = next_mode ~= "auto" and next_mode or nil
-            saveSettingsAndNotify(settings, function(data)
-                MessageBox:notice("流式双页: " .. stream_dual_mode_label(settings) ..
-                    " (重新打开分卷生效)")
-            end)
-        end
-    }}, {{
-        text = string.format("%s 双页首页为封面 %s", Icons.FA_BOOK,
-            (settings.stream_dual_first_cover ~= false and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
-        callback = function()
-            UIManager:close(dialog)
-            -- 开启: 封面独占一屏, 之后 (2,3)(4,5) 配对(漫画书标准拼页); 关闭: (1,2)(3,4)
-            settings.stream_dual_first_cover = settings.stream_dual_first_cover == false and true or false
-            saveSettingsAndNotify(settings, function(data)
-                MessageBox:notice("双页首页为封面: " ..
-                    (settings.stream_dual_first_cover ~= false and "开" or "关") ..
-                    " (重新打开分卷生效)")
-            end)
-        end
-    }}, {{
-        text = string.format("%s 流式翻页方向 %s", Icons.FA_BOOK, stream_rtl_label(settings)),
-        callback = function()
-            UIManager:close(dialog)
-            -- 三态循环: 按书自动 -> 右开(RTL) -> 左开(LTR)
-            local forced = settings.stream_rtl
-            if forced == nil then
-                settings.stream_rtl = true
-            elseif forced == true then
-                settings.stream_rtl = false
-            else
-                settings.stream_rtl = nil
-            end
-            saveSettingsAndNotify(settings, function(data)
-                MessageBox:notice("流式翻页方向: " .. stream_rtl_label(settings) ..
-                    " (重新打开分卷生效)")
-            end)
-        end
-    }}, {{
+        }})
+    end
+
+        table.insert(rows, backRow())
+        return rows
+    end
+
+    -- 快捷方式
+    local function browserButtons()
+        local rows = {
+            {
         text = string.format("%s 浏览器目录名 [%s]", Icons.FA_FOLDER,
             settings.browser_dir_name or "默认"),
         callback = function()
@@ -646,7 +686,8 @@ function LibraryView:openMenu()
                 allow_newline = false
             })
         end
-    }}, {{
+            },
+            {
         text = string.format("%s 自动生成快捷方式 %s", Icons.FA_FOLDER,
             (settings.disable_browser and Icons.UNICODE_STAR_OUTLINE or Icons.UNICODE_STAR)),
         callback = function()
@@ -669,7 +710,52 @@ function LibraryView:openMenu()
                 cancel_text = "取消"
             })
         end
-    }}, {{
+            },
+        }
+        table.insert(rows, backRow())
+        return rows
+    end
+
+    -- 缓存与维护
+    local function maintenanceButtons()
+        local rows = {
+            {
+        text = Icons.FA_FOLDER .. " 缓存管理",
+        callback = function()
+            UIManager:close(dialog)
+            self:openCacheManager()
+        end
+            },
+            {
+        text = Icons.FA_MAGNIFYING_GLASS .. " 任务管理",
+        callback = function()
+            UIManager:close(dialog)
+            require("Komga/TaskManagerView").show()
+        end
+            },
+            {
+        text = Icons.FA_PLUG .. " 内存清理",
+        callback = function()
+            UIManager:close(dialog)
+            local res = require("Komga/MemCleaner").sweep()
+            MessageBox:notice(string.format("内存清理完成: %.1f MB -> %.1f MB (释放 %.1f MB)",
+                res.before / 1024, res.after / 1024, res.freed / 1024))
+        end
+            },
+            {
+        text = string.format("%s 调试日志 %s", Icons.FA_PLUG,
+            (settings.debug_log and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        callback = function()
+            UIManager:close(dialog)
+            settings.debug_log = not settings.debug_log and true or nil
+            return saveSettingsAndNotify(settings, function(data)
+                require("Komga/Logger").setDebug(settings.debug_log == true)
+                MessageBox:notice(string.format("调试日志：%s（写入 komga.log）",
+                    settings.debug_log and "开" or "关"))
+            end)
+        end
+            },
+            {
         text = string.format("%s Clear all caches", Icons.FA_TIMES),
         callback = function()
             UIManager:close(dialog)
@@ -698,7 +784,50 @@ function LibraryView:openMenu()
                     cancel_text = "取消"
                 })
         end
-    }}, {{
+            },
+        }
+        table.insert(rows, backRow())
+        return rows
+    end
+
+    local buttons = {
+        {
+            {
+                text = Icons.FA_GLOBE .. "服务器",
+                callback = function()
+                    UIManager:close(dialog)
+                    showSubmenu("Komga 设置 · 服务器", serverButtons())
+                end
+            },
+            {
+                text = Icons.FA_BOOK .. "阅读偏好",
+                callback = function()
+                    UIManager:close(dialog)
+                    showSubmenu("Komga 设置 · 阅读偏好", readingButtons())
+                end
+            },
+            {
+                text = Icons.FA_BOOK .. "书架",
+                callback = function()
+                    UIManager:close(dialog)
+                    showSubmenu("Komga 设置 · 书架", shelfButtons())
+                end
+            },
+            {
+                text = Icons.FA_FOLDER .. "快捷方式",
+                callback = function()
+                    UIManager:close(dialog)
+                    showSubmenu("Komga 设置 · 快捷方式", browserButtons())
+                end
+            },
+            {
+                text = Icons.FA_DATABASE .. "缓存与维护",
+                callback = function()
+                    UIManager:close(dialog)
+                    showSubmenu("Komga 设置 · 缓存与维护", maintenanceButtons())
+                end
+            },
+            {
         text = Icons.FA_QUESTION_CIRCLE .. ' ' .. "关于/更新",
         callback = function()
             UIManager:close(dialog)
@@ -727,17 +856,9 @@ function LibraryView:openMenu()
                 alignment = "left"
             })
         end
-    }}}
-
-    if not Device:isTouchDevice() then
-        table.insert(buttons, 4, {{
-            text = Icons.FA_EXCLAMATION_CIRCLE .. ' ' .. " 同步书架",
-            callback = function()
-                UIManager:close(dialog)
-                self:onRefreshLibrary()
-            end
-        }})
-    end
+            },
+        }
+    }
 
     if not self.disk_available then
         local cache_dir = H.getTempDirectory()
