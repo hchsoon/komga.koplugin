@@ -131,7 +131,7 @@ end
 
 -- 设置对话框/服务器配置/设置大菜单: 方法体在 Komga/SettingsDialogs
 -- (install(LibraryView) 注入, 函数体保持 self 语义, 避免模块环)
-require("Komga/SettingsDialogs").install(LibraryView)
+require("Komga/SettingsDialogs")(LibraryView)
 
 -- 浏览器目录名/匹配逻辑收敛在 Komga/Paths(常量单一来源)
 local function is_komga_browser_dir_path(file_path)
@@ -1022,11 +1022,11 @@ function LibraryView:showVolumeEpubToc(chapter)
 end
 
 -- ReaderUI 事件胶水: 方法体在 Komga/ReaderHooks(install 注入)
-require("Komga/ReaderHooks").install(LibraryView)
+require("Komga/ReaderHooks")(LibraryView)
 
 -- 浏览器快捷方式引擎与书架菜单: 构造函数在 Komga/BrowserViews
 -- (install(LibraryView) 返回构造函数, 保持原 local 调用点不变)
-local init_book_browser, init_book_menu = require("Komga/BrowserViews").install(LibraryView)
+local init_book_browser, init_book_menu = require("Komga/BrowserViews")(LibraryView)
 
 function LibraryView:getBrowserHomeDir(skip_check)
     local home_dir = H.getHomeDir()

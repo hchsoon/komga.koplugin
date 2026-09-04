@@ -819,4 +819,5 @@ local function init_book_menu(parent)
     parent.book_menu = book_menu
     return book_menu
 end
+    return init_book_browser, init_book_menu
 end
