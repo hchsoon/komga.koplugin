@@ -14,6 +14,22 @@ local H = require("Komga/Helper")
 
 local Store = {}
 
+-- 列描述(queryObjects 用, 顺序与各 SELECT 列序一致)。
+local EPUB_CHAPTER_COLS = {
+    { "number", "number" }, { "title" }, { "url" }, { "isRead", "bool01" },
+    { "cacheFilePath" }, { "volumename" },
+}
+local EPUB_URL_COLS = {
+    { "number", "number" }, { "url" },
+}
+-- findNextEpubChapterInfo: join series 的 11 列; isDownLoaded 派生自第 4 列, 放 cols 末尾
+local EPUB_NEXT_COLS = {
+    { "number", "number" }, { "title" }, { "isRead", "bool01" }, { "cacheFilePath" },
+    { "name" }, { "author" }, { "url" }, { "durChapterIndex", "number" },
+    { "durChapterTime", "number" }, { "booksCount", "number" }, { "cacheExt" },
+    { "isDownLoaded", function(_, row) return not not row[4] end },
+}
+
 function Store:upsertEpubChapters(bookCacheId, epub_data)
     if not H.is_str(bookCacheId) or not H.is_tbl(epub_data) then
         dbg.log('BookInfoDB:upsertEpubChapters Incorrect input parameters')
@@ -100,26 +116,8 @@ WHERE
 ORDER BY c.number ASC;
     ]]
 
-    local result = self:execute(sql_stmt, chapterId)
-    local epub_list = {}
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            epub_list[i] = {
-                chapterId = chapterId,
-                number = tonumber(row[1]),
-                title = row[2],
-                url = row[3],
-                isRead = row[4] == 1,
-                cacheFilePath = row[5],
-                volumename = row[6]
-            }
-        end
-    end
-
-    return epub_list
+    local result = self:queryObjects(sql_stmt, chapterId, EPUB_CHAPTER_COLS, { chapterId = chapterId })
+    return result
 end
 function Store:getAllEpubChapterUrls(chapterId)
     if chapterId == nil then
@@ -132,19 +130,7 @@ WHERE c.chapterId = ?
 ORDER BY c.number ASC;
     ]]
 
-    local result = self:execute(sql_stmt, chapterId)
-    local items = {}
-    if result and #result > 0 then
-        for i = 1, #result, 1 do
-            local row = result[i]
-            items[i] = {
-                number = tonumber(row[1]),
-                url = row[2]
-            }
-        end
-    end
-
-    return items
+    return self:queryObjects(sql_stmt, chapterId, EPUB_URL_COLS)
 end
 function Store:getEpubChapterInfo(chapterId, epubChapterIndex)
     if not H.is_str(chapterId) or not H.is_num(epubChapterIndex) then
@@ -167,32 +153,14 @@ WHERE
     c.chapterId = ? AND c.number = ?;
     ]]
 
-    local result = self:execute(sql_stmt, {chapterId, epubChapterIndex})
-    local chapter = {}
+    local result = self:queryObjects(sql_stmt, {chapterId, epubChapterIndex}, EPUB_CHAPTER_COLS,
+        { chapterId = chapterId })
 
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            local number = tonumber(row[1])
-            chapter[i] = {
-                chapterId = chapterId,
-                number = tonumber(row[1]),
-                title = row[2],
-                url = row[3],
-                isRead = row[4] == 1,
-                cacheFilePath = row[5],
-                volumename = row[6]
-            }
-        end
-    end
-
-    if not H.is_tbl(chapter[1]) then
+    if not H.is_tbl(result[1]) then
         return {}
     end
 
-    return chapter[1]
+    return result[1]
 end
 function Store:findNextEpubChapterInfo(current_chapter, is_downloaded)
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.number == nil then
@@ -241,39 +209,14 @@ function Store:findNextEpubChapterInfo(current_chapter, is_downloaded)
 
     sql_stmt = sql_stmt .. suffix
 
-    local result = self:execute(sql_stmt, {bookCacheId, bookId ,current_number})
+    local result = self:queryObjects(sql_stmt, {bookCacheId, bookId, current_number}, EPUB_NEXT_COLS,
+        { book_cache_id = bookCacheId })
 
-    local chapter = {}
-
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            local number = tonumber(row[1])
-            chapter[i] = {
-                book_cache_id = bookCacheId,
-                title = row[2],
-                isRead = row[3] == 1,
-                cacheFilePath = row[4],
-                isDownLoaded = not not row[4],
-                name = row[5],
-                author = row[6],
-                url = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterTime = tonumber(row[9]), -- type cdata?
-                booksCount = tonumber(row[10]),
-                number = number,
-                cacheExt = row[11]
-            }
-        end
-    end
-
-    if not H.is_tbl(chapter[1]) then
+    if not H.is_tbl(result[1]) then
         return {}
     end
 
-    return chapter[1]
+    return result[1]
 end
 function Store:clearSeries(bookShelfId, book_cache_id)
 

@@ -14,6 +14,30 @@ local H = require("Komga/Helper")
 
 local Store = {}
 
+-- 分卷查询的列描述(queryObjects 用, 顺序与各 SELECT 列序一致)。
+-- cacheFilePath 恒为第 4 列, isDownLoaded 是它的派生字段, 必须放在 cols 末尾。
+local VOL_BASE_COLS = {
+    { "number", "number" }, { "title" }, { "isRead", "bool01" }, { "cacheFilePath" },
+    { "name" }, { "author" }, { "url" }, { "durChapterIndex", "number" },
+    { "durChapterTime", "number" }, { "booksCount", "number" },
+}
+local DOWNLOADED_COL = { "isDownLoaded", function(_, row) return not not row[4] end }
+-- 顺序拼接多组列描述(不能写 { unpack(t), x }: 非末位的调用会被截断成单值)
+local function mergeCols(...)
+    local t = {}
+    for i = 1, select("#", ...) do
+        local group = select(i, ...)
+        for j = 1, #group do
+            t[#t + 1] = group[j]
+        end
+    end
+    return t
+end
+local VOL_FINDNEXT_COLS = mergeCols(VOL_BASE_COLS, { { "cacheExt" }, DOWNLOADED_COL })
+local VOL_INFO_COLS = mergeCols(VOL_BASE_COLS,
+    { { "cacheExt" }, { "bookId" }, { "pages", "number" }, { "mediaType" }, DOWNLOADED_COL })
+local VOL_GETALL_COLS = mergeCols(VOL_BASE_COLS, { DOWNLOADED_COL })
+
 function Store:upsertSeries(bookShelfId, komga_data, server_address,isUpdate)
     if not H.is_str(bookShelfId) or not H.is_tbl(komga_data) then
         dbg.log('BookInfoDB:upsertSeries Incorrect input parameters')
@@ -157,32 +181,8 @@ WHERE
 ORDER BY c.number ASC;
     ]]
 
-    local result = self:execute(sql_stmt, bookCacheId)
-    local volumes = {}
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            volumes[i] = {
-                book_cache_id = bookCacheId,
-                number = tonumber(row[1]),
-                title = row[2],
-                isRead = row[3] == 1,
-                cacheFilePath = row[4],
-                isDownLoaded = not not row[4],
-                name = row[5],
-                author = row[6],
-                url = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterTime = tonumber(row[9]),
-                booksCount = tonumber(row[10])
-
-            }
-        end
-    end
-
-    return volumes
+    local result = self:queryObjects(sql_stmt, bookCacheId, VOL_GETALL_COLS, { book_cache_id = bookCacheId })
+    return result
 end
 function Store:getAllVolumesByUI(bookCacheId, is_desc_sort)
     if bookCacheId == nil then
@@ -208,26 +208,11 @@ ORDER BY c.number ]]
     else
         sql_stmt = sql_stmt .. ' ASC;'
     end
-    local result = self:execute(sql_stmt, bookCacheId)
-    local volumes = {}
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-            local number = tonumber(row[1])
-            volumes[i] = {
-                number = number,
-                title = row[2],
-                isRead = row[3] == 1,
-                isDownLoaded = not not row[4],
-                durChapterIndex = tonumber(row[5]),
-                cacheFilePath = row[4],
-                bookId = row[6]
-            }
-        end
-    end
-
-    return volumes
+    return self:queryObjects(sql_stmt, bookCacheId, {
+        { "number", "number" }, { "title" }, { "isRead", "bool01" },
+        { "cacheFilePath" }, { "durChapterIndex", "number" }, { "bookId" },
+        { "isDownLoaded", function(_, row) return not not row[4] end },
+    })
 end
 function Store:getVolumeCount(bookCacheId)
     local sql_stmt = "SELECT count(*) as total_num FROM volume WHERE  bookCacheId = '%s';"
@@ -265,20 +250,10 @@ function Store:getVolumeByBookId(bookCacheId, bookId)
 FROM volume AS c
 WHERE c.bookCacheId = ? AND c.bookId = ? LIMIT 1;
     ]]
-    local result = self:execute(sql_stmt, {bookCacheId, bookId})
-    if result and #result > 0 then
-        local row = result[1]
-        return {
-            book_cache_id = bookCacheId,
-            bookId = bookId,
-            number = tonumber(row[1]),
-            title = row[2],
-            mediaType = row[3],
-            pages = tonumber(row[4]),
-            cacheFilePath = row[5]
-        }
-    end
-    return nil
+    local result = self:queryObjects(sql_stmt, {bookCacheId, bookId}, {
+        { "number", "number" }, { "title" }, { "mediaType" }, { "pages", "number" }, { "cacheFilePath" },
+    }, { book_cache_id = bookCacheId, bookId = bookId })
+    return result[1]
 end
 function Store:getVolumeInfo(bookCacheId, number)
     if not H.is_str(bookCacheId) or not H.is_num(number) then
@@ -309,41 +284,14 @@ WHERE
     b.isEnabled = 1 AND c.bookCacheId = ? AND c.number = ?;
     ]]
 
-    local result = self:execute(sql_stmt, {bookCacheId, number})
-    local volume = {}
+    local result = self:queryObjects(sql_stmt, {bookCacheId, number}, VOL_INFO_COLS,
+        { book_cache_id = bookCacheId })
 
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            local number = tonumber(row[1])
-            volume[i] = {
-                book_cache_id = bookCacheId,
-                number = number,
-                title = row[2],
-                isRead = row[3] == 1,
-                cacheFilePath = row[4],
-                isDownLoaded = not not row[4],
-                name = row[5],
-                author = row[6],
-                url = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterTime = tonumber(row[9]),
-                booksCount = tonumber(row[10]),
-                cacheExt = row[11],
-                bookId = row[12],
-                pages = tonumber(row[13]),
-                mediaType = row[14]
-            }
-        end
-    end
-
-    if not H.is_tbl(volume[1]) then
+    if not H.is_tbl(result[1]) then
         return {}
     end
 
-    return volume[1]
+    return result[1]
 end
 function Store:getReadAheadVolumeCount(current_volume)
 
@@ -534,39 +482,14 @@ function Store:findNextVolumeInfo(current_volume, is_downloaded)
 
     sql_stmt = sql_stmt .. suffix
 
-    local result = self:execute(sql_stmt, {bookCacheId, current_volume_index})
+    local result = self:queryObjects(sql_stmt, {bookCacheId, current_volume_index}, VOL_FINDNEXT_COLS,
+        { book_cache_id = bookCacheId })
 
-    local volume = {}
-
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            local number = tonumber(row[1])
-            volume[i] = {
-                book_cache_id = bookCacheId,
-                title = row[2],
-                isRead = row[3] == 1,
-                cacheFilePath = row[4],
-                isDownLoaded = not not row[4],
-                name = row[5],
-                author = row[6],
-                url = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterTime = tonumber(row[9]), -- type cdata?
-                booksCount = tonumber(row[10]),
-                number = number,
-                cacheExt = row[11]
-            }
-        end
-    end
-
-    if not H.is_tbl(volume[1]) then
+    if not H.is_tbl(result[1]) then
         return {}
     end
 
-    return volume[1]
+    return result[1]
 end
 function Store:updateVolumeIsRead(volume, chapter_page ,isRead, is_update_timestamp)
     local bookCacheId = volume.book_cache_id

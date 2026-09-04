@@ -14,6 +14,18 @@ local H = require("Komga/Helper")
 
 local Store = {}
 
+-- 列描述(queryObjects 用, 顺序与各 SELECT 列序一致)
+local SERIES_UI_COLS = {
+    { "cache_id" }, { "name" }, { "author" }, { "originName" },
+    { "lastRead", "number" }, { "durChapterIndex", "number" }, { "durChapterPos", "number" },
+}
+local SERIES_INFO_COLS = {
+    { "cache_id" }, { "name" }, { "author" }, { "url" }, { "origin" }, { "originName" },
+    { "originOrder", "number" }, { "durChapterIndex", "number" }, { "durChapterPos", "number" },
+    { "durChapterTime", "number" }, { "durChapterTitle" }, { "wordCount" }, { "intro" },
+    { "booksCount", "number" }, { "kind" }, { "sortOrder", "number" }, { "cacheExt" }, { "coverUrl" },
+}
+
 -- 排序模式: last_read=最后阅读(默认, 刚读完的排最前)/updated=更新时间/name=名称;
 -- 手动置顶恒优先。lastRead 为 NULL(从未打开)排在最后: SQLite 中 NULL 在 DESC 时恒小于任何值
 local ORDER_BY = {
@@ -31,24 +43,7 @@ function Store:getAllSeriesByUI(bookShelfId, sort_mode)
     ]]
     sql_stmt = sql_stmt .. " ORDER BY (sortOrder = 0) DESC, " ..
         (ORDER_BY[sort_mode] or ORDER_BY.last_read)
-    local result = self:execute(sql_stmt, {bookShelfId})
-    local series = {}
-    if H.is_tbl(result) and #result > 0 then
-        for i = 1, #result, 1 do
-            local row = result[i]
-            series[i] = {
-                cache_id = row[1],
-                name = row[2],
-                author = row[3],
-                originName = row[4],
-                lastRead = tonumber(row[5]),
-                durChapterIndex = tonumber(row[6]),
-                durChapterPos = tonumber(row[7])
-            }
-        end
-    end
-
-    return series
+    return self:queryObjects(sql_stmt, {bookShelfId}, SERIES_UI_COLS)
 end
 function Store:getSeriesInfo(bookShelfId, bookCacheId)
     if bookShelfId == nil then
@@ -59,42 +54,14 @@ function Store:getSeriesInfo(bookShelfId, bookCacheId)
     originOrder, durChapterIndex, durChapterPos, durChapterTime, durChapterTitle, 
     wordCount, intro, booksCount, kind, sortOrder, cacheExt, coverUrl FROM series WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId =? ;
     ]]
-    local result = self:execute(sql_stmt, {bookShelfId, bookCacheId})
-    local series = {}
-    if result and #result > 0 then
+    local list = self:queryObjects(sql_stmt, {bookShelfId, bookCacheId}, SERIES_INFO_COLS,
+        { book_self_id = bookShelfId })
 
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            series[i] = {
-                book_self_id = bookShelfId,
-                cache_id = row[1],
-                name = row[2],
-                author = row[3],
-                url = row[4],
-                origin = row[5],
-                originName = row[6],
-                originOrder = tonumber(row[7]),
-                durChapterIndex = tonumber(row[8]),
-                durChapterPos = tonumber(row[9]),
-                durChapterTime = tonumber(row[10]),
-                durChapterTitle = row[11],
-                wordCount = row[12],
-                intro = row[13],
-                booksCount = tonumber(row[14]),
-                kind = row[15],
-                sortOrder = tonumber(row[16]),
-                cacheExt = row[17],
-                coverUrl = row[18]
-            }
-        end
-    end
-
-    if type(series[1]) ~= 'table' then
+    if type(list[1]) ~= 'table' then
         return {}
     end
 
-    return series[1]
+    return list[1]
 end
 function Store:getSeriesLastUpdateTime(bookCacheId)
     local sql_stmt = string.format(

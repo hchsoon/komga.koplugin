@@ -309,6 +309,45 @@ function M:getDB()
     return self.db
 end
 
+-- 通用"行→对象"映射(收敛各 Store 的 row[1]/row[2]... 位置式手工取列)。
+-- cols 与 SELECT 列序一一对应, 每项 {字段名[, 转换]}:
+--   转换 = "number"  -> tonumber(v)
+--   转换 = "bool01"  -> v == 1
+--   转换 = 函数      -> fn(v, row)  (自定义/派生字段, 派生条目须放在 cols 末尾,
+--                                      否则其占用的槽位会让后续字段整体错位)
+-- fixed: 可选表, 并入每个对象(如 { book_cache_id = ... }); 列映射的同名字段可覆盖它。
+function M:queryObjects(sql, params, cols, fixed)
+    local result = self:execute(sql, params)
+    local objects = {}
+    if H.is_tbl(result) then
+        for i = 1, #result do
+            local row = result[i]
+            local obj = {}
+            if fixed then
+                for fname, fval in pairs(fixed) do
+                    obj[fname] = fval
+                end
+            end
+            for j = 1, #cols do
+                local col = cols[j]
+                local v = row[j]
+                local conv = col[2]
+                if conv == "number" then
+                    obj[col[1]] = tonumber(v)
+                elseif conv == "bool01" then
+                    obj[col[1]] = v == 1
+                elseif type(conv) == "function" then
+                    obj[col[1]] = conv(v, row)
+                else
+                    obj[col[1]] = v
+                end
+            end
+            objects[i] = obj
+        end
+    end
+    return objects
+end
+
 function M:transaction(write_func, opts)
     return function(...)
         local conn = self:getDB()
