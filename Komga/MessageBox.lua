@@ -208,9 +208,8 @@ end
 
 function M:loading(message, runnable, callback, options)
     local defaultOptions = {
-        text = "\u{231B}  " .. message,
-        dismissable = false,
-        update_interval = 0.2
+        text = "\u{231B}  " .. message .. " ...",
+        dismissable = false
     }
 
     if type(options) == 'table' then
@@ -219,30 +218,17 @@ function M:loading(message, runnable, callback, options)
         end
     end
 
-    local spinner_styles = {{"|", "/", "-", "\\"}, {"\u{25D0}", "\u{25D3}", "\u{25D1}", "\u{25D2}"}}
-    math.randomseed(os.time())
-    local spinner_chars = spinner_styles[math.random(1, #spinner_styles)]
-    local spinner_index = 1
-    local updateText
-    local message_dialog
-
-    updateText = function()
-        local spinner = spinner_chars[spinner_index]
-        spinner_index = (spinner_index % #spinner_chars) + 1
-
-        defaultOptions.text = string.format("%s %s ...", message, spinner)
-
-        message_dialog = InfoMessage:new(defaultOptions)
-        UIManager:show(message_dialog)
-        UIManager:scheduleIn(defaultOptions.update_interval, updateText)
-    end
-
-    updateText()
+    -- 单控件: 创建一次、显示一次。旧实现每 0.2s new 一个 InfoMessage 且从不
+    -- close 旧的, 30 秒操作会在 UIManager 窗口栈堆 ~150 个全屏控件, 每次 show
+    -- 还触发一次全屏刷屏(墨水屏闪屏)。转圈动画本就以高频全刷为代价, 改为静态
+    -- "请稍候"(KOReader 自家 Trapper:info 同款形态); dismiss_callback 由
+    -- Trapper:dismissableRunInSubprocess 挂在本控件上, 取消语义不变。
+    local message_dialog = InfoMessage:new(defaultOptions)
+    UIManager:show(message_dialog)
 
     Trapper:wrap(function()
         local completed, return_values = Trapper:dismissableRunInSubprocess(runnable, message_dialog)
 
-        UIManager:unschedule(updateText)
         UIManager:close(message_dialog)
 
         if type(callback) == 'function' then

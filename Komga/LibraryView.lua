@@ -1098,25 +1098,63 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
 end
 
 -- 章节内进度分数(0..1): 优先 KOReader 写入的 percent_finished, 否则 last_page/doc_pages
-function LibraryView:resumeAndOpenVolume(volume)
+
+-- 子进程执行: 拉取续读定位所需的服务器数据(纯数据经管道回传, 决策/落盘仍在主线程)。
+-- 原 resumeAndOpenVolume 在 UI 线程同步发 2-3 个 GET, 慢网下点开快捷方式即冻结。
+local function fetch_resume_server_data(volume, is_epub)
+    local raw = { is_epub = is_epub }
+    if not is_epub then
+        local resp = Backend:getVolumeReadProgress(volume)
+        raw.rp = (resp and resp.body and resp.body.readProgress) or nil
+        return raw
+    end
+    local _, rev = LibraryView:epubChapterHrefMap(volume.bookId)
+    if not next(rev) then
+        -- DB 无内部章节清单: 拉 manifest 入库, 之后 href 反查可用(与旧逻辑一致)
+        pcall(Backend.getAllEpubChapters, Backend, volume)
+        _, rev = LibraryView:epubChapterHrefMap(volume.bookId)
+    end
+    raw.rev = rev
+    local prog = Backend:getBookProgression(volume.bookId)
+    raw.prog_body = (prog and prog.type == "SUCCESS" and prog.body) or nil
+    -- 与主线程决策同源的兜底条件: locator 无法映射内部章节且无整卷比例时才补页码进度
+    local loc = raw.prog_body and raw.prog_body.locator
+    local tp = loc and loc.locations and loc.locations.totalProgression
+    local prog_in_ch = loc and loc.locations and loc.locations.progression
+    local href = loc and loc.href
+    local s_idx
+    if H.is_str(href) and H.is_num(prog_in_ch) then
+        s_idx = rev and rev[(href:match("([^/]+)$") or href):lower()]
+    end
+    if not H.is_num(s_idx) and not H.is_num(tp) then
+        local resp = Backend:getVolumeReadProgress(volume)
+        raw.rp = (resp and resp.body and resp.body.readProgress) or nil
+    end
+    return raw
+end
+
+function LibraryView:resumeAndOpenVolume(volume, server_data)
     local pages = volume.pages
     local is_epub = volume.mediaType == "EPUB"
     local server_frac, server_completed
     local server_target -- EPUB: {number=内部章节, frac=章内比例}
     local local_target  -- EPUB: {number=内部章节, frac=章内比例} 本地断点
+    if not server_data then
+        -- 先在子进程拉服务器进度: 拉取期间界面保持响应, 完成后带数据重入本函数;
+        -- 拉取失败也重入(空数据退化为本地断点续读)。fork 不可用时同步降级(行为同旧版)。
+        -- fork 前关库: 子进程经 getDB 用自有连接读库/写 manifest, 主线程按需懒重开
+        Backend:closeDbManager()
+        TaskQueue.getChannel("sync", 1):push(function()
+            return fetch_resume_server_data(volume, is_epub)
+        end, function(ok, raw, err)
+            self:resumeAndOpenVolume(volume, ok and raw or {})
+        end, {timeout = 45, tag = "resume_progress"})
+        return
+    end
     if is_epub then
         -- EPUB: 服务器 locator 自带 href + 章内 progression, 直接映射内部章节定位;
         -- 不依赖 totalProgression 换算页码(各端分页规则不同, 换算会跳错章节)
-        -- 未缓存/未浏览过的卷: 数据库可能还没有内部章节清单, 服务器 locator.href 无法反查内部章节,
-        -- 续读会退化成从第 1 页打开。这里在 DB 为空时拉取一次 manifest(readingOrder) 入库, 之后 href 反查可用。
-        do
-            local _, rev = self:epubChapterHrefMap(volume.bookId)
-            if not next(rev) then
-                local okC, list = pcall(Backend.getAllEpubChapters, Backend, volume)
-            end
-        end
-        local prog = Backend:getBookProgression(volume.bookId)
-        local loc = prog and prog.type == "SUCCESS" and prog.body and prog.body.locator
+        local loc = server_data.prog_body and server_data.prog_body.locator
         local tp = loc and loc.locations and loc.locations.totalProgression
         local prog_in_ch = loc and loc.locations and loc.locations.progression
         local href = loc and loc.href
@@ -1548,25 +1586,39 @@ function LibraryView:loadAndRenderChapter(chapter)
         -- 缓存命中分支也要传递分卷阅读标记, 否则目录按钮会退回系列目录而非 EPUB 原生目录
         cache_chapter.volume_read = chapter.volume_read
         self:showReaderUI(cache_chapter)
-    else
-        -- 静默下载: 章节切换不再弹"正在下载正文"对话框(预取命中时本就无需等待;
-        -- 未命中时同步下载, 失败仅轻提示, 不打断阅读/关书流程)
-        local okdl, dlresp = pcall(Backend.downloadVolume, Backend, chapter)
-        if okdl then
-            return Backend:HandleResponse(dlresp, function(data)
-                if not (H.is_tbl(data) and H.is_str(data.cacheFilePath)) then
-                    Backend:show_notice("章节下载失败")
-                    return
-                end
-                data.volume_read = chapter.volume_read
-                self:showReaderUI(data)
-            end, function(err_msg)
-                Backend:show_notice("章节下载失败" .. (H.is_str(err_msg) and (": " .. err_msg) or ""))
-            end)
-        else
-            Backend:show_notice("章节下载失败: " .. H.errorHandler(dlresp))
-        end
+        return
     end
+    -- 静默后台下载: 未命中预取缓存时在子进程下载+内容处理, 完成后回主线程打开。
+    -- 旧版在 UI 线程同步下载, 大章节/慢网下翻章即冻结; fork 不可用时同步降级(行为同旧版)。
+    self._downloading_chapters = self._downloading_chapters or {}
+    local dl_key = tostring(chapter.bookId or chapter.number)
+    if self._downloading_chapters[dl_key] then
+        Backend:show_notice("章节后台下载中, 请稍候")
+        return
+    end
+    self._downloading_chapters[dl_key] = true
+    Backend:show_notice("章节后台下载中")
+    -- fork 前关库: 子进程经 getDB 用自有连接写库, 主线程按需懒重开
+    Backend:closeDbManager()
+    TaskQueue.getChannel("download", 1):push(function()
+        return Backend:downloadVolume(chapter)
+    end, function(ok, resp, err)
+        self._downloading_chapters[dl_key] = nil
+        if not ok then
+            Backend:show_notice("章节下载失败" .. (H.is_str(err) and (": " .. err) or ""))
+            return
+        end
+        Backend:HandleResponse(resp, function(data)
+            if not (H.is_tbl(data) and H.is_str(data.cacheFilePath)) then
+                Backend:show_notice("章节下载失败")
+                return
+            end
+            data.volume_read = chapter.volume_read
+            self:showReaderUI(data)
+        end, function(err_msg)
+            Backend:show_notice("章节下载失败" .. (H.is_str(err_msg) and (": " .. err_msg) or ""))
+        end)
+    end, {timeout = 900, tag = "chapter_download"})
 end
 
 -- 跨卷续读: 当前卷翻到末尾时问服务器"同系列下一本书"(Komga /books/:id/next),

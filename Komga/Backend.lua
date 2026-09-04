@@ -425,6 +425,19 @@ function M:refreshLibraryCache(last_refresh_time)
     end, 'refreshLibraryCache')
 end
 
+-- 关闭阅读器等路径的后台全库刷新: fork 前关库(子进程经 getDB 用自有连接, 主线程按需懒重开)。
+-- 原 UI 线程同步分页拉取在慢网下冻结界面数秒; 失败静默, 结果经回调带回(多数调用方不关心)。
+function M:refreshLibraryCacheAsync(on_done)
+    self:closeDbManager()
+    TaskQueue.getChannel("sync", 1):push(function()
+        return M.refreshLibraryCache(M)
+    end, function(ok, resp, err)
+        if on_done then
+            on_done(ok and resp or wrap_response(nil, err))
+        end
+    end, {timeout = 600, tag = "library_refresh"})
+end
+
 function M:pGetEpubManifest(volume)
     local bookId = volume.bookId
 
