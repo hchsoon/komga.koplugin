@@ -14,7 +14,8 @@ local FILE_TOTAL_TIMEOUT = 60
 local DEFAULT_BLOCK_TIMEOUT = 60
 local DEFAULT_TOTAL_TIMEOUT = -1   
 
-local USER_AGENT = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+local Paths = require("Komga/Paths")
+local USER_AGENT = Paths.USER_AGENT -- (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
 
 -- 从设置文件读取当前 X-API-Key(与 Backend.getApiKey 同源; 此处直接读文件避免循环依赖),
 -- 未设置/为空时回落 Config 预设值

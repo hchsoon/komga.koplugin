@@ -23,6 +23,7 @@ local H = require("Komga/Helper")
 local TaskQueue = require("Komga/TaskQueue")
 local Config = require("Komga/Config")
 local VolumePath = require("Komga/VolumePath")
+local Paths = require("Komga/Paths")
 
 local PlgState = require("Komga/PlgState")
 local ProgressSync = require("Komga/ProgressSync")
@@ -419,7 +420,7 @@ function LibraryView:openBrowserMenu(file)
     self:getInstance()
     self:getBrowserWidget()
     -- 分卷快捷方式分流到卷级菜单（此入口仅对 /Komga漫画/ 下的文件触发）
-    if H.is_str(file) and file:find("\u{200B}.html", 1, true) then
+    if H.is_str(file) and file:find(Paths.LNK_SUFFIX, 1, true) then
         local customedata = self.book_browser:getCustomMateData(file)
         if H.is_tbl(customedata) and customedata.type == 'volume' then
             self:openVolumeBrowserMenu(file, customedata)
@@ -498,32 +499,9 @@ function LibraryView:openBrowserMenu(file)
     UIManager:show(dialog)
 end
 
--- Komga 浏览器根目录名: 设置项 browser_dir_name 覆盖默认名(含零宽空格)。
--- 匹配同时接受默认名与自定义名(旧目录下的快捷方式仍可路由); 改名后重启生效。
-local DEFAULT_BROWSER_DIR_NAME = "Komga\u{200B}漫画"
-
-local function komga_browser_dir_names()
-    local names = {DEFAULT_BROWSER_DIR_NAME}
-    local ok, configured = pcall(function()
-        return Backend:getSettings().browser_dir_name
-    end)
-    if ok and H.is_str(configured) and configured ~= "" and configured ~= DEFAULT_BROWSER_DIR_NAME then
-        table.insert(names, (configured:gsub("[/\\]", "_")))
-    end
-    return names
-end
-
--- 路径是否位于 Komga 浏览器目录(默认名或自定义名)之下
+-- 浏览器目录名/匹配逻辑收敛在 Komga/Paths(常量单一来源)
 local function is_komga_browser_dir_path(file_path)
-    if type(file_path) ~= "string" then
-        return false
-    end
-    for _, name in ipairs(komga_browser_dir_names()) do
-        if file_path:find("/" .. name .. "/", 1, true) then
-            return true
-        end
-    end
-    return false
+    return Paths.isKomgaBrowserDirPath(file_path, Backend:getSettings().browser_dir_name)
 end
 
 -- 流式双页/翻页方向的设置项显示文案
@@ -759,7 +737,7 @@ function LibraryView:openMenu()
             UIManager:close(dialog)
             MessageBox:input(nil, nil, {
                 title = "设置 Komga 快捷方式根目录名",
-                input = settings.browser_dir_name or DEFAULT_BROWSER_DIR_NAME,
+                input = settings.browser_dir_name or Paths.DEFAULT_BROWSER_DIR_NAME,
                 description = [[书架快捷方式所在的根目录名(位于 KOReader Home 目录下)。
 修改后重启 KOReader 生效, 新目录会在下次打开书架时自动创建; 旧目录可自行删除或保留(仍可路由)。]],
                 use_available_height = true,
@@ -774,7 +752,7 @@ function LibraryView:openMenu()
                         MessageBox:notice('输入为空')
                         return false
                     end
-                    settings.browser_dir_name = new_name ~= DEFAULT_BROWSER_DIR_NAME and new_name or nil
+                    settings.browser_dir_name = new_name ~= Paths.DEFAULT_BROWSER_DIR_NAME and new_name or nil
                     return saveSettingsAndNotify(settings, function(data)
                         MessageBox:notice("浏览器目录名已更新, 重启 KOReader 后生效")
                     end)
@@ -1342,7 +1320,7 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, number)
         if found then
             return
         end
-        if util.fileExists(fullpath) and name:find("\u{200B}.html", 1, true) then
+        if util.fileExists(fullpath) and name:find(Paths.LNK_SUFFIX, 1, true) then
             local customedata = self.book_browser:getCustomMateData(fullpath)
             if H.is_tbl(customedata) and customedata.type == 'volume' and
                 customedata.number == number then
@@ -1792,7 +1770,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
         end
-        return type(file_path) == 'string' and file_path:lower():find('/cache/komga.cache/', 1, true) or false
+        return type(file_path) == 'string' and file_path:lower():find(Paths.CACHE_DIR_SEGMENT, 1, true) or false
     end
     local is_komga_browser_path = function(file_path, instance)
         if instance and instance.document and instance.document.file then
@@ -2212,7 +2190,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end
             return props
         end
-        if not (is_komga_browser_path(file) and file:find("\u{200B}.html", 1, true)) then
+        if not (is_komga_browser_path(file) and file:find(Paths.LNK_SUFFIX, 1, true)) then
             open_regular_file(file)
             return
         end
@@ -2313,7 +2291,7 @@ local function init_book_browser(parent)
         end
 
         local function is_valid_book_file(fullpath, name)
-            return util.fileExists(fullpath) and H.is_str(name) and name:find("\u{200B}.html", 1, true)
+            return util.fileExists(fullpath) and H.is_str(name) and name:find(Paths.LNK_SUFFIX, 1, true)
         end
 
         local function get_book_id(fullpath)
@@ -2366,7 +2344,7 @@ local function init_book_browser(parent)
         local book_name = bookinfo.name
         local book_author = bookinfo.author or "未知作者"
 
-        local book_lnk_name = string.format("%s-%s\u{200B}.html", book_name, book_author)
+        local book_lnk_name = string.format("%s-%s" .. Paths.LNK_SUFFIX, book_name, book_author)
         book_lnk_name = util.getSafeFilename(book_lnk_name)
         if not book_lnk_name then
             logger.err("book_browser.wirteLnk: getSafeFilename error")
@@ -2460,7 +2438,7 @@ local function init_book_browser(parent)
         local volume_title = (H.is_str(volume.title) and volume.title ~= "") and volume.title or
             "卷" .. tostring(number)
         -- 卷号补零到 3 位, 避免文件浏览器按文件名排序时 2,10,11... 乱序
-        local volume_lnk_name = string.format("%03d-%s\u{200B}.html", number, volume_title)
+        local volume_lnk_name = string.format("%03d-%s" .. Paths.LNK_SUFFIX, number, volume_title)
         volume_lnk_name = util.getSafeFilename(volume_lnk_name)
         if not volume_lnk_name then
             logger.err("book_browser.writeVolLnk: getSafeFilename error")
@@ -2679,7 +2657,7 @@ local function init_book_browser(parent)
         end
         local volume_folder = H.joinPath(home_dir, folder_name)
         -- 旧版目录名(<系列名>-<作者>\u{200B}, 无 -vol.sdr 后缀)在浏览器中可见, 迁移到新隐藏命名
-        local legacy_folder = H.joinPath(home_dir, util.getSafeFilename(string.format("%s-%s\u{200B}", bookinfo.name, author)))
+        local legacy_folder = H.joinPath(home_dir, util.getSafeFilename(string.format("%s-%s" .. Paths.ZWSP, bookinfo.name, author)))
         if not util.directoryExists(volume_folder) and util.directoryExists(legacy_folder) then
             local ok, err = pcall(os.rename, legacy_folder, volume_folder)
             if not ok then
@@ -3062,7 +3040,7 @@ function LibraryView:getBrowserHomeDir(skip_check)
     -- 根目录名可配置(设置项 browser_dir_name), 缺省用内置名; 不允许路径分隔符
     local browser_dir_name = Backend:getSettings().browser_dir_name
     if not (H.is_str(browser_dir_name) and browser_dir_name ~= "") then
-        browser_dir_name = DEFAULT_BROWSER_DIR_NAME
+        browser_dir_name = Paths.DEFAULT_BROWSER_DIR_NAME
     end
     browser_dir_name = browser_dir_name:gsub("[/\\]", "_")
     local expected_path = H.joinPath(home_dir, browser_dir_name)

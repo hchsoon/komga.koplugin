@@ -30,6 +30,7 @@ local time = require("ui/time")
 
 local UIManager = require("ui/uimanager")
 local H = require("Komga/Helper")
+local Paths = require("Komga/Paths")
 local Config = require("Komga/Config")
 local VolumePath = require("Komga/VolumePath")
 local ApiClient = require("Komga/ApiClient")
@@ -671,7 +672,7 @@ function M:pDownloadVolume(volume, message_dialog, is_recursive)
                             timeout = 120,
                             maxtime = 120,
                             headers = {
-                                ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
+                                ["user-agent"] = Paths.USER_AGENT,
                                 ["X-API-Key"] = self:getApiKey()
                             }
                     })
@@ -844,7 +845,7 @@ function M:pDownload_Image(img_src, timeout)
                     timeout = timeout or 15,
                     maxtime = 60,
                     headers = {
-                        ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
+                        ["user-agent"] = Paths.USER_AGENT,
                         ["X-API-Key"] = self:getApiKey()
                     }
                 })
@@ -1477,7 +1478,7 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
                         timeout = 120,
                         maxtime = 120,
                         headers = {
-                            ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
+                            ["user-agent"] = Paths.USER_AGENT,
                             ["X-API-Key"] = self:getApiKey()
                         }
                 })
@@ -1726,7 +1727,7 @@ function M:downloadVolumeWholeFile(volume)
         dest = dest,
         headers = {
             ["X-API-Key"] = self:getApiKey(),
-            ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+",
+            ["user-agent"] = Paths.USER_AGENT,
         },
         timeout = 30,
         maxtime = 600,

@@ -14,7 +14,8 @@ local Json = require("Komga/Json")
 local ltn12 = require("ltn12")
 local socket_url = require("socket.url")
 
-local USER_AGENT = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+local Paths = require("Komga/Paths")
+local USER_AGENT = Paths.USER_AGENT -- (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
 local ACCEPT = 'application/json,application/webpub+json,' ..
     'application/vnd.readium.position-list+json,application/vnd.readium.progression+json'
 

@@ -13,6 +13,7 @@ local ReaderUI = require("apps/reader/readerui")
 local KomgaModel = require("Komga/KomgaModel")
 local Backend = require("Komga/Backend")
 local H = require("Komga/Helper")
+local Paths = require("Komga/Paths")
 local VolumePath = require("Komga/VolumePath")
 
 local ProgressSync = {}
@@ -273,7 +274,7 @@ function ProgressSync:uploadCurrentProgress()
         return
     end
     local file = reader.document.file
-    if not (H.is_str(file) and file:find('/cache/komga.cache/', 1, true)) then
+    if not (H.is_str(file) and file:find(Paths.CACHE_DIR_SEGMENT, 1, true)) then
         return
     end
     -- 翻章后内部章节可能丢失 name/url, 从卷数据兜底补回(saveVolumeProgress 强依赖这两项)
