@@ -50,64 +50,45 @@ function M:custom(options)
     return dialog
 end
 
-function M:error(message, ...)
-    local args = {...}
-
-    local timeout = nil
+local function pick_timeout(args)
     if #args > 0 and type(args[1]) == "number" then
-        timeout = table.remove(args, 1)
-
+        return table.remove(args, 1)
     end
+    return nil
+end
 
+local function join_args(message, args)
     if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
+        return message .. " " .. custom_concat(args, " ")
     end
-    return self:custom({
-        text = message,
-        icon = "notice-warning",
+    return message
+end
+
+-- error/info/success 三态同构: 仅图标与是否过 gettext 不同
+local function notify_dialog(message, icon, timeout, wrap_gettext)
+    return M:custom({
+        text = wrap_gettext and _(message) or message,
+        icon = icon,
         timeout = timeout
     })
 end
 
-function M:info(message, ...)
-
+function M:error(message, ...)
     local args = {...}
+    local timeout = pick_timeout(args)
+    return notify_dialog(join_args(message, args), "notice-warning", timeout)
+end
 
-    local timeout = nil
-    if #args > 0 and type(args[1]) == "number" then
-        timeout = table.remove(args, 1)
-
-    end
-
-    if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
-    end
-
-    return self:custom({
-        text = message,
-        icon = "notice-info",
-        timeout = timeout
-    })
-
+function M:info(message, ...)
+    local args = {...}
+    local timeout = pick_timeout(args)
+    return notify_dialog(join_args(message, args), "notice-info", timeout)
 end
 
 function M:success(message, ...)
     local args = {...}
-
-    local timeout = nil
-    if #args > 0 and type(args[1]) == "number" then
-        timeout = table.remove(args, 1)
-
-    end
-
-    if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
-    end
-    return self:custom({
-        text = _(message),
-        icon = "check",
-        timeout = timeout
-    })
+    local timeout = pick_timeout(args)
+    return notify_dialog(join_args(message, args), "check", timeout, true)
 end
 
 function M:confirm(message, callback, options)
@@ -242,7 +223,12 @@ function M:loading(message, runnable, callback, options)
 end
 
 function M:notice(msg, timeout)
-    Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
+    if timeout then
+        -- 指定展示时长: 直接构造(Notice:notify 的第三参是 refresh_after, 不是时长)
+        UIManager:show(Notification:new{ text = msg or '', timeout = timeout })
+    else
+        Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
+    end
 end
 
 function M:askForRestart(msg)

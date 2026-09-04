@@ -58,7 +58,15 @@ function Komga:onDispatcherRegisterActions()
 end
 
 function Komga:isFileTypeSupported(file)
-    return true
+    -- OpenWith 只认领 komga 缓存章节与快捷方式(.html), 不再无条件认领所有文件
+    if type(file) ~= "string" then
+        return false
+    end
+    local Paths = require("Komga/Paths")
+    if file:find(Paths.CACHE_DIR_SEGMENT, 1, true) then
+        return true
+    end
+    return file:find(Paths.LNK_SUFFIX, 1, true) ~= nil
 end
 
 function Komga:registerDocumentRegistryAuxProvider()
