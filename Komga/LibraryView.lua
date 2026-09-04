@@ -1167,7 +1167,7 @@ function LibraryView:resumeAndOpenVolume(volume, server_data)
         end
         -- 服务器 locator.href → 内部章节 + 章内比例(href 与 url 同源, 用 basename 反查)
         if H.is_str(href) and H.is_num(prog_in_ch) then
-            local _, rev = self:epubChapterHrefMap(volume.bookId)
+            local rev = server_data.rev or select(2, self:epubChapterHrefMap(volume.bookId))
             local s_idx = rev[(href:match("([^/]+)$") or href):lower()]
             if H.is_num(s_idx) then
                 server_target = { number = s_idx, frac = math.min(math.max(prog_in_ch, 0), 1) }
@@ -1175,8 +1175,7 @@ function LibraryView:resumeAndOpenVolume(volume, server_data)
         end
         if not server_target and not H.is_num(tp) then
             -- 服务器无 Readium 进度: 回退 readProgress.page/pages(EPUB 页数单位错配, 仅作兜底)
-            local resp = Backend:getVolumeReadProgress(volume)
-            local rp = resp and resp.body and resp.body.readProgress
+            local rp = server_data.rp
             if H.is_tbl(rp) and H.is_num(pages) and pages > 0 then
                 server_frac = math.min(math.max((tonumber(rp.page) or 1) / pages, 0), 1)
                 server_completed = rp.completed == true
@@ -1189,8 +1188,7 @@ function LibraryView:resumeAndOpenVolume(volume, server_data)
             local_target = { number = last.number, frac = last.frac }
         end
     else
-        local resp = Backend:getVolumeReadProgress(volume)
-        local rp = resp and resp.body and resp.body.readProgress
+        local rp = server_data.rp
         if H.is_tbl(rp) and H.is_num(pages) and pages > 0 then
             server_frac = math.min(math.max((tonumber(rp.page) or 1) / pages, 0), 1)
             server_completed = rp.completed == true
