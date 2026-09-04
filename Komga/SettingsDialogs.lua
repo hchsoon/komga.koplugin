@@ -718,7 +718,9 @@ function LibraryView:openMenu()
 请到 Github：hchsoon/komga.koplugin 反馈 issues
 
 版本: ver_%4]]
-            local curren_version = "1.0.0"
+            -- 版本号以 _meta.lua 为单一来源(此前 About 面板写死 1.0.0, 与 _meta 的 1.0.3 漂移)
+            local ok_meta, meta = pcall(require, "_meta")
+            local curren_version = (ok_meta and H.is_str(meta.version)) and meta.version or "unknown"
             about_txt = T(about_txt, Icons.FA_DOWNLOAD, Icons.FA_CHECK_CIRCLE, Icons.FA_THUMB_TACK, curren_version)
             MessageBox:custom({
                 text = about_txt,
