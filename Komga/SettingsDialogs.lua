@@ -440,25 +440,31 @@ function LibraryView:openMenu()
     local function serverButtons()
         local rows = {
             {
+                {
         text = Icons.FA_GLOBE .. " Komga WEB地址",
         callback = function()
             UIManager:close(dialog)
             self:openInstalledReadSource()
         end
+                }
             },
             {
+                {
         text = Icons.FA_PLUG .. " Komga API Key",
         callback = function()
             UIManager:close(dialog)
             self:openApiKeySetting()
         end
+                }
             },
             {
+                {
         text = Icons.FA_GLOBE .. " 服务器配置",
         callback = function()
             UIManager:close(dialog)
             self:openServerProfileManager()
         end
+                }
             },
         }
         table.insert(rows, backRow())
@@ -469,6 +475,7 @@ function LibraryView:openMenu()
     local function readingButtons()
         local rows = {
             {
+                {
         text = string.format("%s 整卷原文件模式 %s", Icons.FA_BOOK,
             (settings.whole_file_mode and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
@@ -484,8 +491,10 @@ function LibraryView:openMenu()
                 end
             end)
         end
+                }
             },
             {
+                {
         text = string.format("%s 预载数量 [%s]", Icons.FA_BOOK,
             tostring(settings.preload_count or 3)),
         callback = function()
@@ -509,8 +518,10 @@ function LibraryView:openMenu()
                 allow_newline = false
             })
         end
+                }
             },
             {
+                {
         text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,
             (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
@@ -530,8 +541,10 @@ function LibraryView:openMenu()
                 cancel_text = "取消"
             })
         end
+                }
             },
             {
+                {
         text = string.format("%s 流式双页模式 %s", Icons.FA_BOOK, stream_dual_mode_label(settings)),
         callback = function()
             UIManager:close(dialog)
@@ -550,8 +563,10 @@ function LibraryView:openMenu()
                     " (重新打开分卷生效)")
             end)
         end
+                }
             },
             {
+                {
         text = string.format("%s 双页首页为封面 %s", Icons.FA_BOOK,
             (settings.stream_dual_first_cover ~= false and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
@@ -564,8 +579,10 @@ function LibraryView:openMenu()
                     " (重新打开分卷生效)")
             end)
         end
+                }
             },
             {
+                {
         text = string.format("%s 流式翻页方向 %s", Icons.FA_BOOK, stream_rtl_label(settings)),
         callback = function()
             UIManager:close(dialog)
@@ -583,6 +600,7 @@ function LibraryView:openMenu()
                     " (重新打开分卷生效)")
             end)
         end
+                }
             },
         }
         table.insert(rows, backRow())
@@ -593,6 +611,7 @@ function LibraryView:openMenu()
     local function shelfButtons()
         local rows = {
             {
+                {
         text = string.format("%s 书架排序 [%s]", Icons.FA_BOOK,
             (settings.series_sort_mode == "name" and "名称" or
             settings.series_sort_mode == "updated" and "更新时间" or "最后阅读")),
@@ -609,8 +628,10 @@ function LibraryView:openMenu()
                     settings.series_sort_mode == "updated" and "更新时间" or "最后阅读"))
             end)
         end
+                }
             },
             {
+                {
         text_func = function()
             local ok_bm, BookInfoManager = pcall(require, "plugins/coverbrowser.koplugin/bookinfomanager")
             local curr = ok_bm and BookInfoManager.getSetting and BookInfoManager:getSetting("filemanager_display_mode")
@@ -636,6 +657,7 @@ function LibraryView:openMenu()
             local label = next_mode == "grid" and "网格" or next_mode == "list_image_meta" and "列表(元数据)" or "经典列表"
             MessageBox:notice("视图模式：" .. label)
         end
+                }
             },
         }
     -- 非触屏设备无下拉刷新, 书架子菜单提供显式同步入口
@@ -657,6 +679,7 @@ function LibraryView:openMenu()
     local function browserButtons()
         local rows = {
             {
+                {
         text = string.format("%s 浏览器目录名 [%s]", Icons.FA_FOLDER,
             settings.browser_dir_name or "默认"),
         callback = function()
@@ -686,8 +709,10 @@ function LibraryView:openMenu()
                 allow_newline = false
             })
         end
+                }
             },
             {
+                {
         text = string.format("%s 自动生成快捷方式 %s", Icons.FA_FOLDER,
             (settings.disable_browser and Icons.UNICODE_STAR_OUTLINE or Icons.UNICODE_STAR)),
         callback = function()
@@ -710,6 +735,7 @@ function LibraryView:openMenu()
                 cancel_text = "取消"
             })
         end
+                }
             },
         }
         table.insert(rows, backRow())
@@ -720,20 +746,25 @@ function LibraryView:openMenu()
     local function maintenanceButtons()
         local rows = {
             {
+                {
         text = Icons.FA_FOLDER .. " 缓存管理",
         callback = function()
             UIManager:close(dialog)
             self:openCacheManager()
         end
+                }
             },
             {
+                {
         text = Icons.FA_MAGNIFYING_GLASS .. " 任务管理",
         callback = function()
             UIManager:close(dialog)
             require("Komga/TaskManagerView").show()
         end
+                }
             },
             {
+                {
         text = Icons.FA_PLUG .. " 内存清理",
         callback = function()
             UIManager:close(dialog)
@@ -741,8 +772,10 @@ function LibraryView:openMenu()
             MessageBox:notice(string.format("内存清理完成: %.1f MB -> %.1f MB (释放 %.1f MB)",
                 res.before / 1024, res.after / 1024, res.freed / 1024))
         end
+                }
             },
             {
+                {
         text = string.format("%s 调试日志 %s", Icons.FA_PLUG,
             (settings.debug_log and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
@@ -754,8 +787,10 @@ function LibraryView:openMenu()
                     settings.debug_log and "开" or "关"))
             end)
         end
+                }
             },
             {
+                {
         text = string.format("%s Clear all caches", Icons.FA_TIMES),
         callback = function()
             UIManager:close(dialog)
@@ -784,6 +819,7 @@ function LibraryView:openMenu()
                     cancel_text = "取消"
                 })
         end
+                }
             },
         }
         table.insert(rows, backRow())
@@ -806,6 +842,8 @@ function LibraryView:openMenu()
                     showSubmenu("Komga 设置 · 阅读偏好", readingButtons())
                 end
             },
+        },
+        {
             {
                 text = Icons.FA_BOOK .. "书架",
                 callback = function()
@@ -820,6 +858,8 @@ function LibraryView:openMenu()
                     showSubmenu("Komga 设置 · 快捷方式", browserButtons())
                 end
             },
+        },
+        {
             {
                 text = Icons.FA_DATABASE .. "缓存与维护",
                 callback = function()
