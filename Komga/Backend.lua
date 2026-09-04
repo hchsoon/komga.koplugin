@@ -234,9 +234,6 @@ end
 function M:getLuaConfig(path)
     return LuaSettings:open(path)
 end
-function M:backgroundCacheConfig()
-    return self:getLuaConfig(H.getTempDirectory() .. '/cache.lua')
-end
 
 -- 统一请求包装(原 komgaSporeApi): 错误映射 / 204 摘取 / content 摘取语义保持不变,
 -- 传输层由 Spore 换成 self.api(Komga/ApiClient, 直接 socket.http)。
@@ -534,13 +531,6 @@ function M:getBookPositions(bookId)
     return r
 end
 
-function M:getBookSourcesList()
-    return self:komgaApi(function()
-        -- GET /getBookSources(书源列表, reader3 服务)
-        return self.api:get("/getBookSources", {simple = 1, v = os.time()}, {timeouts = {15, 20}})
-    end, nil, 'getBookSourcesList')
-end
-
 function M:refreshVolumeContent(volume)
 
     local url = volume.url
@@ -561,70 +551,6 @@ function M:refreshVolumeContent(volume)
             v = os.time()
         }, {timeouts = {10, 20}})
     end, nil, 'GetChapterContent')
-end
-
-function M:searchBookSource(url, lastIndex, searchSize)
-    if not H.is_str(url) then
-        return wrap_response(nil, '获取更多书源参数错误')
-    end
-    if not H.is_num(lastIndex) then
-        lastIndex = -1
-    end
-    if not H.is_num(searchSize) then
-        searchSize = 5
-    end
-    return self:komgaApi(function()
-        -- data.list data.lastindex
-        return self.api:get("/searchBookSource", {
-            url = url,
-            bookSourceGroup = '',
-            lastIndex = lastIndex,
-            searchSize = searchSize,
-            v = os.time()
-        }, {timeouts = {70, 80}})
-    end, nil, 'searchBook')
-
-end
-
-function M:searchBook(search_text, bookSourceUrl, concurrentCount)
-    if not (H.is_str(search_text) and search_text ~= '' and H.is_str(bookSourceUrl)) then
-        return wrap_response(nil, "输入参数错误")
-    end
-    concurrentCount = concurrentCount or 32
-    return self:komgaApi(function()
-        -- data = bookinfolist
-        return self.api:get("/searchBook", {
-            key = search_text,
-            bookSourceGroup = '',
-            concurrentCount = concurrentCount,
-            bookSourceUrl = bookSourceUrl,
-            lastIndex = -1,
-            page = 1,
-            v = os.time()
-        }, {timeouts = {20, 30}})
-    end, nil, 'searchBook')
-end
-
-function M:searchBookMulti(search_text, lastIndex, searchSize, concurrentCount)
-
-    if not H.is_str(search_text) or search_text == '' then
-        return wrap_response(nil, "输入参数错误")
-    end
-
-    lastIndex = lastIndex or -1
-    searchSize = searchSize or 20
-    concurrentCount = concurrentCount or 32
-    return self:komgaApi(function()
-        -- data.list data.lastindex
-        return self.api:get("/searchBookMulti", {
-            key = search_text,
-            bookSourceGroup = '',
-            concurrentCount = concurrentCount,
-            lastIndex = lastIndex,
-            searchSize = searchSize,
-            v = os.time()
-        }, {timeouts = {60, 80}})
-    end, nil, 'searchBook')
 end
 
 function M:deleteBook(bookinfo)
@@ -654,132 +580,6 @@ function M:deleteBook(bookinfo)
         }, {timeouts = {6, 8}})
     end, nil, 'deleteBook')
 end
-
-local ffi = require("ffi")
-local libutf8proc
-
-local function utf8_chars(str, reverse)
-    if libutf8proc == nil then
-        -- 兼容旧版
-        if ffi.loadlib then
-            libutf8proc = ffi.loadlib("utf8proc", "3")
-        else
-            if ffi.os == "Windows" then
-                libutf8proc = ffi.load("libs/libutf8proc.dll")
-            elseif ffi.os == "OSX" then
-                libutf8proc = ffi.load("libs/libutf8proc.dylib")
-            else
-                libutf8proc = ffi.load("libs/libutf8proc.so.2")
-            end
-        end
-
-        ffi.cdef [[
-typedef int32_t utf8proc_int32_t;
-typedef uint8_t utf8proc_uint8_t;
-typedef ssize_t utf8proc_ssize_t;
-utf8proc_ssize_t utf8proc_iterate(const utf8proc_uint8_t *, utf8proc_ssize_t, utf8proc_int32_t *);
-]]
-    end
-    local str_len = #str
-    local pos = reverse and (str_len + 1) or 0
-    local str_p = ffi.cast("const utf8proc_uint8_t*", str)
-    local codepoint = ffi.new("utf8proc_int32_t[1]")
-
-    return function()
-        while true do
-            pos = reverse and (pos - 1) or (pos + 1)
-            if (reverse and pos < 1) or (not reverse and pos > str_len) then
-                return nil
-            end
-
-            local remaining = reverse and pos or (str_len - pos + 1)
-            -- 指针偏移调整为 str_p + pos - 1
-            local bytes = libutf8proc.utf8proc_iterate(str_p + pos - 1, remaining, codepoint)
-
-            if bytes > 0 then
-                -- 计算起始指针，转换为Lua字符串
-                local char = ffi.string(str_p + pos - 1, bytes)
-                local ret_pos = tonumber(pos)
-                -- [修复] 修正了反向遍历成功时的指针更新逻辑
-                -- 它应该回退到当前字符之前的位置，以便下一次循环可以正确地处理前一个字节
-                pos = reverse and (pos - bytes + 1) or (pos + bytes - 1)
-                return ret_pos, tonumber(codepoint[0]), char
-            elseif bytes < 0 then
-                -- [修复] 解码失败时（bytes < 0），不做任何操作
-                -- 循环会自动将指针移动到前一个/后一个字节继续尝试，避免跳字节
-            end
-        end
-    end
-end
-
-function M:utf8_trim(str)
-    if type(str) ~= "string" or str == "" then
-        return ""
-    end
-
-    local utf8_whitespace_codepoints = {
-        [0x00A0] = true,
-        [0x1680] = true,
-        [0x2000] = true,
-        [0x2001] = true,
-        [0x2002] = true,
-        [0x2003] = true,
-        [0x2004] = true,
-        [0x2005] = true,
-        [0x2006] = true,
-        [0x2007] = true,
-        [0x2008] = true,
-        [0x2009] = true,
-        [0x200A] = true,
-        [0x200B] = true,
-        [0x202F] = true,
-        [0x205F] = true,
-        [0x3000] = true,
-        [0x0009] = true,
-        [0x000A] = true,
-        [0x000B] = true,
-        [0x000C] = true,
-        [0x000D] = true,
-        [0x0020] = true
-    }
-
-    local start
-    for pos, cp, char in utf8_chars(str) do
-        if not utf8_whitespace_codepoints[cp] then
-            start = pos
-            break
-        end
-    end
-    if not start then
-        return ""
-    end
-
-    local finish
-    for pos, cp, char in utf8_chars(str, true) do
-        if not utf8_whitespace_codepoints[cp] then
-            finish = pos + #char - 1
-            break
-        end
-    end
-
-    return (start and finish and start <= finish) and str:sub(start, finish) or ""
-end
-
----去除多余换行、统一段落缩进、根据部分排版规则将不合理的换行合并成一个
----仅假设源文本格式混入了错误或多余换行和不标准的段落缩进
----@param text any
-
-
-
-
-
-
--- 生成章节链接匹配关键字(实现收敛在 VolumePath.basenameKey, 有单测)
-
-
-
-
-
 
 -- 流式页预取缓存已迁至 Komga/StreamPageCache(薄委托保持 StreamImageView 调用面不变)
 function M:getStreamPageCacheDir(bookCacheId)
@@ -1066,19 +866,6 @@ function M:getVolumePageUrls(volume)
     end
 
     return imgs
-end
-
-function M:downloadAllVolumes(volumes)
-    local begin_volume = volumes[1]
-
-    begin_volume.call_event = 'next'
-
-    local status, err = self:preLoadVolumes(begin_volume, #volumes)
-    if not status then
-        return wrap_response(nil, tostring(err))
-    else
-        return wrap_response(err)
-    end
 end
 
 -- 后台任务超时(通道任务经 Async 托管超时与回收)
@@ -1707,11 +1494,6 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
 
         H.checkAndCreateFolder(dir)
 
-        local cover_file_name = util.getSafeFilename(image_filename)
-        if not cover_file_name then
-            logger.err("download_cover_img getSafeFilename error")
-            return
-        end
         local safe_cover_img_path = H.joinPath(dir, image_filename)
         -- 原子写: 半写封面文件会被当作有效缓存
         local tmp_cover_path = safe_cover_img_path .. '.part'

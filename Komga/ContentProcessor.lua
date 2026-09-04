@@ -373,11 +373,6 @@ local get_cached_chapter_filename = M.get_cached_chapter_filename
 
 local processLink
 
-local convertToGrayscale = function(image_data)
-    local Png = require("Komga/Png")
-    return Png.processImage(Png.toGrayscale, image_data, 1)
-
-end
 local pDownload_CreateCBZ = function(ctx, filePath, img_sources)
 
     dbg.v('CreateCBZ strat:')
@@ -386,7 +381,6 @@ local pDownload_CreateCBZ = function(ctx, filePath, img_sources)
         error("Cbz param error:")
     end
 
-    local is_convertToGrayscale = false
 
     local cbz_path_tmp = filePath .. '.downloading'
 
@@ -426,21 +420,12 @@ local pDownload_CreateCBZ = function(ctx, filePath, img_sources)
             end
 
             local img_name = string.format("%d.%s", i, img_extension or "")
-            if is_convertToGrayscale == true and img_extension == 'png' then
-                local success, imgdata_new = convertToGrayscale(imgdata)
-                if success ~= true then
-
-                    goto continue
-                end
-                imgdata = imgdata_new.data
-            end
 
             cbz:add(img_name, imgdata, no_compression)
 
         else
             dbg.v('Download_Image err', tostring(err))
         end
-        ::continue::
     end
 
     cbz:close()

@@ -1,6 +1,5 @@
 local util = require("util")
 local H = require("Komga/Helper")
-local logger = require("logger")
 
 local M = {}
 local mianCss = string.format("%s/%s", H.getPluginDirectory(), "Komga/main.css.lua")
@@ -113,55 +112,4 @@ M.addchapterT = function(title, content)
     return string.format(html, title, resCss, part or "", subpart or "", content)
 end
 
-M.introT = function()
-    local html = [[<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN">
-<head>
-    <title>内容简介</title>
-    <link href="%s" type="text/css" rel="stylesheet" />
-</head>
-<body>
-<h1 class="head" style="margin-bottom:2em;">内容简介</h1><p>%s</p></body>
-</html>
-end
-]]
-end
-
-M.coverT = function()
-    local html = [=[
-<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
-<head>
-    <title>Cover</title>
-    <style type="text/css">
-		.pic {
-			margin: 50% 30% 0 30%;
-			padding: 2px 2px;
-			border: 1px solid #f5f5dc;
-			background-color: rgba(250,250,250, 0);
-			border-radius: 1px;
-		}
-    </style>
-</head>
-<body style="text-align: center;">
-<div class="pic"><img src="../Images/cover.jpg" style="width: 100%; height: auto;"/></div>
-<h1 style="margin-top: 5%; font-size: 110%;">{name}</h1>
-<div class="author" style="margin-top: 0;"><b>{author}</b> <span style="font-size: smaller;">/ 著</span></div>
-</body>
-</html>    
-]=]
-    return html
-end
-M.createMiscFiles = function()
-end
-M.createIndexHTM = function()
-end
-M.createNCX = function()
-end
-M.createOPF = function()
-end
-M.build = function()
-end
 return M

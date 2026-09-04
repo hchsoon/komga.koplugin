@@ -533,66 +533,6 @@ function M:execute(sql, params, options)
     end
 end
 
-function M:safe_rows(sql, params, fetch_size)
-    fetch_size = fetch_size or 100
-    local stmt = self:execute(sql, params, {
-        return_stmt = true
-    })
-
-    return function()
-        local batch = {}
-        for _ = 1, fetch_size do
-            local row = stmt:step()
-            if not row then
-                break
-            end
-            table.insert(batch, row)
-        end
-
-        if #batch == 0 then
-            stmt:clearbind():reset()
-            return nil
-        end
-        stmt:clearbind():reset()
-        return batch
-    end
-end
-
-
-
-
-
-
-
-
-
-
-
-
--- 按 bookId 取卷记录(跨卷续读: 服务器"下一本书"映射回本地卷号/类型)
-
-
-
-
-
--- 返回某个 epub 的全部内部章节 URL(含 'No title' 子章节), 供缓存 xhtml 内部链接映射用
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 function M:dynamicUpdate(tableName, updateData, conditions)
     if not H.is_tbl(updateData) or not H.is_str(tableName) then
         error('Error entering necessary parameters')
