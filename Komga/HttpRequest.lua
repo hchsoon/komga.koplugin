@@ -38,25 +38,25 @@ local function get_default_headers()
     }
 end
 
-local function get_extension_from_mimetype(content_type)
-    local extensions = {
-        ["image/jpeg"] = "jpg",
-        ["image/png"] = "png",
-        ["image/gif"] = "gif",
-        ["image/bmp"] = "bmp",
-        ["image/webp"] = "webp",
-        ["image/tiff"] = "tiff",
-        ["image/svg+xml"] = "svg",
-        ["application/xhtml+xml"] = "html",
-        ["text/javascript"] = "js",
-        ["text/css"] = "css",
-        ["application/opentype"] = "otf",
-        ["application/truetype"] = "ttf",
-        ["application/font-woff"] = "woff",
-        ["application/epub+zip"] = "epub"
-    }
+local EXT_BY_MIME = {
+    ["image/jpeg"] = "jpg",
+    ["image/png"] = "png",
+    ["image/gif"] = "gif",
+    ["image/bmp"] = "bmp",
+    ["image/webp"] = "webp",
+    ["image/tiff"] = "tiff",
+    ["image/svg+xml"] = "svg",
+    ["application/xhtml+xml"] = "html",
+    ["text/javascript"] = "js",
+    ["text/css"] = "css",
+    ["application/opentype"] = "otf",
+    ["application/truetype"] = "ttf",
+    ["application/font-woff"] = "woff",
+    ["application/epub+zip"] = "epub"
+}
 
-    return extensions[content_type]
+local function get_extension_from_mimetype(content_type)
+    return EXT_BY_MIME[content_type]
 end
 
 local function get_image_format_head8(image_data)
@@ -91,84 +91,122 @@ local function pick_http(url)
     end
     return require("socket.http")
 end
-local function pGetUrlContent(options, is_create)
+-- 非 2xx 的分类描述: 用户侧可区分密钥错误/资源不存在/限流/服务器错误
+local function describe_http_error(code, status)
+    if code == 401 or code == 403 then
+        return "HTTP " .. code .. ": 鉴权失败, 请检查 API Key 设置"
+    elseif code == 404 then
+        return "HTTP 404: 资源不存在"
+    elseif code == 429 then
+        return "HTTP 429: 请求过于频繁"
+    elseif type(code) == "number" and code >= 500 then
+        return "HTTP " .. code .. ": 服务器错误"
+    elseif type(code) == "number" then
+        return "HTTP " .. code .. ": " .. (status and status ~= "" and status or "请求失败")
+    end
+    return "Remote server error or unavailable"
+end
 
+-- 重定向地址解析: Location 为相对路径时基于当前 URL 补全
+local function resolve_redirect(base_url, location)
+    if type(location) ~= "string" or location == "" then
+        return nil
+    end
+    if location:find("^https?://") then
+        return location
+    end
+    local socket_url = require("socket.url")
+    return socket_url.absolute(base_url, location)
+end
+
+local function pGetUrlContent(options)
     local ltn12 = require("ltn12")
     local socket = require("socket")
     local socketutil = require("socketutil")
     local socket_url = require("socket.url")
 
     local url = options.url
-    local http, http_err = pick_http(url)
-    if not http then
-        return false, http_err
-    end
+    local method = options.method or "GET"
+    local headers = options.headers or get_default_headers()
     local timeout = options.timeout or 10
     local maxtime = options.maxtime or options.timeout + 20
-    local file_fp = options.file
 
-    local parsed = socket_url.parse(url)
-    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
-        return false, "Unsupported protocol"
-    end
-
-    local sink = {}
-    local request = {
-        url = url,
-        method = options.method or "GET",
-        headers = options.headers or get_default_headers(),
-        sink = not file_fp and (maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink)) or
-            (maxtime and socketutil.file_sink(file_fp) or ltn12.sink.file(file_fp)),
-        source = options.source,
-        -- Strictly customized TCP GitHub API error
-        create = is_create and socketutil.tcp,
-    }
-
-    socketutil:set_timeout(timeout, maxtime)
-    local code, headers, status = socket.skip(1, http.request(request))
-    socketutil:reset_timeout()
-
-    if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
-        logger.err("request interrupted:", code)
-        return false, "request interrupted:" .. tostring(code)
-    end
-
-    if headers == nil then
-        logger.warn("No HTTP headers:", status or code or "network unreachable")
-        return false, "Network or remote server unavailable"
-    end
-
-    if type(code) ~= 'number' or code < 200 or code > 299 then
-        logger.warn("HTTP status not okay:", status or code or "network unreachable")
-        logger.dbg("Response headers:", headers)
-        return false, "Remote server error or unavailable"
-    end
-    
-    local content
-    if not file_fp then 
-      content = table.concat(sink)
-      if headers and headers["content-length"] then
-        local content_length = tonumber(headers["content-length"])
-        if #content ~= content_length then
-            return false, "Incomplete content received"
+    -- 301/302/307/308 跟随(GET 限 2 跳); 非 GET 请求重定向按错误返回
+    local hops = 0
+    while true do
+        local http, http_err = pick_http(url)
+        if not http then
+            return false, http_err
         end
-      end
-    end
+        local parsed = socket_url.parse(url)
+        if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
+            return false, "Unsupported protocol"
+        end
 
-    local extension
-    local contentType = headers["content-type"]
-    if contentType then
-        extension = get_extension_from_mimetype(contentType)
-        if not extension and contentType:match("^image/") then
-            extension = get_image_format_head8(content)
+        local sink = {}
+        local request = {
+            url = url,
+            method = method,
+            headers = headers,
+            sink = maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink),
+            source = options.source,
+            create = socketutil.tcp,
+        }
+
+        socketutil:set_timeout(timeout, maxtime)
+        local code, resp_headers, status = socket.skip(1, http.request(request))
+        socketutil:reset_timeout()
+
+        if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+            logger.err("request interrupted:", code)
+            return false, "request interrupted:" .. tostring(code)
+        end
+
+        if resp_headers == nil then
+            logger.warn("No HTTP headers:", status or code or "network unreachable")
+            return false, "Network or remote server unavailable"
+        end
+
+        local is_redirect = type(code) == "number" and code >= 300 and code < 400
+        if is_redirect and (method ~= "GET" or options.source) then
+            return false, describe_http_error(code, status) .. " (非 GET 请求不跟随重定向)"
+        elseif is_redirect then
+            local next_url = resolve_redirect(url, resp_headers["location"])
+            if not next_url then
+                return false, describe_http_error(code, status)
+            end
+            if hops >= 2 then
+                return false, describe_http_error(code, status) .. " (重定向次数过多)"
+            end
+            hops = hops + 1
+            logger.dbg("following redirect:", code, "->", next_url)
+            url = next_url
+        elseif type(code) ~= 'number' or code < 200 or code > 299 then
+            logger.warn("HTTP status not okay:", status or code or "network unreachable")
+            return false, describe_http_error(code, status)
+        else
+            local content = table.concat(sink)
+            local content_length = tonumber(resp_headers["content-length"] or "")
+            if content_length and #content ~= content_length then
+                return false, "Incomplete content received"
+            end
+
+            local extension
+            local contentType = resp_headers["content-type"]
+            if contentType then
+                extension = get_extension_from_mimetype(contentType)
+                if not extension and contentType:match("^image/") then
+                    extension = get_image_format_head8(content)
+                end
+            end
+
+            return true, {
+                data = content,
+                ext = extension,
+                headers = resp_headers
+            }
         end
     end
-
-    return true, {
-        data = content,
-        ext = extension,
-        headers = headers
-    }
 end
 
 --[[ 流式下载到文件(参考 koobone http_downloader 设计):
@@ -203,8 +241,10 @@ local function pStreamToFile(options)
     local on_progress = options.on_progress
     local should_cancel = options.should_cancel
 
-    -- 单次尝试(含 Range); 服务器忽略 Range 回 200 时由调用侧重试一次
-    local function attempt(from_scratch)
+    -- 单次尝试(含 Range); 服务器忽略 Range 回 200 时由调用侧重试一次。
+    -- current_url/hops 支持重定向跟随(3xx 时未写入任何字节, 整次重试)。
+    local function attempt(from_scratch, current_url, hops)
+        local url = current_url
         local start_offset = 0
         local mode = "wb"
         if not from_scratch and options.resume ~= false then
@@ -287,6 +327,16 @@ local function pStreamToFile(options)
             return false, "cancelled"
         end
 
+        -- 3xx 重定向: 此时未写入任何字节, 换目标 URL 重新走一次完整尝试
+        if type(code) == "number" and code >= 300 and code < 400 then
+            local next_url = resolve_redirect(url, resp_headers and resp_headers["location"])
+            if next_url and hops < 2 then
+                logger.dbg("following redirect:", code, "->", next_url)
+                return attempt(from_scratch, next_url, hops + 1)
+            end
+            return false, describe_http_error(code) .. (next_url and " (重定向次数过多)" or "")
+        end
+
         if type(code) == "number" and code >= 200 and code < 300 then
             -- Range 被忽略(回 200 全量)但本地已有半段: 清掉重下
             if start_offset > 0 and code == 200 then
@@ -321,24 +371,26 @@ local function pStreamToFile(options)
                 headers = resp_headers}
         end
 
-        return false, "HTTP " .. tostring(code)
+        return false, describe_http_error(code)
     end
 
-    local ok, res = attempt(false)
+    local ok, res = attempt(false, url, 0)
     if ok then
         return true, res
     end
     if res == "restart" then
         -- 本地有半段但服务器不支持 Range: 清空重下
         os.remove(tmp)
-        return attempt(true)
+        return attempt(true, url, 0)
     end
     return false, res
 end
 
--- 表导出: pGetUrlContent(整载内存) / pStreamToFile(流式落盘+断点续传)
+-- 表导出: pGetUrlContent(整载内存) / pStreamToFile(流式落盘+断点续传) /
+-- get_default_headers(批量下载方应取一次后随每页传入, 避免逐页读设置文件)
 -- (注意不能给函数值挂字段——Lua 函数不可索引, 此前因此炸过模块加载)
 return {
     pGetUrlContent = pGetUrlContent,
     pStreamToFile = pStreamToFile,
+    get_default_headers = get_default_headers,
 }

@@ -120,8 +120,11 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
     local dir = M.getStreamPageCacheDir(cache_id)
     H.checkAndCreateFolder(dir)
 
+    -- 批量取一次默认请求头随每页传入: 不传时 pStreamToFile 会逐页读设置文件解析 API Key
+    local Http = httpReq()
+    local batch_headers = Http.get_default_headers()
     TaskQueue.getChannel("stream", 1):push(function()
-        local pStreamToFile = httpReq().pStreamToFile
+        local pStreamToFile = Http.pStreamToFile
         for i = 1, #tasks do
             local src = tasks[i]
             local base_no_ext = H.joinPath(dir, md5(src))
@@ -130,6 +133,7 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
             local ok, res = pcall(pStreamToFile, {
                 url = src,
                 dest = base_no_ext .. ".dl",
+                headers = batch_headers,
                 timeout = 30,
                 maxtime = 90
             })
