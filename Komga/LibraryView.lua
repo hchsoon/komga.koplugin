@@ -2507,6 +2507,13 @@ local function init_book_browser(parent)
         end
         local volume_title = (H.is_str(volume.title) and volume.title ~= "") and volume.title or
             (H.is_tbl(bookinfo) and bookinfo.name) or "卷" .. tostring(number)
+        -- 显示标题带系列名: 阅读历史/封面浏览器列表按条目展示 title,
+        -- 只有"卷 01"这类卷标题时无法辨认属于哪个系列
+        local display_title = volume_title
+        local series_name = H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and bookinfo.name or nil
+        if series_name and not volume_title:find(series_name, 1, true) then
+            display_title = series_name .. " " .. volume_title
+        end
         -- 无变化则跳过写入，避免每次进入目录都重写并广播事件
         local custom = nil
         local custom_metadata_file = DocSettings:findCustomMetadataFile(lnk_path)
@@ -2548,7 +2555,7 @@ local function init_book_browser(parent)
             doc_settings:saveSetting("provider", "komga")
             doc_settings:saveSetting("custom_props", {
                 authors = (H.is_tbl(bookinfo) and bookinfo.author) or volume.author,
-                title = volume_title,
+                title = display_title,
                 description = (H.is_tbl(bookinfo) and bookinfo.intro) or nil,
                 -- series/series_index: KOReader 文件管理器/封面浏览器按系列归组显示
                 series = (H.is_tbl(bookinfo) and bookinfo.name) or nil,
