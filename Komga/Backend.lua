@@ -87,6 +87,10 @@ local function pGetUrlContent(options)
     return M.httpReq.pGetUrlContent(options, true)
 end
 
+-- 拆分模块(BackendProfiles/BackendProgress/BackendDownload)经 install(M) 内 local 别名复用这两个助手
+M.wrap_response = wrap_response
+M.pGetUrlContent = pGetUrlContent
+
 
 function M:HandleResponse(response, on_success, on_error)
     if not response then
@@ -113,52 +117,7 @@ function M:loadApiClient()
 end
 
 -- 一次性设置迁移(幂等: 以字段缺失为触发条件, 已迁移自然跳过)。
--- 新增迁移只需往表里加 {name, check, run}, 不要在 initialize 里散落 if 分支。
-local ONE_TIME_MIGRATIONS = {
-    {
-        name = "<1.038 setting_url 继承 komga_server",
-        check = function(d)
-            return d.setting_url == nil and d.reader3_un == nil and H.is_str(d.komga_server)
-        end,
-        run = function(d)
-            d.setting_url = d.komga_server
-        end
-    },
-    {
-        name = "<1.049 server_address 继承 komga_server",
-        check = function(d)
-            return d.server_address == nil and H.is_str(d.komga_server)
-        end,
-        run = function(d)
-            d.server_address = d.komga_server
-            d.komga_server = nil
-        end
-    },
-    {
-        name = "api_key 缺省补默认值",
-        check = function(d)
-            return not H.is_str(d.api_key)
-        end,
-        run = function(d)
-            d.api_key = Config.DEFAULT_API_KEY
-        end
-    }
-}
-
-function M:runOneTimeMigrations()
-    local dirty = false
-    for _, migration in ipairs(ONE_TIME_MIGRATIONS) do
-        if migration.check(self.settings_data.data) then
-            migration.run(self.settings_data.data)
-            dirty = true
-            dbg.v('settings migration applied:', migration.name)
-        end
-    end
-    if dirty then
-        self.settings_data:flush()
-    end
-end
-
+-- 一次性设置迁移(ONE_TIME_MIGRATIONS/runOneTimeMigrations)在 Komga/BackendProfiles
 function M:initialize()
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
@@ -440,97 +399,8 @@ function M:pGetEpubManifest(volume)
     end, nil, 'getEpubManifest')
 end
 
-function M:getVolumeReadProgress(volume)
-
-    if not (H.is_str(volume.name) and H.is_str(volume.url)) then
-        return wrap_response(nil, '参数错误')
-    end
-
-    return self:komgaApi(function()
-        -- GET /api/v1/books/:id(BookDto, 含 readProgress/media/metadata)
-        return self.api:get("/api/v1/books/" .. volume.bookId, nil, {timeouts = {3, 5}})
-    end, nil, 'getVolumeReadProgress')
-
-end
-
-function M:saveVolumeProgress(volume)
-
-    if not (H.is_str(volume.name) and H.is_str(volume.url)) then
-        return wrap_response(nil, '参数错误')
-    end
-
-    local number = volume.number
-    local finish = (volume.current_page == volume.pages)
-    -- print(finish)
-    if finish then
-        volume.isRead = finish
-        -- print("Mark volume read...", volume.number)
-        self:toggleVolumeRead(volume)
-    end
-    return self:komgaApi(function()
-        -- PATCH /api/v1/books/:id/read-progress(漫画分卷页码进度)
-        return self.api:patch("/api/v1/books/" .. volume.bookId .. "/read-progress", nil, {
-            page = volume.current_page,
-            completed = finish
-        }, {timeouts = {3, 5}})
-    end, nil, 'saveVolumeProgress')
-
-end
-
--- EPUB(非 Divina)进度走 Readium Progression API: GET /progression 返回 R2Progression
--- {modified, device, locator{locations{progression, position, totalProgression}}}
-function M:getBookProgression(bookId)
-    if not H.is_str(bookId) then
-        return wrap_response(nil, '参数错误')
-    end
-    local r = self:komgaApi(function()
-        -- GET /api/v1/books/:id/progression(R2Progression)
-        return self.api:get("/api/v1/books/" .. bookId .. "/progression", nil, {timeouts = {3, 5}})
-    end, nil, 'getBookProgression')
-    local loc = r and r.body and r.body.locator
-    return r
-end
-
--- EPUB 进度上传: PUT /progression, payload 为 R2Progression(服务器按 locator 重算 totalProgression,
--- 并换算 readProgress.page; totalProgression 到 1 时自动标 completed)
--- upload 需含 {bookId, name, url, number, book_cache_id, locator, frac, current_page, pages}
-function M:saveBookProgression(upload)
-    if not (H.is_str(upload.bookId) and H.is_tbl(upload.locator)
-        and H.is_str(upload.name) and H.is_str(upload.url)) then
-        return wrap_response(nil, '参数错误')
-    end
-    -- 读完(整卷比例 >= 99.9%): 本地标记已读, 服务器读满(totalProgression=1)会自动标 completed
-    if H.is_num(upload.frac) and upload.frac >= 0.999 then
-        self.dbManager:updateVolumeIsRead(upload, upload.current_page, true)
-    end
-    -- modified 必须严格递增, 否则服务器 409 Conflict; 同秒内多次上传时间戳加 1 秒
-    local ts = os.time()
-    if ts <= (self._last_prog_modified_ts or 0) then
-        ts = (self._last_prog_modified_ts or 0) + 1
-    end
-    self._last_prog_modified_ts = ts
-    local r = self:komgaApi(function()
-        -- PUT /api/v1/books/:id/progression
-        return self.api:put("/api/v1/books/" .. upload.bookId .. "/progression", nil, {
-            modified = os.date("!%Y-%m-%dT%H:%M:%SZ", ts),
-            device = {id = "koreader", name = "KOReader"},
-            locator = upload.locator
-        }, {timeouts = {3, 5}})
-    end, nil, 'saveBookProgression')
-    return r
-end
-
--- EPUB: 全书位置查找表(totalProgression 单调递增), 供 frac→locator 映射
-function M:getBookPositions(bookId)
-    if not H.is_str(bookId) then
-        return wrap_response(nil, '参数错误')
-    end
-    local r = self:komgaApi(function()
-        -- GET /api/v1/books/:id/positions(readium position-list)
-        return self.api:get("/api/v1/books/" .. bookId .. "/positions", nil, {timeouts = {3, 5}})
-    end, nil, 'getBookPositions')
-    return r
-end
+-- 方法体在 Komga/BackendProgress(install(M) 注入, 避免模块环)
+require("Komga/BackendProgress")(M)
 
 function M:refreshVolumeContent(volume)
 
@@ -1179,23 +1049,6 @@ function M:getVolumeByBookId(bookCacheId, bookId)
     return self.dbManager:getVolumeByBookId(bookCacheId, bookId)
 end
 
--- Komga 原生"同系列下一本书"(/books/:id/next, 404=无下一本)。
--- 在线跨卷续读用; 任何失败(离线/超时/无下一本)返回 nil, 调用方静默回退
-function M:getNextBookOnServer(bookId)
-    if not (H.is_str(bookId) and NetworkMgr:isConnected()) then
-        return nil
-    end
-    local response = self:komgaApi(function()
-        -- GET /api/v1/books/:id/next(404 = 无下一本)
-        return self.api:get("/api/v1/books/" .. bookId .. "/next", nil, {timeouts = {4, 6}})
-    end, nil, 'getNextBook')
-    if H.is_tbl(response) and response.type == 'SUCCESS' and H.is_tbl(response.body)
-        and H.is_str(response.body.id) then
-        return response.body
-    end
-    return nil
-end
-
 function M:getSeriesInfoCache(bookCacheId)
     local bookShelfId = self:getServerPathCode()
     return self.dbManager:getSeriesInfo(bookShelfId, bookCacheId)
@@ -1781,19 +1634,6 @@ function M:downloadVolume(volume, message_dialog)
 
 end
 
-function M:getServerPathCode()
-    if self.settings_data.data['server_address_md5'] == nil then
-        local server_address_md5 = socket_url.parse(self.settings_data.data['server_address']).host
-        self.settings_data.data['server_address_md5'] = md5(server_address_md5)
-        self:saveSettings()
-    end
-    return tostring(self.settings_data.data['server_address_md5'])
-end
-
-function M:getSettings()
-    return self.settings_data.data
-end
-
 -- 打点系列"最后阅读"时间(静默, 失败不影响阅读)
 function M:touchSeriesLastRead(book_cache_id)
     pcall(function()
@@ -1825,208 +1665,8 @@ function M:runCacheJanitor(on_done)
     return wrap_response(true)
 end
 
--- 当前生效的 X-API-Key: 设置项 api_key, 未设置/为空时回落代码预设值
-function M:getApiKey()
-    local key = self.settings_data and self.settings_data.data and self.settings_data.data.api_key
-    if H.is_str(key) and key ~= '' then
-        return key
-    end
-    return Config.DEFAULT_API_KEY
-end
-
--- 设置 X-API-Key(立即持久化生效)
-function M:setApiKey(new_api_key)
-    if not H.is_str(new_api_key) or new_api_key == '' then
-        return wrap_response(nil, 'API Key 不能为空')
-    end
-    if not self.settings_data or not self.settings_data.data then
-        return wrap_response(nil, '设置未初始化')
-    end
-    self.settings_data.data.api_key = new_api_key
-    self.settings_data:flush()
-    return wrap_response(self.settings_data.data)
-end
-
--- ---------------------------------------------------------------------------
--- 多服务器配置(场景: 家里局域网地址 ↔ 外网域名 一键切换)
--- 配置存于设置项 server_profiles = { {name, server_address, api_key}, ... };
--- 当前生效值仍为 server_address/api_key 两个字段(向后兼容)。
--- ---------------------------------------------------------------------------
-function M:getServerProfiles()
-    if not self.settings_data then
-        return {}
-    end
-    local profiles = self.settings_data.data.server_profiles
-    if not H.is_tbl(profiles) then
-        return {}
-    end
-    return profiles
-end
-
--- 保存当前生效的服务器为一份具名配置(同名覆盖)
-function M:saveServerProfile(name)
-    if not (H.is_str(name) and name ~= "") then
-        return wrap_response(nil, '配置名不能为空')
-    end
-    local data = self.settings_data and self.settings_data.data
-    if not (H.is_tbl(data) and H.is_str(data.server_address)) then
-        return wrap_response(nil, '设置未初始化')
-    end
-    local profiles = H.is_tbl(data.server_profiles) and data.server_profiles or {}
-    local entry = {
-        name = name,
-        server_address = data.server_address,
-        api_key = H.is_str(data.api_key) and data.api_key or "",
-    }
-    local replaced = false
-    for i, p in ipairs(profiles) do
-        if p.name == name then
-            profiles[i] = entry
-            replaced = true
-            break
-        end
-    end
-    if not replaced then
-        table.insert(profiles, entry)
-    end
-    data.server_profiles = profiles
-    self.settings_data:flush()
-    return wrap_response(profiles)
-end
-
--- 删除具名配置
-function M:deleteServerProfile(name)
-    if not H.is_str(name) then
-        return wrap_response(nil, '参数错误')
-    end
-    local data = self.settings_data and self.settings_data.data
-    local profiles = H.is_tbl(data and data.server_profiles) and data.server_profiles or {}
-    local kept = {}
-    for _, p in ipairs(profiles) do
-        if p.name ~= name then
-            table.insert(kept, p)
-        end
-    end
-    data.server_profiles = kept
-    self.settings_data:flush()
-    return wrap_response(kept)
-end
-
--- 切换到具名配置(立即生效: 重建 REST 客户端, 无需重启)
-function M:switchServerProfile(name)
-    if not H.is_str(name) then
-        return wrap_response(nil, '参数错误')
-    end
-    local data = self.settings_data and self.settings_data.data
-    if not H.is_tbl(data) then
-        return wrap_response(nil, '设置未初始化')
-    end
-    local target
-    for _, p in ipairs(self:getServerProfiles()) do
-        if p.name == name then
-            target = p
-            break
-        end
-    end
-    if not H.is_tbl(target) then
-        return wrap_response(nil, '配置不存在: ' .. name)
-    end
-    -- 地址无变化时仅同步 key, 避免无谓的客户端重建
-    local address_changed = (data.server_address ~= target.server_address)
-    data.server_address = target.server_address
-    if H.is_str(target.api_key) and target.api_key ~= "" then
-        data.api_key = target.api_key
-    end
-    -- 书架分组键按主机 md5 派生, 换服务器必须失效重算
-    data.server_address_md5 = nil
-    self.settings_data:flush()
-    if address_changed then
-        self:loadApiClient()
-    end
-    return wrap_response(self.settings_data.data)
-end
-
-function M:saveSettings(settings)
-    if H.is_tbl(settings) and H.is_str(self.settings_data.data.server_address) then
-        if not H.is_str(settings.server_address) or not H.is_str(settings.chapter_sorting_mode) then
-            return wrap_response(nil, '参数校检错误，保存失败')
-        end
-        self.settings_data.data = settings
-    end
-    self.settings_data:flush()
-    self.settings_data = LuaSettings:open(H.getUserSettingsPath())
-    return wrap_response(true)
-end
-
-function M:setEndpointUrl(new_setting_url)
-
-    if not H.is_str(new_setting_url) or new_setting_url == '' then
-        return wrap_response(nil, '参数校检错误，保存失败')
-    end
-
-    local parsed = socket_url.parse(new_setting_url)
-    if not parsed then
-        return wrap_response(nil, '地址不合规则，请检查')
-    end
-
-    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
-        return wrap_response(nil, '不支持的协议，请检查')
-    end
-
-    if not parsed.host or parsed.host == "" then
-        return wrap_response(nil, "没有主机名")
-    end
-
-    if parsed.port then
-        local port_num = tonumber(parsed.port)
-        if not port_num or port_num < 1 or port_num > 65535 then
-            return wrap_response(nil, "端口号不正确")
-        end
-    end
-
-    local settings = self.settings_data.data
-    if parsed.user and parsed.user ~= "" then
-        self.settings_data.data.reader3_un = util.urlDecode(parsed.user)
-        self.settings_data.data.reader3_pwd = util.urlDecode(parsed.password)
-    end
-
-    local clean_url = socket_url.build(parsed)
-    local old_setting_url = self.settings_data.data.setting_url
-    -- dbg.log("server_address:", clean_url)
-    self.settings_data.data.server_address = clean_url
-    self.settings_data.data.setting_url = new_setting_url
-    self.settings_data.data.server_address_md5 = md5(parsed.host)
-    if not H.is_tbl(self.settings_data.data.servers_history) or not self.settings_data.data.servers_history[1] then
-        self.settings_data.data.servers_history = {}
-    end
-
-    local function updateHistoryItem(history_table, item, max_size)
-        local removed_old = false
-        for i = #history_table, 1, -1 do
-            if history_table[i] == item then
-                table.remove(history_table, i)
-                removed_old = true
-                break
-            end
-        end
-        table.insert(history_table, item)
-        if max_size and max_size > 0 then
-            while #history_table > max_size do
-                table.remove(history_table, 1)
-            end
-        end
-    end
-    
-    --添加历史记录
-    updateHistoryItem(self.settings_data.data.servers_history, old_setting_url, 10)
-
-    self:saveSettings()
-
-    -- 服务器地址已变更, 重建 REST 客户端
-    self:loadApiClient()
-
-    return wrap_response(self.settings_data.data)
-end
+-- 方法体在 Komga/BackendProfiles(install(M) 注入, 避免模块环)
+require("Komga/BackendProfiles")(M)
 
 function M:onExitClean()
     dbg.v('Backend call onExitClean')
