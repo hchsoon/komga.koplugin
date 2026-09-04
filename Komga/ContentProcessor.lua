@@ -10,6 +10,41 @@ local VolumePath = require("Komga/VolumePath")
 local ffiUtil = require("ffi/util")
 
 local M = {}
+
+-- 常量集合提升到模块级: 原先在 utf8_trim / isPunctuation 内每次调用重建
+-- (utf8_trim 逐行调用, isPunctuation 逐字符调用)
+local WHITESPACE_CP = {
+    [0x00A0] = true, [0x1680] = true,
+    [0x2000] = true, [0x2001] = true, [0x2002] = true, [0x2003] = true,
+    [0x2004] = true, [0x2005] = true, [0x2006] = true, [0x2007] = true,
+    [0x2008] = true, [0x2009] = true, [0x200A] = true, [0x200B] = true,
+    [0x202F] = true, [0x205F] = true, [0x3000] = true,
+    [0x0009] = true, [0x000A] = true, [0x000B] = true,
+    [0x000C] = true, [0x000D] = true, [0x0020] = true,
+}
+
+local PUNCTUATION_CHARS = {
+    ["\u{0021}"] = true, -- !
+    ["\u{002C}"] = true, -- ,
+    ["\u{002E}"] = true, -- .
+    ["\u{003A}"] = true, -- :
+    ["\u{003B}"] = true, -- ;
+    ["\u{003F}"] = true, -- ?
+    ["\u{3001}"] = true, -- 、
+    ["\u{3002}"] = true, -- 。
+    ["\u{FF0C}"] = true, -- ，
+    ["\u{FF0E}"] = true, -- ．
+    ["\u{FF1A}"] = true, -- ：
+    ["\u{FF1B}"] = true, -- ；
+    ["\u{FF1F}"] = true, -- ？
+    ["\u{2026}"] = true, -- …
+    ["\u{00B7}"] = true, -- ·
+    ["\u{2022}"] = true, -- •
+    ["\u{FF5E}"] = true, -- ～
+}
+
+-- 全角空格(U+3000): 与 %s(仅 ASCII 空白)一并视作空白
+local IDEOGRAPHIC_SPACE = "\u{3000}"
 function M.plain_text_replace(text, pattern, replacement, count)
     text = tostring(text or "")
     pattern = tostring(pattern or "")
@@ -67,8 +102,29 @@ function M.has_other_content(text)
     if type(text) ~= "string" then
         return false
     end
-    local without_img = text:gsub("<[iI][mM][gG][^>]+>", ""):gsub("\u{3000}", "")
-    return without_img:find("%S") ~= nil
+    -- 零复制: 原实现两次全文 gsub(img 标签剥离 + 全角空格)拷贝整串只为一次判空。
+    -- 现按位置扫 img 标签(与原剥离同款 [^>]+ 模式, 保持逐输入行为一致),
+    -- 只在标签间隙里找"非空白字符"(半角空白与 U+3000 之外)。
+    local from = 1
+    while true do
+        local s, e = text:find("<[iI][mM][gG][^>]+>", from)
+        local limit = (s or (#text + 1)) - 1
+        local p = from
+        while true do
+            local q = text:find("%S", p)
+            if not q or q > limit then
+                break
+            end
+            if text:sub(q, q + #IDEOGRAPHIC_SPACE - 1) ~= IDEOGRAPHIC_SPACE then
+                return true
+            end
+            p = q + #IDEOGRAPHIC_SPACE
+        end
+        if not s then
+            return false
+        end
+        from = e + 1
+    end
 end
 function M.has_img_tag(text)
     if type(text) ~= "string" then
@@ -81,15 +137,7 @@ function M.utf8_trim(str)
         return ""
     end
 
-    local whitespace = {
-        [0x00A0] = true, [0x1680] = true,
-        [0x2000] = true, [0x2001] = true, [0x2002] = true, [0x2003] = true,
-        [0x2004] = true, [0x2005] = true, [0x2006] = true, [0x2007] = true,
-        [0x2008] = true, [0x2009] = true, [0x200A] = true, [0x200B] = true,
-        [0x202F] = true, [0x205F] = true, [0x3000] = true,
-        [0x0009] = true, [0x000A] = true, [0x000B] = true,
-        [0x000C] = true, [0x000D] = true, [0x0020] = true,
-    }
+    local whitespace = WHITESPACE_CP
 
     -- 字节级 UTF-8 遍历: 首字节定长, 逐字符取码点
     local function each_char(str, from)
@@ -171,27 +219,7 @@ function M.splitParagraphsPreserveBlank(text)
             return false
         end
 
-        local punctuationSet = {
-            ["\u{0021}"] = true,
-            ["\u{002C}"] = true,
-            ["\u{002E}"] = true,
-            ["\u{003A}"] = true,
-            ["\u{003B}"] = true,
-            ["\u{003F}"] = true,
-            ["\u{3001}"] = true,
-            ["\u{3002}"] = true,
-            ["\u{FF0C}"] = true,
-            ["\u{FF0E}"] = true,
-            ["\u{FF1A}"] = true,
-            ["\u{FF1B}"] = true,
-            ["\u{FF1F}"] = true,
-            ["\u{2026}"] = true,
-            ["\u{00B7}"] = true,
-            ["\u{2022}"] = true,
-            ["\u{FF5E}"] = true
-        }
-
-        if punctuationSet[char] then
+        if PUNCTUATION_CHARS[char] then
             return true
         end
 
@@ -757,60 +785,26 @@ function M.process_volume_content(ctx, volume, content)
                 local img_pattern = "(<[Ii][Mm][Gg].-[Ss][Rr][Cc]%s*=%s*)(['\"])(.-)%2([^>]*>)"
                 local image_xlink_pattern = '(<image.-href%s*=%s*)(["\'])(.-)%2([^>]*>)'
                 local link_pattern = '(<link.-href%s*=%s*)(["\'])(.-)%2([^>]*>)'
-                for _, el in ipairs(root("script")) do
-                    if el then
-                        local el_text = el:gettext()
-                        if el_text then
-                            content = M.plain_text_replace(content, el_text, "")
-                        end
+                -- 单遍 gsub 统一改写(script 剥离 + link/svg-xlink/img 重定向)。
+                -- 原先在此之上还有四段 htmlparser 元素循环(script 内容剔除/head link/
+                -- body img/svg image), 逐元素 plain_text_replace 对全文做扫描替换
+                -- (N 张图 = N 次全串拷贝, 二次方开销), 且与这遍 gsub 完全重复
+                -- (下方 ^resources/ 跳过检查本就是为那批先行改写设计的), 故删。
+                -- XHTML 属性中 URL 的 & 会转义成 &amp;, processLink 需要原始 URL, 先还原。
+                local function decode_attr_url(path)
+                    if type(path) == "string" and path:find("&", 1, true) then
+                        return (path:gsub("&amp;", "&"))
                     end
-                end
-                for _, el in ipairs(root("head > link[href]")) do
-                    if el and el.attributes and el.attributes["href"] then
-                        local relpath = processLink(ctx, book_cache_id, el.attributes["href"], html_url)
-                        local el_text = el:gettext()
-                        if H.is_str(relpath) and el_text then
-                            local replace_text = M.plain_text_replace(el_text, el.attributes["href"], relpath)
-                            content = M.plain_text_replace(content, el_text, replace_text)
-                        end
-                    end
-                end
-                for _, el in ipairs(body[1]:select("img[src]")) do
-                    if el and el.attributes and el.attributes["src"] then
-                        local relpath = processLink(ctx, book_cache_id, el.attributes["src"], html_url)
-                        local el_text = el:gettext()
-                        if relpath and el_text then
-                            local replace_text = M.plain_text_replace(el_text, el.attributes["src"], relpath)
-                            content = M.plain_text_replace(content, el_text, replace_text)
-                        end
-                    end
-                end
-                for _, el in ipairs(body[1]:select("svg")) do
-                    if el then
-                        local el_text = el:gettext()
-                        for r1, r2, r3, r4 in el_text:gmatch(image_xlink_pattern) do
-                            local open, path, close = r1, r3, r4
-                            if not open or open == "" then
-                                return
-                            end
-                            open = open .. r2 or ""
-                            local relpath = processLink(ctx, book_cache_id, path, html_url)
-                            if H.is_str(relpath) then
-                                local replace_text = M.plain_text_replace(el_text, open .. path, open .. relpath)
-                                content = M.plain_text_replace(content, el_text, replace_text)
-                            end
-                        end
-                    end
+                    return path
                 end
 
-                -- 补充处理
                 content = content:gsub("<script[^>]*>(.-\n?)</script>", ""):gsub("<script[^>]*>[\x00-\xFF]-</script>",
                     ""):gsub(link_pattern, function(r1, r2, r3, r4)
                     local open, path, close = r1, r3, r4
                     if not (open and open ~= "" and path and path ~= "" and string.find(path, "^resources/") == nil) then
                         return
                     end
-                    local relpath = processLink(ctx, book_cache_id, path, html_url)
+                    local relpath = processLink(ctx, book_cache_id, decode_attr_url(path), html_url)
                     if H.is_str(relpath) then
                         r2 = r2 or ""
                         close = close or ""
@@ -819,9 +813,8 @@ function M.process_volume_content(ctx, volume, content)
                     return
                 end):gsub(image_xlink_pattern, function(r1, r2, r3, r4)
                     local open, path, close = r1, r3, r4
-                    -- 前面处理过了这里就跳过
                     if open and open ~= "" and path and string.find(path, "^resources/") == nil then
-                        local relpath = processLink(ctx, book_cache_id, path, html_url)
+                        local relpath = processLink(ctx, book_cache_id, decode_attr_url(path), html_url)
                         if H.is_str(relpath) then
                             r2 = r2 or ""
                             close = close or ""
@@ -834,7 +827,7 @@ function M.process_volume_content(ctx, volume, content)
                         return
                     end
                     local path = r3
-                    local relpath = processLink(ctx, book_cache_id, path, html_url)
+                    local relpath = processLink(ctx, book_cache_id, decode_attr_url(path), html_url)
                     if H.is_str(relpath) then
                         return table.concat({r1, r2, relpath, r2, r4})
                     end
