@@ -128,6 +128,20 @@ function LibraryView:closeMenu()
     end
 end
 
+-- 保存设置并统一提示: 成功走 on_ok(自定义成功提示), 失败弹统一错误提示;
+-- 收编 openMenu 各设置项重复的 HandleResponse+saveSettings 样板
+local function saveSettingsAndNotify(settings, on_ok)
+    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+        if on_ok then
+            on_ok(data)
+        end
+        return true
+    end, function(err_msg)
+        MessageBox:notice('设置失败：' .. tostring(err_msg))
+        return false
+    end)
+end
+
 function LibraryView:openInstalledReadSource()
 
     local setting_data = Backend:getSettings()
@@ -236,12 +250,8 @@ function LibraryView:openCacheManager()
                         return false
                     end
                     settings.cache_max_mb = math.floor(n)
-                    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                    return saveSettingsAndNotify(settings, function(data)
                         MessageBox:notice("缓存上限已更新")
-                        return true
-                    end, function(err_msg)
-                        MessageBox:notice('设置失败：' .. tostring(err_msg))
-                        return false
                     end)
                 end,
                 allow_newline = false
@@ -586,16 +596,12 @@ function LibraryView:openMenu()
             -- 默认"最后阅读"(刚读完的排最前), 未设置时从此模式起循环
             local order = { last_read = "updated", updated = "name", name = "last_read" }
             settings.series_sort_mode = order[settings.series_sort_mode or "last_read"]
-            return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+            return saveSettingsAndNotify(settings, function(data)
                 if LibraryView.instance and LibraryView.instance.onRefreshLibrary then
                     LibraryView.instance:onRefreshLibrary()
                 end
                 MessageBox:notice("书架排序：" .. (settings.series_sort_mode == "name" and "名称" or
                     settings.series_sort_mode == "updated" and "更新时间" or "最后阅读"))
-                return true
-            end, function(err_msg)
-                MessageBox:notice('设置失败：' .. tostring(err_msg))
-                return false
             end)
         end
     }}, {{
@@ -634,12 +640,8 @@ function LibraryView:openMenu()
                 (settings.whole_file_mode and '[整卷原文件]' or '[逐章管线]')), function(result)
                 if result then
                     settings.whole_file_mode = not settings.whole_file_mode and true or nil
-                    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                    return saveSettingsAndNotify(settings, function(data)
                         MessageBox:notice("已切换, 下次下载生效")
-                        return true
-                    end, function(err_msg)
-                        MessageBox:notice('设置失败：' .. tostring(err_msg))
-                        return false
                     end)
                 end
             end)
@@ -661,12 +663,8 @@ function LibraryView:openMenu()
                         return false
                     end
                     settings.preload_count = math.floor(n)
-                    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                    return saveSettingsAndNotify(settings, function(data)
                         MessageBox:notice("预载数量已更新")
-                        return true
-                    end, function(err_msg)
-                        MessageBox:notice('设置失败：' .. tostring(err_msg))
-                        return false
                     end)
                 end,
                 allow_newline = false
@@ -678,14 +676,10 @@ function LibraryView:openMenu()
         callback = function()
             UIManager:close(dialog)
             settings.debug_log = not settings.debug_log and true or nil
-            return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+            return saveSettingsAndNotify(settings, function(data)
                 require("Komga/Logger").setDebug(settings.debug_log == true)
                 MessageBox:notice(string.format("调试日志：%s（写入 komga.log）",
                     settings.debug_log and "开" or "关"))
-                return true
-            end, function(err_msg)
-                MessageBox:notice('设置失败：' .. tostring(err_msg))
-                return false
             end)
         end
     }}, {{
@@ -698,11 +692,9 @@ function LibraryView:openMenu()
                 (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
                 if result then
                     settings.stream_image_view = not settings.stream_image_view or nil
-                    Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                    saveSettingsAndNotify(settings, function(data)
                         MessageBox:notice("设置成功")
                         self:closeMenu()
-                    end, function(err_msg)
-                        MessageBox:error('设置失败:', err_msg)
                     end)
                 end
             end, {
@@ -724,11 +716,9 @@ function LibraryView:openMenu()
                 end
             end
             settings.stream_dual_page = next_mode ~= "auto" and next_mode or nil
-            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+            saveSettingsAndNotify(settings, function(data)
                 MessageBox:notice("流式双页: " .. stream_dual_mode_label(settings) ..
                     " (重新打开分卷生效)")
-            end, function(err_msg)
-                MessageBox:error('设置失败:', err_msg)
             end)
         end
     }}, {{
@@ -738,12 +728,10 @@ function LibraryView:openMenu()
             UIManager:close(dialog)
             -- 开启: 封面独占一屏, 之后 (2,3)(4,5) 配对(漫画书标准拼页); 关闭: (1,2)(3,4)
             settings.stream_dual_first_cover = settings.stream_dual_first_cover == false and true or false
-            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+            saveSettingsAndNotify(settings, function(data)
                 MessageBox:notice("双页首页为封面: " ..
                     (settings.stream_dual_first_cover ~= false and "开" or "关") ..
                     " (重新打开分卷生效)")
-            end, function(err_msg)
-                MessageBox:error('设置失败:', err_msg)
             end)
         end
     }}, {{
@@ -759,11 +747,9 @@ function LibraryView:openMenu()
             else
                 settings.stream_rtl = nil
             end
-            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+            saveSettingsAndNotify(settings, function(data)
                 MessageBox:notice("流式翻页方向: " .. stream_rtl_label(settings) ..
                     " (重新打开分卷生效)")
-            end, function(err_msg)
-                MessageBox:error('设置失败:', err_msg)
             end)
         end
     }}, {{
@@ -789,12 +775,8 @@ function LibraryView:openMenu()
                         return false
                     end
                     settings.browser_dir_name = new_name ~= DEFAULT_BROWSER_DIR_NAME and new_name or nil
-                    return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                    return saveSettingsAndNotify(settings, function(data)
                         MessageBox:notice("浏览器目录名已更新, 重启 KOReader 后生效")
-                        return true
-                    end, function(err_msg)
-                        MessageBox:notice('设置失败：' .. tostring(err_msg))
-                        return false
                     end)
                 end,
                 allow_newline = false
@@ -814,10 +796,8 @@ function LibraryView:openMenu()
                     if settings.disable_browser then
                         ok_msg = "设置已关闭，请手动删除目录"
                     end
-                    Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                    saveSettingsAndNotify(settings, function(data)
                         MessageBox:notice(ok_msg)
-                    end, function(err_msg)
-                        MessageBox:error('设置失败:', err_msg)
                     end)
                 end
             end, {
