@@ -57,12 +57,15 @@ function M.run(work_func, on_done, opts)
 
     local function child_entry(pid, child_write_fd)
         local ok, result = pcall(work_func)
-        local payload = ok
-            and Json.encode({ok = true, result = (result ~= nil) and result or true})
-            or Json.encode({ok = false, err = sanitize_err(result)})
-        if not payload then
-            -- 编码兜底(Json.backend == "none" 的极端环境): 至少回传成败标记
-            payload = ok and '{"ok":true}' or '{"ok":false}'
+        -- rapidjson 对不可编码值(函数/循环引用)会抛错: 编码失败降级为纯成败标记,
+        -- 避免子进程带着结果一起死掉, 父进程误报"子进程无输出"
+        local ok_payload, payload
+        if ok then
+            ok_payload, payload = pcall(Json.encode, {ok = true, result = (result ~= nil) and result or true})
+            payload = (ok_payload and payload) or '{"ok":true}'
+        else
+            ok_payload, payload = pcall(Json.encode, {ok = false, err = sanitize_err(result)})
+            payload = (ok_payload and payload) or '{"ok":false}'
         end
         pcall(ffiUtil.writeToFD, child_write_fd, payload, true)
     end
@@ -76,12 +79,14 @@ function M.run(work_func, on_done, opts)
     local handle = {pid = pid, fd = parent_read_fd, done = false, cancelled = false}
 
     local function cleanup()
+        -- 先终止子进程再排空管道: 卡死的子进程握着管道写端,
+        -- 先 readAllFromFD 会阻塞等 EOF, 让取消/超时路径在 UI 线程上永久挂起
+        if not ffiUtil.isSubProcessDone(pid) then
+            pcall(ffiUtil.terminateSubProcess, pid)
+        end
         if handle.fd then
             pcall(ffiUtil.readAllFromFD, handle.fd)
             handle.fd = nil
-        end
-        if not ffiUtil.isSubProcessDone(pid) then
-            pcall(ffiUtil.terminateSubProcess, pid)
         end
     end
 
@@ -101,14 +106,22 @@ function M.run(work_func, on_done, opts)
         cleanup()
     end
 
-    local started = os.time()
+    -- 超时计时优先单调时钟: os.time 是墙上时钟, NTP/手动对时跳变会误杀任务或延长看门狗
+    local function now_s()
+        if ffiUtil.monotonicTime then
+            return ffiUtil.monotonicTime()
+        end
+        return os.time()
+    end
+
+    local started = now_s()
 
     local function poll()
         if handle.done then
             return
         end
 
-        if os.time() - started > timeout then
+        if now_s() - started > timeout then
             logger.warn("[komga-async] 子进程超时", timeout, "s, 终止")
             cleanup()
             finish(false, nil, "async timeout")

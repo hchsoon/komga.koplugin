@@ -10,6 +10,12 @@ Komga/TaskQueue.lua — 具名任务通道(设计参考 legado.koplugin task/Que
 ]]
 local logger = require("logger")
 
+-- Async 延迟绑定(避免模块加载顺序问题, 且便于测试桩替换)
+local Async_run_guarded = function(func, callback, opts)
+    local Async = require("Komga/Async")
+    return Async.run(func, callback, opts)
+end
+
 local TaskQueue = {
     channels = {},
 }
@@ -158,12 +164,6 @@ function Channel:_run(task)
     end, {timeout = task.opts.timeout or 300})
 end
 
--- Async 延迟绑定(避免模块加载顺序问题, 且便于测试桩替换)
-function Async_run_guarded(func, callback, opts)
-    local Async = require("Komga/Async")
-    return Async.run(func, callback, opts)
-end
-
 function Channel:pause()
     self.paused = true
 end
@@ -205,6 +205,13 @@ function Channel:cancelTask(id)
     if task and task.status == "running" and task.handle and task.handle.cancel then
         task.handle.cancel()
         self.tasks[id] = nil
+        -- Async 取消不回调 on_done(见 Async.lua 头注), worker 名额必须在此归还:
+        -- 否则单 worker 通道永久卡死(isExtractingInBackground 恒真,
+        -- 下载/缓存清理全部被拒直到重启), 且要立即 _pump 唤醒排队任务
+        if self.active > 0 then
+            self.active = self.active - 1
+        end
+        self:_pump()
         return true
     end
     return false

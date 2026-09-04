@@ -186,7 +186,6 @@ function M:onClose()
     pcall(function()
         require("Komga/MemCleaner").sweep()
     end)
-    Backend:closeDbManager()
     if H.is_tbl(self.chapter) and H.is_num(self.chapter_imglist_cur) then
         Backend:saveVolumeProgress(self.chapter)
         -- 与 ReaderUI 关闭路径一致: 把流式阅读的整卷比例落盘到快捷方式 sidecar 并刷新文件夹显示
@@ -205,16 +204,11 @@ function M:onClose()
                 end
             end)
         end
-        -- if not (type(response) == 'table' and response.type == 'SUCCESS') then
-        --     local message = (type(response) == 'table' and response.message) or
-        --                         "进度上传失败，请稍后重试"
-        --     return {
-        --         type = 'ERROR',
-        --         message = message
-        --     }
-        -- end
     end
-    Backend:refreshLibraryCache()
+    -- 进度/sidecar 落盘完成后再收尾: 全库刷新转后台子进程(旧版在 UI 线程同步分页拉取,
+    -- 慢网下关书即冻结数秒), 且原"先关库再存进度"会迫使 saveVolumeProgress 重开连接;
+    -- 刷新任务自身 fork 前会关库
+    Backend:refreshLibraryCacheAsync()
     if H.is_func(self.on_return_callback) then
         self.on_return_callback()
     end
@@ -626,10 +620,15 @@ end
 
 function M:getTurnPageNextImage(call_event_type, image_num)
 
-    if self.image and self.image_disposable and self.image.free then
-        logger.dbg("释放当前图片资源：")
-        self.image:free()
-        self.image = nil
+    -- 旧图延后释放: 新图到手后才 free。先 free 后取图时, 任一失败分支提前返回
+    -- 都会让主帧引用已释放内存(重绘即崩), 且用户面前只剩残帧
+    local old_image = self.image
+    local function adopt_image(display, is_bb)
+        if old_image and self.image_disposable and old_image.free and old_image ~= display then
+            old_image:free()
+        end
+        self.image = display
+        self._image_is_bb = is_bb
     end
 
     -- 初始化章节索引和图片列表游标
@@ -654,8 +653,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             -- 取当前页(双页模式下取整个页对并拼合; 页对失败退回单页)
             local display, is_bb = self:fetchDisplayImage(image_num)
             if display then
-                self.image = display
-                self._image_is_bb = is_bb
+                adopt_image(display, is_bb)
                 self.chapter_imglist_cur = image_num
                 is_success = true
             else
@@ -687,8 +685,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
 
             local display, is_bb = self:fetchDisplayImage(new_image_num)
             if display then
-                self.image = display
-                self._image_is_bb = is_bb
+                adopt_image(display, is_bb)
                 self.chapter_imglist_cur = new_image_num
                 is_success = true
             else

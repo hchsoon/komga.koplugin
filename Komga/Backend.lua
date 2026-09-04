@@ -238,20 +238,6 @@ function M:backgroundCacheConfig()
     return self:getLuaConfig(H.getTempDirectory() .. '/cache.lua')
 end
 
-function print_table(t, indent)
-    indent = indent or 0
-    local spaces = string.rep("  ", indent)
-    
-    for k, v in pairs(t) do
-        if type(v) == "table" then
-            print(spaces .. tostring(k) .. ":")
-            print_table(v, indent + 1)
-        else
-            print(spaces .. tostring(k) .. ": " .. tostring(v))
-        end
-    end
-end
-
 -- 统一请求包装(原 komgaSporeApi): 错误映射 / 204 摘取 / content 摘取语义保持不变,
 -- 传输层由 Spore 换成 self.api(Komga/ApiClient, 直接 socket.http)。
 -- requestFunc 返回 {status, body, headers}(ApiClient 约定)或 nil, err_msg。
