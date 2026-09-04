@@ -33,6 +33,7 @@ return {
     FA_HOURGLASS = "\u{231B}",
     FA_FOLDER = "\u{F07B}",
     FA_HEART = "\u{F004}",
+    FA_PLAY = "\u{F04B}",
     FA_HOME = "\u{F015}",
     FA_INFO = "\u{F129}",
     FA_LINK = "\u{F0C1}",

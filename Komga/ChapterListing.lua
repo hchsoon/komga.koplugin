@@ -622,7 +622,7 @@ function ChapterListing:openMenu()
                 UIManager:show(SpinWidget:new{
                     value = 1,
                     value_min = 1,
-                    value_max = tonumber(all_chapters_count) or 10,
+                    value_max = tonumber(self.all_chapters_count) or 10,
                     value_step = 1,
                     value_hold_step = 5,
                     ok_text = "跳转",

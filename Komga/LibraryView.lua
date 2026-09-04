@@ -580,17 +580,18 @@ function LibraryView:openMenu()
     }}, {{
         text = string.format("%s 书架排序 [%s]", Icons.FA_BOOK,
             (settings.series_sort_mode == "name" and "名称" or
-            settings.series_sort_mode == "last_read" and "最后阅读" or "更新时间")),
+            settings.series_sort_mode == "updated" and "更新时间" or "最后阅读")),
         callback = function()
             UIManager:close(dialog)
-            local order = { updated = "name", name = "last_read", last_read = "updated" }
-            settings.series_sort_mode = order[settings.series_sort_mode or "updated"]
+            -- 默认"最后阅读"(刚读完的排最前), 未设置时从此模式起循环
+            local order = { last_read = "updated", updated = "name", name = "last_read" }
+            settings.series_sort_mode = order[settings.series_sort_mode or "last_read"]
             return Backend:HandleResponse(Backend:saveSettings(settings), function(data)
                 if LibraryView.instance and LibraryView.instance.onRefreshLibrary then
                     LibraryView.instance:onRefreshLibrary()
                 end
                 MessageBox:notice("书架排序：" .. (settings.series_sort_mode == "name" and "名称" or
-                    settings.series_sort_mode == "last_read" and "最后阅读" or "更新时间"))
+                    settings.series_sort_mode == "updated" and "更新时间" or "最后阅读"))
                 return true
             end, function(err_msg)
                 MessageBox:notice('设置失败：' .. tostring(err_msg))

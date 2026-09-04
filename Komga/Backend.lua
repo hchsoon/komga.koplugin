@@ -1820,12 +1820,12 @@ function M:isExtractingInBackground(task_pid)
 end
 
 function M:after_reader_chapter_show(volume)
+    local book_cache_id = volume.book_cache_id
     -- 书架"按最后阅读"排序打点
     self:touchSeriesLastRead(book_cache_id)
 
     local number = volume.number
     local cache_file_path = volume.cacheFilePath
-    local book_cache_id = volume.book_cache_id
     -- EPUB 分卷打开不标记已读: isRead 在 refreshVolumeMetadata 被当作"整卷满进度 100%"。
     -- 打开即标已读会把"没读完的卷"显示成 100%(用户反馈)。EPUB 整卷读完才标记,
     -- 由 saveBookProgression 按服务器空间整卷比例(totalProgression)>=99.9% 统一处理。

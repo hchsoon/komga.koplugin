@@ -102,7 +102,7 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
     if not (H.is_str(bookCacheId) and H.is_tbl(img_srcs) and #img_srcs > 0) then
         return false
     end
-    if self:isStreamPagesPreloading() == true then
+    if M.isStreamPagesPreloading() then
         return false
     end
     -- 过滤已缓存的页

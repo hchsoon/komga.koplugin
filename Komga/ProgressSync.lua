@@ -316,15 +316,17 @@ function ProgressSync:uploadCurrentProgress()
         -- 内部章节缓存扩展名随源页面 URL(.xhtml 或 .html), 统一经 VolumePath 解析;
         -- 解析失败会导致 locator 恒为"第 1 章 0%", 服务器进度冻结在卷首
         local cur_idx = VolumePath.chapterIndex(file)
+        -- 整卷原文件模式(.epub): 文件名无内部章节号, 实时比例即整卷比例;
+        -- 逐章模式: 章内比例经 positions 插值为服务器整卷比例(与整卷模式同源)
+        local vol_frac
         if cur_idx == nil and H.is_num(frac) then
-            -- 整卷原文件模式(.epub): 文件名无内部章节号, 实时比例即整卷比例,
-            -- 经 positions 插值为 locator(与逐章模式同源)
             vol_frac = math.min(math.max(frac, 0), 1)
+        else
+            vol_frac = cur_idx and self:epubChapterFracToServerFrac(chapter.bookId, cur_idx, frac)
         end
         local map, _ = self:epubChapterHrefMap(chapter.bookId)
         local href = cur_idx and map[cur_idx]
         local loc
-        local vol_frac = cur_idx and self:epubChapterFracToServerFrac(chapter.bookId, cur_idx, frac)
         -- 防回退冲刷: 若本次位置几乎在卷首(整卷比例 < 2%)而服务器已知进度领先(>5%),
         -- 说明是续读失败(未缓存卷首次打开/定位失败)落在第 1 页, 而非用户主动回到开头。
         -- 此时跳过上传, 避免把服务器进度和本地 komga_progress 一并冲刷成 ~0。

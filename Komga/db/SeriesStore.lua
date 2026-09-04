@@ -14,48 +14,14 @@ local H = require("Komga/Helper")
 
 local Store = {}
 
-function Store:getAllSeries(bookShelfId)
-    if bookShelfId == nil then
-        return {}
-    end
-    local sql_stmt = [[
-    SELECT bookCacheId, name, author, url, origin, originName, 
-    originOrder, durChapterIndex, durChapterPos FROM series WHERE isEnabled = 1 AND bookShelfId = ?;
-    ]]
-    -- 排序模式: updated=更新时间(默认)/name=名称/last_read=最后阅读; 手动置顶恒优先
-    local order_by = {
-        updated = "lastUpdated DESC",
-        name = "name COLLATE NOCASE ASC",
-        last_read = "lastRead DESC",
-    }
-    sql_stmt = sql_stmt .. " ORDER BY (sortOrder = 0) DESC, " ..
-        (order_by[sort_mode] or order_by.updated)
-    local result = self:execute(sql_stmt, {bookShelfId})
-    local series = {}
-    if result and #result > 0 then
+-- 排序模式: last_read=最后阅读(默认, 刚读完的排最前)/updated=更新时间/name=名称;
+-- 手动置顶恒优先。lastRead 为 NULL(从未打开)排在最后: SQLite 中 NULL 在 DESC 时恒小于任何值
+local ORDER_BY = {
+    last_read = "lastRead DESC",
+    updated = "lastUpdated DESC",
+    name = "name COLLATE NOCASE ASC",
+}
 
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            series[i] = {
-                book_self_id = bookShelfId,
-
-                cache_id = row[1],
-
-                name = row[2],
-                author = row[3],
-                url = row[4],
-                origin = row[5],
-                originName = row[6],
-                originOrder = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterPos = row[9]
-            }
-        end
-    end
-
-    return series
-end
 function Store:getAllSeriesByUI(bookShelfId, sort_mode)
     if bookShelfId == nil then
         return {}
@@ -63,6 +29,8 @@ function Store:getAllSeriesByUI(bookShelfId, sort_mode)
     local sql_stmt = [[
     SELECT bookCacheId, name, author, originName, lastRead, durChapterIndex, durChapterPos FROM series WHERE isEnabled = 1 AND bookShelfId = ?
     ]]
+    sql_stmt = sql_stmt .. " ORDER BY (sortOrder = 0) DESC, " ..
+        (ORDER_BY[sort_mode] or ORDER_BY.last_read)
     local result = self:execute(sql_stmt, {bookShelfId})
     local series = {}
     if H.is_tbl(result) and #result > 0 then

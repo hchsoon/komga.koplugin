@@ -1,7 +1,8 @@
 -- luacheck 配置(参考 comicreader.koplugin / KOReader 上游)
 -- 运行: luacheck Komga/ patches/ main.lua
--- 当前仓库存量告警较多, 先以 warning-only 引入, 不阻塞提交;
--- 新增代码请保持 0 error。
+-- 全局变量告警(111/112/113)必须保持开启: 曾有多处"nil 全局"笔误静默弄死功能
+-- (StreamPageCache 预取/书架排序打点/跳章上限等), 靠的就是这组告警。
+-- 其余风格类告警(遮蔽/空白行/超长行)warning-only, 不阻塞提交。
 std = "lua51+luajit"
 
 -- KOReader 运行时注入的全局
@@ -24,7 +25,8 @@ ignore = {
     "542", -- empty if branch
 }
 
--- 测试与参考目录不检查
+-- 测试与参考目录不检查; main.css.lua 是纯 CSS 资源, 非 Lua
 exclude_files = {
     "spec/**",
+    "Komga/main.css.lua",
 }
