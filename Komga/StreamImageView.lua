@@ -676,6 +676,14 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         self.chapter.current_page = self.chapter_imglist_cur
         Backend:saveVolumeProgress(self.chapter)
         self.chapter =  Backend:getVolumeInfoCache(self.bookinfo.cache_id,current_number)
+        -- 同步 LibraryView 的阅读状态: 进度上传用的是视图内 chapter(所以 komga
+        -- 能收到新卷进度), 而 KOReader 阅读历史映射/快捷方式 sidecar 落盘用的是
+        -- LibraryView.displayed_chapter —— 跨卷后不同步会让历史停留在旧卷
+        local okLV, LibraryView = pcall(require, "Komga/LibraryView")
+        local inst = okLV and LibraryView and LibraryView.instance
+        if inst and H.is_tbl(self.chapter) then
+            inst.displayed_chapter = self.chapter
+        end
         local new_chapter_imglist = Backend:getVolumePageUrls(self.chapter)
 
         if H.is_tbl(new_chapter_imglist) and #new_chapter_imglist > 0 then
