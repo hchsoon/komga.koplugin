@@ -119,6 +119,10 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
         return false
     end
 
+    local cache_id = bookCacheId
+    local dir = M.getStreamPageCacheDir(cache_id)
+    H.checkAndCreateFolder(dir)
+
     local Http = httpReq()
     local batch_headers = Http.get_default_headers()
     cancel_requested = false -- 新一轮预取复位取消标志(上次关卷触发的取消不再生效)

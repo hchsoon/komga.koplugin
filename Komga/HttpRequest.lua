@@ -102,7 +102,11 @@ local function describe_http_error(code, status)
     elseif type(code) == "number" and code >= 500 then
         return "HTTP " .. code .. ": 服务器错误"
     elseif type(code) == "number" then
-        return "HTTP " .. code .. ": " .. (status and status ~= "" and status or "请求失败")
+        -- luasocket 的 status 已形如 "HTTP/1.1 400 Bad Request", 直接展示避免重复
+        if status and status ~= "" then
+            return status
+        end
+        return "HTTP " .. code .. ": 请求失败"
     end
     return "Remote server error or unavailable"
 end

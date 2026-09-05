@@ -26,6 +26,10 @@ function M:saveVolumeProgress(volume)
     if not (H.is_str(volume.name) and H.is_str(volume.url)) then
         return wrap_response(nil, '参数错误')
     end
+    -- 图片列表加载失败等场景 current_page 为 nil: 缺页码上传必被服务器 400 拒绝, 直接跳过
+    if not H.is_num(volume.current_page) then
+        return wrap_response(nil, '无有效页码进度, 跳过上传')
+    end
 
     local number = volume.number
     local finish = (volume.current_page == volume.pages)
