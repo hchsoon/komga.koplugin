@@ -279,8 +279,32 @@ function M:getVolumePageUrls(volume)
 
     local imgs = {}
 
-    for j = 1,volume.pages do
-        table.insert(imgs,server_address .. "/api/v1/books/" .. volume.bookId .. "/pages/" ..j)
+    -- pages 缺失(部分书的 media.pagesCount 未入库)时无法构造页 URL;
+    -- 先从服务器补拉一次并回写 DB, 此前直接 for 迭代 nil 会抛
+    -- "'for' limit must be a number" 并杀死整个下载子任务
+    local pages = tonumber(volume.pages)
+    if not pages or pages < 1 then
+        local resp = self:getVolumeReadProgress(volume)
+        local media = resp and resp.body and resp.body.media
+        pages = tonumber(media and media.pagesCount)
+        if pages and pages > 0 then
+            volume.pages = pages
+            pcall(function()
+                self.dbManager:dynamicUpdateVolume({
+                    book_cache_id = volume.book_cache_id,
+                    bookId = volume.bookId,
+                    number = number,
+                }, { pages = pages })
+            end)
+        end
+    end
+
+    if not pages or pages < 1 then
+        return imgs
+    end
+
+    for j = 1, pages do
+        table.insert(imgs, server_address .. "/api/v1/books/" .. volume.bookId .. "/pages/" .. j)
     end
 
     return imgs

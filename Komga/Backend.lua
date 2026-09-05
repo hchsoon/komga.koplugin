@@ -172,6 +172,13 @@ end
 function M:installPatches()
     local patches_file_path = H.joinPath(H.getUserPatchesDirectory(), '2-komga_plugin_func.lua')
     local source_patches = H.joinPath(H.getPluginDirectory(), 'patches/2-komga_plugin_func.lua')
+
+    -- 已安装且内容一致时跳过重装与重启: 此前无条件覆盖+重启,
+    -- 导致每次启动第一次打开 Komga 都被踢回主页, 第二次才能进入
+    if util.fileExists(patches_file_path) and M.isFileContentEqual(source_patches, patches_file_path) then
+        return
+    end
+
     local disabled_patches = patches_file_path .. '.disabled'
     for _, file in ipairs({patches_file_path, disabled_patches}) do
         if util.fileExists(file) then
@@ -180,6 +187,33 @@ function M:installPatches()
     end
     H.copyFileFromTo(source_patches, patches_file_path)
     UIManager:restartKOReader()
+end
+
+-- 逐块比较两个文件内容是否一致(任一不存在返回 false)
+function M.isFileContentEqual(path_a, path_b)
+    local fa = io.open(path_a, "rb")
+    if not fa then
+        return false
+    end
+    local fb = io.open(path_b, "rb")
+    if not fb then
+        fa:close()
+        return false
+    end
+    while true do
+        local ca = fa:read(8192)
+        local cb = fb:read(8192)
+        if ca ~= cb then
+            fa:close()
+            fb:close()
+            return false
+        end
+        if not ca then
+            fa:close()
+            fb:close()
+            return true
+        end
+    end
 end
 
 function M:show_notice(msg, timeout)
