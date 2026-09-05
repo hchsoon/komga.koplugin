@@ -537,10 +537,14 @@ function M:execute(sql, params, options)
         if is_write then
             stmt:step()
 
-            return {
-                last_insert_rowid = conn:rowexec("SELECT last_insert_rowid() AS id") or 0,
-                changes = conn:rowexec("SELECT changes() AS count") or 0
-            }
+            -- rowid/changes 统计需额外两条查询, 仅调用方显式索取时执行
+            if options.return_write_stats then
+                return {
+                    last_insert_rowid = conn:rowexec("SELECT last_insert_rowid() AS id") or 0,
+                    changes = conn:rowexec("SELECT changes() AS count") or 0
+                }
+            end
+            return true
         else
 
             local result = {}

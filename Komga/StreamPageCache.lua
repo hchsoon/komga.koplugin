@@ -74,8 +74,11 @@ M.removeStreamPageCache = function(bookCacheId, img_src)
     end
 end
 
--- 清空流式页缓存目录(关卷时调用)
+-- 清空流式页缓存目录(关卷时调用); 同时请求取消进行中的预取
+local cancel_requested = false
+
 function M.clearStreamPageCache(bookCacheId)
+    cancel_requested = true
     local dir = M.getStreamPageCacheDir(bookCacheId)
     if not dir then
         return
@@ -116,13 +119,9 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
         return false
     end
 
-    local cache_id = bookCacheId
-    local dir = M.getStreamPageCacheDir(cache_id)
-    H.checkAndCreateFolder(dir)
-
-    -- 批量取一次默认请求头随每页传入: 不传时 pStreamToFile 会逐页读设置文件解析 API Key
     local Http = httpReq()
     local batch_headers = Http.get_default_headers()
+    cancel_requested = false -- 新一轮预取复位取消标志(上次关卷触发的取消不再生效)
     TaskQueue.getChannel("stream", 1):push(function()
         local pStreamToFile = Http.pStreamToFile
         for i = 1, #tasks do
@@ -135,7 +134,9 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
                 dest = base_no_ext .. ".dl",
                 headers = batch_headers,
                 timeout = 30,
-                maxtime = 90
+                maxtime = 90,
+                -- 关卷清缓存后中止剩余预取, 不再对已删除目录刷错误日志
+                should_cancel = function() return cancel_requested end,
             })
             if ok and H.is_tbl(res) then
                 local ext = (H.is_str(res.ext) and res.ext ~= "") and res.ext or "jpg"

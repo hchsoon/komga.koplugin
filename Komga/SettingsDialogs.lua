@@ -117,14 +117,30 @@ function LibraryView:openCacheManager()
     local ButtonDialog = require("ui/widget/buttondialog")
     local settings = Backend:getSettings()
     local usage = Backend:getCacheUsage()
-    local used_mb = math.floor((usage.used_bytes or 0) / 1024 / 1024)
     local max_mb = math.floor((usage.max_bytes or 0) / 1024 / 1024)
+    -- 占用由 refreshCacheUsageAsync 后台统计并缓存; 未统计时点"重新统计"获取
+    local used_label
+    if H.is_num(usage.used_bytes) then
+        used_label = string.format("可清理缓存占用: %d MB / 上限 %d MB",
+            math.floor(usage.used_bytes / 1048576), max_mb)
+    else
+        used_label = string.format("可清理缓存占用: 尚未统计 / 上限 %d MB", max_mb)
+    end
     local dialog
     local buttons = {}
 
     table.insert(buttons, {{
-        text = string.format("可清理缓存占用: %d MB / 上限 %d MB", used_mb, max_mb),
+        text = used_label,
         callback = function() end,
+    }})
+    table.insert(buttons, {{
+        text = Icons.FA_REFRESH .. " 重新统计占用",
+        callback = function()
+            UIManager:close(dialog)
+            Backend:refreshCacheUsageAsync(function()
+                self:openCacheManager()
+            end)
+        end,
     }})
     table.insert(buttons, {{
         text = Icons.FA_FOLDER .. " 设置上限 (MB)",

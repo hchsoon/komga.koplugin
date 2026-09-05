@@ -72,7 +72,7 @@ local function init_book_browser(parent)
     function book_browser:deleteFile(file, is_file)
         self.parent:deleteFile(file, is_file)
     end
-    function book_browser:verifyBooksMetadata()
+    function book_browser:verifyBooksMetadata(chunk_size)
         -- possible cover name change
         local browser_homedir = self.parent:getBrowserHomeDir()
         if not util.directoryExists(browser_homedir) then
@@ -92,22 +92,30 @@ local function init_book_browser(parent)
             return doc_settings:readSetting("book_cache_id")
         end
 
+        -- 先纯遍历收集快捷方式清单, 再分块处理(每块间让出主循环):
+        -- 每个文件要读配置/查 DB/写 sidecar, 大库一次性同步处理会长时间卡死 UI
+        local targets = {}
         util.findFiles(browser_homedir, function(fullpath, name)
-            if not is_valid_book_file(fullpath, name) then
-                goto continue
+            if is_valid_book_file(fullpath, name) then
+                targets[#targets + 1] = fullpath
             end
+        end, true)
 
+        local per_chunk = math.max(tonumber(chunk_size) or 5, 1)
+        local idx = 0
+
+        local function process_one(fullpath)
             local book_cache_id = get_book_id(fullpath)
             if not book_cache_id then
                 self:deleteFile(fullpath, true)
-                goto continue
+                return
             end
 
             local model = KomgaModel:new(book_cache_id)
             local bookinfo = model and model:getSeries() or nil
             if not (H.is_tbl(bookinfo) and bookinfo.name) then
                 self:deleteFile(fullpath, true)
-                goto continue
+                return
             end
 
             -- 分卷快捷方式走卷级元数据修复，避免被重写为系列
@@ -118,8 +126,20 @@ local function init_book_browser(parent)
             else
                 self:refreshBookMetadata(nil, fullpath, bookinfo)
             end
-            ::continue::
-        end, true)
+        end
+
+        local function step()
+            local budget = 0
+            while idx < #targets and budget < per_chunk do
+                idx = idx + 1
+                budget = budget + 1
+                pcall(process_one, targets[idx])
+            end
+            if idx < #targets then
+                UIManager:scheduleIn(0.05, step)
+            end
+        end
+        UIManager:scheduleIn(0.05, step)
     end
 
     function book_browser:wirteLnk(bookinfo, home_dir)

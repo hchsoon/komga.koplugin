@@ -23,7 +23,9 @@ local function lfs_mod()
     return require("libs/libkoreader-lfs")
 end
 
--- 收集可清理文件: {path=, size=, atime=}
+-- 收集可清理文件: {path=, size=, last_use=}
+-- last_use 取 modification 优先: 缓存文件写后不变, mtime 即首次落盘时间;
+-- atime 在 noatime/relatime 挂载下不更新, 作 LRU 依据会退化为创建序
 function M.collectEvictable(root)
     local lfs = lfs_mod()
     local out = {}
@@ -46,7 +48,7 @@ function M.collectEvictable(root)
                         out[#out + 1] = {
                             path = full,
                             size = attr.size or 0,
-                            atime = attr.access or attr.modification or 0,
+                            last_use = attr.modification or attr.access or 0,
                         }
                     end
                 end
@@ -65,8 +67,9 @@ function M.totalBytes(root)
     return total
 end
 
--- 按 atime 从旧到新删除, 直到总占用 <= limit_bytes。
--- 返回 {removed=, freed=, total=(清理后)}
+-- 按 last_use 从旧到新删除, 直到总占用 <= limit_bytes; 结束后自深至浅删除空目录
+-- (删空文件后残留的 resources/stream 等骨架目录)。
+-- 返回 {removed=, freed=, total=(清理后), pruned=}
 function M.enforceLimit(root, limit_bytes)
     local util = require("util")
     local files = M.collectEvictable(root)
@@ -75,7 +78,7 @@ function M.enforceLimit(root, limit_bytes)
         total = total + f.size
     end
     table.sort(files, function(a, b)
-        return a.atime < b.atime
+        return a.last_use < b.last_use
     end)
     local removed, freed = 0, 0
     for _, f in ipairs(files) do
@@ -90,7 +93,43 @@ function M.enforceLimit(root, limit_bytes)
             removed = removed + 1
         end
     end
-    return {removed = removed, freed = freed, total = total}
+    return {removed = removed, freed = freed, total = total, pruned = M.pruneEmptyDirs(root)}
+end
+
+-- 自深至浅删除空目录(root 本身保留); 非空目录 rmdir 失败即忽略
+function M.pruneEmptyDirs(root)
+    local lfs = lfs_mod()
+    if not root then
+        return 0
+    end
+    local dirs = {}
+    local function walk(dir)
+        local ok, iter = pcall(lfs.dir, dir)
+        if not ok or not iter then
+            return
+        end
+        dirs[#dirs + 1] = dir
+        for name in iter do
+            if name ~= "." and name ~= ".." then
+                local full = dir .. "/" .. name
+                local attr = lfs.attributes(full)
+                if attr and attr.mode == "directory" then
+                    walk(full)
+                end
+            end
+        end
+    end
+    walk(root)
+    local removed = 0
+    for i = #dirs, 2, -1 do
+        local ok = pcall(function()
+            lfs.rmdir(dirs[i])
+        end)
+        if ok then
+            removed = removed + 1
+        end
+    end
+    return removed
 end
 
 return M

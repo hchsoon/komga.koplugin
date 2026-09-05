@@ -5,10 +5,11 @@ Komga/TaskQueue.lua — 具名任务通道(设计参考 legado.koplugin task/Que
   本插件的后台域约定: "pages"/"stream"/"volume" 均为 1 worker, "cover" 为 2
 - 任务经 Komga/Async.run 在子进程执行: 超时/终止/回收由 Async 托管,
   fork 不可用时 Async 自动同步降级(此时任务在主进程串行执行)
-- 支持重试(max_retries)、插队(insert_at_head)、暂停/恢复、清空队列
+- 支持重试(max_retries + 可选 retry_delay 退避)、插队(insert_at_head)、暂停/恢复、清空队列
 - 失败重试不回调原 callback; 重试耗尽后才回调 (false, nil, err)
 ]]
 local logger = require("logger")
+local UIManager = require("ui/uimanager")
 
 -- Async 延迟绑定(避免模块加载顺序问题, 且便于测试桩替换)
 local Async_run_guarded = function(func, callback, opts)
@@ -150,7 +151,19 @@ function Channel:_run(task)
                 self.name, task.id, tostring(task.tag), task.retries, max_retries, tostring(err)))
             task.status = "queued"
             self.tasks[task.id] = task
-            table.insert(self.queue, task)
+            local delay = tonumber(task.opts.retry_delay) or 0
+            if delay > 0 then
+                -- 带退避的延迟重排: 延迟窗口内任务仍登记在册(hasTasks 为真)但不在队列
+                UIManager:scheduleIn(delay, function()
+                    if self.tasks[task.id] then
+                        table.insert(self.queue, task)
+                        self:_pump()
+                    end
+                end)
+            else
+                table.insert(self.queue, task)
+                self:_pump()
+            end
         else
             if not ok and task.opts.tag then
                 logger.warn(string.format("[task:%s] #%d(%s) 最终失败: %s",

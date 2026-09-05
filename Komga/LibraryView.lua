@@ -578,6 +578,21 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, number)
     if not (H.is_str(book_cache_id) and H.is_num(number)) then
         return
     end
+    -- 已跟踪本次阅读的快捷方式且侧车匹配时直用, 免去全目录扫描(关书路径的热点);
+    -- 跨卷后路径可能指向旧卷, 校验 book_cache_id + number 不匹配则走扫描兜底
+    local known = self.volume_lnk_path
+    if H.is_str(known) and util.fileExists(known) then
+        local ok_ds, ds = pcall(function()
+            return DocSettings:open(known)
+        end)
+        local props = ok_ds and ds and ds:readSetting("custom_props")
+        if H.is_tbl(props) and props.type == "volume" and props.number == number
+            and ds:readSetting("book_cache_id") == book_cache_id then
+            self:persistKomgaProgressToShortcut()
+            self.book_browser:refreshVolumeMetadata(nil, known, book_cache_id, number)
+            return
+        end
+    end
     local file_manager = FileManager.instance
     local dir = file_manager and file_manager.file_chooser and file_manager.file_chooser.path
     if not (H.is_str(dir) and is_komga_browser_dir_path(dir)) then

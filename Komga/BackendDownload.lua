@@ -325,6 +325,30 @@ function M:preLoadVolumes(volume, download_volume_count)
 
     self:closeDbManager()
 
+    -- 先把任务卷标记为 downloading_ 再 fork: 若在子进程启动后才写,
+    -- 先完成的卷会被父进程的 downloading_ 覆盖(表现为已下载卷状态回退)
+    local task_return_db_func = self.dbManager:transaction(
+        function(task_return_volume, content)
+
+            self.dbManager:cleanVolumeDownloading()
+
+            for i = 1, #task_return_volume do
+                local task_volume = task_return_volume[i]
+                if H.is_tbl(task_volume) and task_volume.number ~= nil and task_volume.book_cache_id ~=
+                    nil then
+                    self.dbManager:updateVolumeDownloadState(task_volume, content)
+                end
+            end
+        end)
+
+    local status, err = pcall(function()
+
+        task_return_db_func(volume_down_tasks, 'downloading_')
+    end)
+    if not status and err then
+        dbg.v("Download flag write error:", tostring(err))
+    end
+
     -- 经 TaskQueue "volume" 通道执行(1 worker, 串行; 超时/回收由通道+Async 托管)。
     -- 任务体内仍读写 task.pid.lua: 供 quit_the_background_download_job 协作式停止
     local task_pid = TaskQueue.getChannel("volume", 1):push(function()
@@ -472,28 +496,7 @@ function M:preLoadVolumes(volume, download_volume_count)
 
     dbg.v("Task queued on volume channel")
 
-    local task_return_db_func = self.dbManager:transaction(
-        function(task_return_volume, content)
-
-            self.dbManager:cleanVolumeDownloading()
-
-            for i = 1, #task_return_volume do
-                local task_volume = task_return_volume[i]
-                if H.is_tbl(task_volume) and task_volume.number ~= nil and task_volume.book_cache_id ~=
-                    nil then
-                    self.dbManager:updateVolumeDownloadState(task_volume, content)
-                end
-            end
-        end)
-
-    local status, err = pcall(function()
-
-        task_return_db_func(volume_down_tasks, 'downloading_')
-    end)
-    if not status and err then
-        dbg.v("Download flag write error:", tostring(err))
-    end
-
+    -- downloading_ 标记已在 fork 前写入(见上), 这里直接返回任务清单
     return true, volume_down_tasks
 
 end
@@ -942,23 +945,46 @@ function M:touchSeriesLastRead(book_cache_id)
     end)
 end
 
--- 缓存占用(可清理子集)与上限, 供设置菜单展示
+-- 缓存占用上限, 供设置菜单展示。占用(used_bytes)由 refreshCacheUsageAsync
+-- 在 janitor 子进程里统计后缓存 —— 此前每次打开菜单都同步全树递归 lfs 遍历, 卡顿明显
 function M:getCacheUsage()
     local root = H.joinPath(H.getTempDirectory(), "cache/komga.cache")
     local max_mb = tonumber(self.settings_data.data.cache_max_mb) or 1024
     return {
-        used_bytes = CacheJanitor.totalBytes(root),
+        used_bytes = self._cache_used_bytes,
+        used_at = self._cache_used_at,
         max_bytes = max_mb * 1024 * 1024,
         root = root,
     }
 end
 
--- 手动触发 LRU 清理(janitor 通道后台), on_done(ok, res) 可选回调
+-- 后台统计缓存占用(janitor 通道子进程执行 collectEvictable), 完成后回调 total
+function M:refreshCacheUsageAsync(on_done)
+    local root = H.joinPath(H.getTempDirectory(), "cache/komga.cache")
+    TaskQueue.getChannel("janitor", 1):push(function()
+        return CacheJanitor.totalBytes(root)
+    end, function(ok, total)
+        if ok and H.is_num(total) then
+            self._cache_used_bytes = total
+            self._cache_used_at = os.time()
+        end
+        if H.is_func(on_done) then
+            pcall(on_done, ok and total or nil)
+        end
+    end, {timeout = 300, tag = "cache_usage"})
+end
+
+-- 手动触发 LRU 清理(janitor 通道后台), on_done(ok, res) 可选回调。
+-- 清理结果里的 total 顺带刷新占用缓存, 下次打开菜单即为新值。
 function M:runCacheJanitor(on_done)
     local usage = self:getCacheUsage()
     TaskQueue.getChannel("janitor", 1):push(function()
         return CacheJanitor.enforceLimit(usage.root, usage.max_bytes)
     end, function(ok, res)
+        if ok and H.is_tbl(res) and H.is_num(res.total) then
+            self._cache_used_bytes = res.total
+            self._cache_used_at = os.time()
+        end
         if H.is_func(on_done) then
             pcall(on_done, ok, res)
         end

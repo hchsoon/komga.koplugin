@@ -13,6 +13,28 @@ local Json = require("Komga/Json")
 
 local M = {}
 
+-- 单一复用轮询器: 所有在飞任务共享一个定时器(取代此前每任务各挂一个
+-- 0.25s 轮询——长任务会累计上千次 UI 唤醒)。POLL_REGISTRY[handle] = poll_once,
+-- poll_once 返回 true 表示任务已终结(含完成/超时/出错), 由遍历方移除。
+local POLL_REGISTRY = {}
+local poll_scheduled = false
+
+local function schedule_poll()
+    if poll_scheduled or not next(POLL_REGISTRY) then
+        return
+    end
+    poll_scheduled = true
+    UIManager:scheduleIn(0.25, function()
+        poll_scheduled = false
+        for handle, poll_once in pairs(POLL_REGISTRY) do
+            if poll_once() then
+                POLL_REGISTRY[handle] = nil
+            end
+        end
+        schedule_poll()
+    end)
+end
+
 function M.is_available()
     return type(ffiUtil.runInSubProcess) == "function"
         and type(ffiUtil.writeToFD) == "function"
@@ -43,11 +65,10 @@ local function run_sync(work_func, on_done)
     return nil
 end
 
--- opts: { timeout = 300, poll_interval = 0.25 }
+-- opts: { timeout = 300 }
 -- 返回 handle: { pid, done, cancelled, cancel() }
 function M.run(work_func, on_done, opts)
     opts = opts or {}
-    local poll_interval = opts.poll_interval or 0.25
     local timeout = opts.timeout or 300
 
     if not M.is_available() then
@@ -103,6 +124,7 @@ function M.run(work_func, on_done, opts)
         end
         handle.cancelled = true
         handle.done = true
+        POLL_REGISTRY[handle] = nil
         cleanup()
     end
 
@@ -116,65 +138,79 @@ function M.run(work_func, on_done, opts)
 
     local started = now_s()
 
-    local function poll()
-        if handle.done then
-            return
-        end
+    -- 单次轮询(由模块级共享 poller 调度): 返回 true 表示任务已终结
+    local function poll_once()
+        local finished = false
+        local ok, perr = pcall(function()
+            if handle.done then
+                finished = true
+                return
+            end
 
-        if now_s() - started > timeout then
-            logger.warn("[komga-async] 子进程超时", timeout, "s, 终止")
-            cleanup()
-            finish(false, nil, "async timeout")
-            return
-        end
+            if now_s() - started > timeout then
+                logger.warn("[komga-async] 子进程超时", timeout, "s, 终止")
+                cleanup()
+                finish(false, nil, "async timeout")
+                finished = true
+                return
+            end
 
-        local sub_done = ffiUtil.isSubProcessDone(pid)
-        local has_data = handle.fd ~= nil and ffiUtil.getNonBlockingReadSize(handle.fd) ~= 0
+            local sub_done = ffiUtil.isSubProcessDone(pid)
+            local has_data = handle.fd ~= nil and ffiUtil.getNonBlockingReadSize(handle.fd) ~= 0
 
-        if sub_done or has_data then
-            local ok, val, err
-            if has_data then
-                local raw = ffiUtil.readAllFromFD(handle.fd)
-                handle.fd = nil
-                local decoded = raw and Json.decode(raw)
-                if type(decoded) == "table" then
-                    if decoded.ok then
-                        ok, val = true, decoded.result
-                    else
-                        ok, err = false, decoded.err or "unknown error"
-                    end
-                elseif sub_done then
-                    ok, val = true, nil
-                else
-                    ok, err = false, "malformed subprocess output"
-                end
-            else
-                if handle.fd then
-                    pcall(ffiUtil.readAllFromFD, handle.fd)
+            if sub_done or has_data then
+                local ok2, val, err2
+                if has_data then
+                    local raw = ffiUtil.readAllFromFD(handle.fd)
                     handle.fd = nil
-                end
-                ok, err = false, "subprocess exited without output"
-            end
-
-            -- 子进程尚未退出(管道先就绪): 按秒回收, 不阻塞
-            if not sub_done then
-                local collect_pid = pid
-                local collect
-                collect = function()
-                    if not ffiUtil.isSubProcessDone(collect_pid) then
-                        UIManager:scheduleIn(1, collect)
+                    local decoded = raw and Json.decode(raw)
+                    if type(decoded) == "table" then
+                        if decoded.ok then
+                            ok2, val = true, decoded.result
+                        else
+                            ok2, err2 = false, decoded.err or "unknown error"
+                        end
+                    elseif sub_done then
+                        ok2, val = true, nil
+                    else
+                        ok2, err2 = false, "malformed subprocess output"
                     end
+                else
+                    if handle.fd then
+                        pcall(ffiUtil.readAllFromFD, handle.fd)
+                        handle.fd = nil
+                    end
+                    ok2, err2 = false, "subprocess exited without output"
                 end
-                UIManager:scheduleIn(1, collect)
-            end
 
-            finish(ok, val, err)
-        else
-            UIManager:scheduleIn(poll_interval, poll)
+                -- 子进程尚未退出(管道先就绪): 按秒回收, 不阻塞
+                if not sub_done then
+                    local collect_pid = pid
+                    local collect
+                    collect = function()
+                        if not ffiUtil.isSubProcessDone(collect_pid) then
+                            UIManager:scheduleIn(1, collect)
+                        end
+                    end
+                    UIManager:scheduleIn(1, collect)
+                end
+
+                finish(ok2, val, err2)
+                finished = true
+            end
+        end)
+        if not ok then
+            -- 轮询自身异常: 也要终结任务, 否则通道名额与看门狗会永久悬挂
+            logger.err("[komga-async] poll error:", tostring(perr))
+            cleanup()
+            finish(false, nil, sanitize_err(perr))
+            finished = true
         end
+        return finished
     end
 
-    UIManager:scheduleIn(poll_interval, poll)
+    POLL_REGISTRY[handle] = poll_once
+    schedule_poll()
     return handle
 end
 

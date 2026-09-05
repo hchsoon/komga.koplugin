@@ -7,6 +7,7 @@ Komga/ProgressSync.lua — 阅读进度同步域(自 LibraryView 拆出, legado 
 ]]
 local UIManager = require("ui/uimanager")
 local NetworkMgr = require("ui/network/manager")
+local logger = require("logger")
 local util = require("util")
 local DocSettings = require("docsettings")
 local ReaderUI = require("apps/reader/readerui")
@@ -435,11 +436,17 @@ function ProgressSync:scheduleProgressUpload(upload_chapter)
             if loc then
                 upload_chapter.locator = loc
                 local ok_save, save_resp = pcall(Backend.saveBookProgression, Backend, upload_chapter)
+                if not ok_save then
+                    logger.warn("[KomgaProgress] progression 上传异常:", H.errorHandler(save_resp))
+                end
             else
                 -- positions 获取失败: 跳过本次上传(失败静默, 下次翻章/关闭再传)
             end
         else
             local ok_save, save_resp = pcall(Backend.saveVolumeProgress, Backend, upload_chapter)
+            if not ok_save then
+                logger.warn("[KomgaProgress] read-progress 上传异常:", H.errorHandler(save_resp))
+            end
         end
         self.progress_sync_busy = false
         local pending = self.progress_sync_pending
