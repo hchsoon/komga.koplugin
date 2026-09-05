@@ -151,6 +151,23 @@ M.install = function()
     -- lfs 是 ReadHistory/ReaderLink 两个补丁共用的 upvalue, 提到 install 作用域
     local lfs = require("libs/libkoreader-lfs")
 
+    apply("Suppress Closing book prompt during komga chapter switch", function()
+        local UIManager = require("ui/uimanager")
+        local original_show = UIManager.show
+        -- EPUB 章节切换经 switchDocument 关闭旧文档, 核心层会弹 "Closing book"
+        -- (翻译为"正在关闭书籍")提示, 每次翻章都闪一次。切换窗口期
+        -- (M.switching_chapter, 由 LibraryView 置位/定时清除)过滤该提示,
+        -- 手动关书的提示不受影响。
+        UIManager.show = function(self, widget, ...)
+            if M.switching_chapter and widget and type(widget.text) == "string"
+                and (widget.text:find("Closing book", 1, true)
+                    or widget.text:find("关闭书籍", 1, true)) then
+                return
+            end
+            return original_show(self, widget, ...)
+        end
+    end)
+
     apply("ReadHistory.addItem/updateLastBookTime", function()
     local ReadHistory = require("readhistory")
     local original_addItem = ReadHistory.addItem

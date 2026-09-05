@@ -976,6 +976,12 @@ function LibraryView:showReaderUI(chapter)
         end
     end
     if ReaderUI.instance then
+        -- 章节切换窗口期过滤核心层 "Closing book" 提示(补丁层实现, 3 秒后自动清除)
+        local patches_core = require("patches.core")
+        patches_core.switching_chapter = true
+        UIManager:scheduleIn(3, function()
+            patches_core.switching_chapter = nil
+        end)
         ReaderUI.instance:switchDocument(book_path, true, goto_resume_target)
     else
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
