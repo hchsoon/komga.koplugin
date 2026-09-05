@@ -447,19 +447,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         Backend:closeDbManager()
     end
 
-    -- 挂入 UI 事件链(幂等): 防止重复初始化时叠加插入导致事件双发
-    if parent_ref.ui then
-        local already_attached = false
-        for _, w in ipairs(parent_ref.ui) do
-            if w == parent_ref then
-                already_attached = true
-                break
-            end
-        end
-        if not already_attached then
-            table.insert(parent_ref.ui, 3, parent_ref)
-        end
-    end
+    -- 挂入 UI 事件链。注意: 必须保留无条件插入(不能因"已挂入"跳过)——
+    -- 事件经 WidgetContainer 逆序分发, 插件在索引 3 的早期挂载位置是
+    -- onEndOfBook/onSuspend 等处理器可靠触发的既有时序(2026-09 实测:
+    -- 改为幂等跳过后 EPUB/漫画实体翻页键失联)。
+    table.insert(parent_ref.ui, 3, parent_ref)
 
     function parent_ref:openFile(file)
         if not H.is_str(file) then
