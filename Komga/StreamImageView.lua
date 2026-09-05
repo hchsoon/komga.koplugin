@@ -165,7 +165,10 @@ function M:fetchAndShow(options)
     self.on_return_callback = options.on_return_callback
 
     local viewer = M:new{
-        image = self:loadChatperInitImage(self.chapter),
+        -- image 必须是列表形式: ImageViewer 仅在 _images_list 模式下把
+        -- 左/右 1/3 屏点击路由为 onShowPrevImage/onShowNextImage(翻页),
+        -- 中间 1/3 为按钮栏开关。传裸 blitbuffer 会退化为"点击仅开关按钮栏"。
+        image = {self:loadChatperInitImage(self.chapter)},
         fullscreen = true,
         with_title_bar = false,
         image_disposable = true,
