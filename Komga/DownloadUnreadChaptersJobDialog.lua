@@ -2,7 +2,6 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local UIManager = require("ui/uimanager")
 local Icons = require("Komga/Icons")
-local logger = require('logger')
 
 --- @class DownloadUnreadChaptersJobDialog
 --- @field job DownloadUnreadChapters
@@ -52,10 +51,8 @@ function M:pollAndCreateTextWidget()
     elseif state.type == 'PENDING' then
         if self.cancellation_requested then
             message = "正在等待下载被取消…"
-        elseif state.body.type == 'INITIALIZING' then
-            message = string.format("正在下载章节，这将需要一段时间… (%s / %s)", state.body.downloaded,
-                state.body.total)
         else
+            -- INITIALIZING 与下载中此前是两个完全相同的分支, 合并
             message = string.format("正在下载章节，这将需要一段时间… (%s / %s)", state.body.downloaded,
                 state.body.total)
         end

@@ -36,7 +36,7 @@ local M = ImageViewer:extend{
 -- 问题(留白透出旧画面)也一并由整屏铺白解决。
 -- 进度条每次绘制都按当前屏幕尺寸计算, 旋转(含重力感应)后自动跟随。
 function M:paintTo(bb, x, y)
-    local ok = pcall(function()
+    local ok, paint_err = pcall(function()
         local w = Screen:getWidth()
         local h = Screen:getHeight()
         bb:paintRect(0, 0, w, h, Blitbuffer.COLOR_WHITE)
@@ -73,6 +73,8 @@ function M:paintTo(bb, x, y)
         end
     end)
     if not ok then
+        -- 回退原生渲染前先留痕: 静默吞错会让自绘问题无从排查
+        logger.err("[komga-view] 自绘失败, 回退原生渲染:", tostring(paint_err))
         ImageViewer.paintTo(self, bb, x, y)
     end
 end
@@ -163,7 +165,7 @@ function M:fetchAndShow(options)
     self.on_return_callback = options.on_return_callback
 
     local viewer = M:new{
-        image = {self:loadChatperInitImage(self.chapter)},
+        image = self:loadChatperInitImage(self.chapter),
         fullscreen = true,
         with_title_bar = false,
         image_disposable = true,
