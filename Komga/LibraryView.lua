@@ -829,14 +829,13 @@ function LibraryView:loadAndRenderChapter(chapter)
     end
     -- 静默后台下载: 未命中预取缓存时在子进程下载+内容处理, 完成后回主线程打开。
     -- 旧版在 UI 线程同步下载, 大章节/慢网下翻章即冻结; fork 不可用时同步降级(行为同旧版)。
+    -- 全程无提示(仅失败轻提示), 不打断阅读。
     self._downloading_chapters = self._downloading_chapters or {}
     local dl_key = tostring(chapter.bookId or chapter.number)
     if self._downloading_chapters[dl_key] then
-        Backend:show_notice("章节后台下载中, 请稍候")
         return
     end
     self._downloading_chapters[dl_key] = true
-    Backend:show_notice("章节后台下载中")
     -- fork 前关库: 子进程经 getDB 用自有连接写库, 主线程按需懒重开
     Backend:closeDbManager()
     TaskQueue.getChannel("download", 1):push(function()
