@@ -549,6 +549,10 @@ function M:getAllEpubChapters(volume)
             volume.toc = inforesponse.body.toc
             volume.readingOrder = inforesponse.body.readingOrder
             self.dbManager:upsertEpubChapters(volume.book_cache_id,volume)
+            -- epub_chapter 行已补写, 失效 ProgressSync 的 href 映射缓存
+            pcall(function()
+                require("Komga/ProgressSync").invalidateEpubHrefMap(volume.book_cache_id)
+            end)
             epub_chapters = self.dbManager:getAllEpubChapters(volume.bookId)
         end
     end

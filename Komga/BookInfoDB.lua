@@ -430,12 +430,16 @@ local function validate_param_type(v, pos)
     end
 end
 
-function M:batch_insert(sql_template, data_list, batch_size)
+function M:batch_insert(sql_template, data_list, batch_size, pre_sql)
     batch_size = batch_size or 500
     validate_data_list(data_list)
 
     local function process_batch(batch_data)
         return self:transaction(function()
+            -- 可选前置 SQL(如"先停用旧系列"): 与首批写入同事务, 崩溃不留中间态
+            if pre_sql then
+                self:getDB():exec(pre_sql)
+            end
             local stmt = self:getDB():prepare(sql_template)
 
             local param_count = select(2, sql_template:gsub("%?", "%?"))

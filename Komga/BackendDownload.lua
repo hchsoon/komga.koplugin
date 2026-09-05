@@ -568,7 +568,12 @@ function M:preLoadEpubChapters(volume, count)
         end
         self:closeDbManager()
         return true
-    end, nil, {timeout = PAGES_WATCHDOG_TIMEOUT, tag = "epub_pages"})
+    end, function()
+        -- 子进程可能已补写 epub_chapter 行, 失效 ProgressSync 的 href 映射缓存
+        pcall(function()
+            require("Komga/ProgressSync").invalidateEpubHrefMap(book_cache_id)
+        end)
+    end, {timeout = PAGES_WATCHDOG_TIMEOUT, tag = "epub_pages"})
     return true
 end
 

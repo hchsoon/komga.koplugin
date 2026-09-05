@@ -843,6 +843,10 @@ function LibraryView:loadAndRenderChapter(chapter)
         return Backend:downloadVolume(chapter)
     end, function(ok, resp, err)
         self._downloading_chapters[dl_key] = nil
+        -- 子进程可能已补写 epub_chapter 行, 失效 ProgressSync 的 href 映射缓存
+        pcall(function()
+            require("Komga/ProgressSync").invalidateEpubHrefMap(chapter.book_cache_id)
+        end)
         if not ok then
             Backend:show_notice("章节下载失败" .. (H.is_str(err) and (": " .. err) or ""))
             return

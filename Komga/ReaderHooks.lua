@@ -14,6 +14,21 @@ local function is_komga_browser_dir_path(file_path)
     return Paths.isKomgaBrowserDirPath(file_path, Backend:getSettings().browser_dir_name)
 end
 
+-- book_defaults.lua 仅由本插件读写: 按路径缓存解析结果, 免去每次保存事件的
+-- 磁盘重读+重解析(对象为原地修改 + 条件 flush, 缓存即活值)
+local book_defaults_cache = {}
+local function get_book_defaults(book_defaults_path)
+    local cached = book_defaults_cache[book_defaults_path]
+    if cached then
+        return cached
+    end
+    local config = Backend:getLuaConfig(book_defaults_path)
+    if config then
+        book_defaults_cache[book_defaults_path] = config
+    end
+    return config
+end
+
 return function(LibraryView)
 function LibraryView:initializeRegisterEvent(parent_ref)
     local DocSettings = require("docsettings")
@@ -219,7 +234,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end
 
             if util.fileExists(book_defaults_path) then
-                local book_defaults = Backend:getLuaConfig(book_defaults_path)
+                local book_defaults = get_book_defaults(book_defaults_path)
                 if book_defaults and H.is_tbl(book_defaults.data) then
                     local summary = doc_settings.data.summary -- keep status
                     local book_defaults_data = util.tableDeepCopy(book_defaults.data)
@@ -283,7 +298,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             if self.ui.doc_settings and type(self.ui.doc_settings.data) == 'table' then
                 local persisted_settings_keys = require("Komga/BookMetaData")
                 local book_defaults_path = H.joinPath(directory, "book_defaults.lua")
-                local book_defaults = Backend:getLuaConfig(book_defaults_path)
+                local book_defaults = get_book_defaults(book_defaults_path)
                 local doc_settings_data = util.tableDeepCopy(self.ui.doc_settings.data)
                 local is_updated
 
@@ -432,7 +447,19 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         Backend:closeDbManager()
     end
 
-    table.insert(parent_ref.ui, 3, parent_ref)
+    -- 挂入 UI 事件链(幂等): 防止重复初始化时叠加插入导致事件双发
+    if parent_ref.ui then
+        local already_attached = false
+        for _, w in ipairs(parent_ref.ui) do
+            if w == parent_ref then
+                already_attached = true
+                break
+            end
+        end
+        if not already_attached then
+            table.insert(parent_ref.ui, 3, parent_ref)
+        end
+    end
 
     function parent_ref:openFile(file)
         if not H.is_str(file) then

@@ -115,10 +115,10 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
     end
 
     if batch_data and #batch_data > 0 then
-        if isUpdate ~= true then
-            self:getDB():exec("UPDATE series SET isEnabled = 0;")
-        end
-        self:batch_insert(sql_stmt, batch_data, 0)
+        -- "先停用旧系列"与批量写入同事务(pre_sql 随首批执行):
+        -- 此前两步独立, 中间崩溃会留下全书架被禁用的中间态
+        local pre_sql = (isUpdate ~= true) and "UPDATE series SET isEnabled = 0;" or nil
+        self:batch_insert(sql_stmt, batch_data, 0, pre_sql)
     end
 
     return true
@@ -566,7 +566,7 @@ end
 function Store:isVolumeDownloading(bookCacheId, bookId, number)
     if not H.is_str(bookCacheId) or not H.is_num(number) then
         dbg.log('Db isVolumeDownloading Error parameters')
-        return true
+        return false
     end
 
     local sql_stmt = [[
@@ -584,7 +584,9 @@ function Store:isVolumeDownloading(bookCacheId, bookId, number)
     local is_downing = ret == 1
 
     if not ok then
-        is_downing = true
+        -- 查询出错按"未在下载"处理: 原先返回 true 会连带拒绝清理等操作
+        logger.warn('isVolumeDownloading query failed:', H.errorHandler(ret))
+        is_downing = false
     end
     return is_downing
 end

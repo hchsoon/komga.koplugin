@@ -107,11 +107,27 @@ function ProgressSync:epubFractionToLocator(bookId, frac)
 end
 
 -- EPUB: 内部章节 index ↔ 相对 href 双向映射(以 basename 为键, 卷内唯一)
--- 上传用 idx→href 构造 locator; 续读用服务器 locator.href→idx 定位内部章节
+-- 上传用 idx→href 构造 locator; 续读用服务器 locator.href→idx 定位内部章节。
+-- 按 bookId 缓存(epub_chapter 行仅在 manifest 补写/预载后变化, 两处 upsert
+-- 均已失效缓存), 一次进度上传内的多次取图(定位+插值)只查一次库。
+local href_map_cache = {}
+
+function ProgressSync:invalidateEpubHrefMap(book_cache_id)
+    if book_cache_id then
+        href_map_cache[book_cache_id] = nil
+    else
+        href_map_cache = {}
+    end
+end
+
 function ProgressSync:epubChapterHrefMap(bookId)
     local map, rev = {}, {}
     if not H.is_str(bookId) then
         return map, rev
+    end
+    local cached = href_map_cache[bookId]
+    if cached then
+        return cached.map, cached.rev
     end
     local all = Backend.dbManager and Backend.dbManager:getAllEpubChapterUrls(bookId)
     if H.is_tbl(all) then
@@ -128,17 +144,18 @@ function ProgressSync:epubChapterHrefMap(bookId)
             end
         end
     end
+    href_map_cache[bookId] = {map = map, rev = rev}
     return map, rev
 end
 
 -- EPUB: 内部章节 + 章内比例 → 服务器整卷比例(0..1)
 -- 用 positions 表中同一资源(href)的条目插值, 得到该位置的服务器总进度, 用于构造 locator。
 -- 与上传方向一致: 服务器按 locator 重算的 totalProgression ≈ 该比例, 续读再按 href 反查回同一章节。
-function ProgressSync:epubChapterFracToServerFrac(bookId, number, frac)
+function ProgressSync:epubChapterFracToServerFrac(bookId, number, frac, map)
     if not (H.is_str(bookId) and H.is_num(number) and H.is_num(frac)) then
         return nil
     end
-    local map, _ = self:epubChapterHrefMap(bookId)
+    map = map or self:epubChapterHrefMap(bookId)
     local href = map[number]
     if not href then
         return nil
@@ -320,14 +337,14 @@ function ProgressSync:uploadCurrentProgress()
         local cur_idx = VolumePath.chapterIndex(file)
         -- 整卷原文件模式(.epub): 文件名无内部章节号, 实时比例即整卷比例;
         -- 逐章模式: 章内比例经 positions 插值为服务器整卷比例(与整卷模式同源)
+        local href_map = self:epubChapterHrefMap(chapter.bookId)
         local vol_frac
         if cur_idx == nil and H.is_num(frac) then
             vol_frac = math.min(math.max(frac, 0), 1)
         else
-            vol_frac = cur_idx and self:epubChapterFracToServerFrac(chapter.bookId, cur_idx, frac)
+            vol_frac = cur_idx and self:epubChapterFracToServerFrac(chapter.bookId, cur_idx, frac, href_map)
         end
-        local map, _ = self:epubChapterHrefMap(chapter.bookId)
-        local href = cur_idx and map[cur_idx]
+        local href = cur_idx and href_map[cur_idx]
         local loc
         -- 防回退冲刷: 若本次位置几乎在卷首(整卷比例 < 2%)而服务器已知进度领先(>5%),
         -- 说明是续读失败(未缓存卷首次打开/定位失败)落在第 1 页, 而非用户主动回到开头。
