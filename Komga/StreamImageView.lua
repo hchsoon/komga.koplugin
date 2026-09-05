@@ -138,6 +138,15 @@ function M:init()
                     end,
                 },
             },
+            {
+                {
+                    id = "goto",
+                    text = _("按页跳转"),
+                    callback = function()
+                        self:showPageJumpDialog()
+                    end,
+                },
+            },
         }
         self.button_table = ButtonTable:new{
             width = self.width - 2 * self.button_padding,
@@ -153,6 +162,34 @@ function M:init()
             self.button_table,
         }
     end
+end
+
+-- 按页码跳转: 在当前卷图片列表内跳到指定页。
+-- 经 getTurnPageNextImage 走既有翻页管线(预取/双页拼合/进度游标/关闭时上传均复用)。
+function M:showPageJumpDialog()
+    local total = H.is_tbl(self.chapter_imglist) and #self.chapter_imglist or 0
+    if total < 1 then
+        Backend:show_notice("当前卷无页码列表")
+        return
+    end
+    local cur = math.min(self.chapter_imglist_cur or 1, total)
+    local SpinWidget = require("ui/widget/spinwidget")
+    UIManager:show(SpinWidget:new{
+        title_text = string.format("跳转到页 (1 - %d)", total),
+        value = cur,
+        value_min = 1,
+        value_max = total,
+        value_step = 1,
+        value_hold_step = 5,
+        ok_text = "跳转",
+        cancel_text = "取消",
+        callback = function(spin)
+            local target = math.min(math.max(tonumber(spin.value) or cur, 1), total)
+            if target ~= cur then
+                self:getTurnPageNextImage(target > cur and 'next' or 'prev', target)
+            end
+        end,
+    })
 end
 
 function M:fetchAndShow(options)
