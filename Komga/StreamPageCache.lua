@@ -130,8 +130,10 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
             local base_no_ext = H.joinPath(dir, md5(src))
             -- 先流式落位到 .dl(扩展名下载后由 Content-Type 得知), 再改名为最终文件;
             -- 中断留下的 .part/.dl 下次按 Range 续传。
-            -- should_cancel: 缓存目录被删(关卷清理)时中止剩余预取
-            local ok, res = pcall(pStreamToFile, {
+            -- should_cancel: 缓存目录被删(关卷清理)时中止剩余预取。
+            -- 注意: pcall 会包住 pStreamToFile 的两个返回值(成功标志, 结果/原因),
+            -- 必须解开两层, 否则结果表落在第三个值里被丢弃(表现为 res=true 的"失败")
+            local pok, ok, res = pcall(pStreamToFile, {
                 url = src,
                 dest = base_no_ext .. ".dl",
                 headers = batch_headers,
@@ -139,6 +141,9 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
                 maxtime = 90,
                 should_cancel = function() return not util.fileExists(dir) end,
             })
+            if not pok then
+                ok, res = false, tostring(ok)
+            end
             if ok and H.is_tbl(res) then
                 local ext = (H.is_str(res.ext) and res.ext ~= "") and res.ext or "jpg"
                 local final = base_no_ext .. "." .. ext
