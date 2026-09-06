@@ -118,6 +118,8 @@ function LibraryView:addVolShortcut(bookinfo, seriename, always_add)
 end
 
 function LibraryView:onRefreshLibrary()
+    -- 手动刷新书架: 同时失效分卷目录的"已同步"标记, 下次进入分卷目录会重新逐卷刷新
+    self._vol_sync_done_at = nil
     if self.book_menu then
         self.book_menu:onRefreshLibrary()
     end
@@ -282,13 +284,12 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
     if self._bg_volume_sync[book_cache_id] then
         return
     end
-    -- 会话级缓存: 10 分钟内已完整同步过的系列直接跳过(重新进入分卷目录
-    -- 不再重复逐卷刷新元数据/广播, 这是目录"加载很久"的主因)。
+    -- 会话级缓存: 每个系列只在本次会话第一次进入分卷目录时做完整同步,
+    -- 后续进入直接跳过(重复逐卷刷新元数据/广播是目录"加载很久"的主因)。
     -- 进度/阅读状态变化仍会经 persistKomgaProgressToShortcut 等路径单独刷新对应卷;
-    -- 服务器侧变更在超过 TTL 后的下次进入或手动"同步书架"时体现。
+    -- 需要强制刷新时走手动"同步书架"(onRefreshLibrary 会清除此标记)。
     self._vol_sync_done_at = self._vol_sync_done_at or {}
-    local done_at = self._vol_sync_done_at[book_cache_id]
-    if done_at and os.time() - done_at < 600 then
+    if self._vol_sync_done_at[book_cache_id] then
         return
     end
     local volumes = KomgaModel:new(book_cache_id):getVolumes()
@@ -321,6 +322,9 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
             UIManager:scheduleIn(0.03, step)
         else
             self._bg_volume_sync[book_cache_id] = nil
+            -- 完整同步完成, 记入"已同步"; 后续进入跳过, 手动"同步书架"后失效
+            self._vol_sync_done_at = self._vol_sync_done_at or {}
+            self._vol_sync_done_at[book_cache_id] = true
             local fm = FileManager.instance
             if fm and fm.onRefresh then
                 pcall(function()
