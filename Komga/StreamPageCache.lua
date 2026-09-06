@@ -144,6 +144,9 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
                 local final = base_no_ext .. "." .. ext
                 os.remove(final)
                 os.rename(base_no_ext .. ".dl", final)
+                -- 成功日志: 用于确认预取生效(预取失败会在下方 error 级别单独记录)
+                logger.info('preload stream page cached:', tostring(final),
+                    'bytes=', tostring(res.bytes))
             elseif ok then
                 -- ok=true 但无结果表(设备实测出现 (true, true)): .dl 文件多半已完整
                 -- 落位, 按默认扩展名收编(lookup 会尝试多种扩展名, 字节内容才是关键);
@@ -153,6 +156,7 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
                     local final = base_no_ext .. ".jpg"
                     os.remove(final)
                     os.rename(dl, final)
+                    logger.info('preload stream page salvaged:', tostring(final))
                 else
                     logger.err('preload stream page failed:', tostring(src), tostring(res))
                 end
