@@ -144,6 +144,18 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
                 local final = base_no_ext .. "." .. ext
                 os.remove(final)
                 os.rename(base_no_ext .. ".dl", final)
+            elseif ok then
+                -- ok=true 但无结果表(设备实测出现 (true, true)): .dl 文件多半已完整
+                -- 落位, 按默认扩展名收编(lookup 会尝试多种扩展名, 字节内容才是关键);
+                -- 连 .dl 都没有则记录失败
+                local dl = base_no_ext .. ".dl"
+                if util.fileExists(dl) then
+                    local final = base_no_ext .. ".jpg"
+                    os.remove(final)
+                    os.rename(dl, final)
+                else
+                    logger.err('preload stream page failed:', tostring(src), tostring(res))
+                end
             else
                 logger.err('preload stream page failed:', tostring(src),
                     'ok=', tostring(ok), 'res=', tostring(res))

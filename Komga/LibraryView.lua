@@ -282,6 +282,15 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
     if self._bg_volume_sync[book_cache_id] then
         return
     end
+    -- 会话级缓存: 10 分钟内已完整同步过的系列直接跳过(重新进入分卷目录
+    -- 不再重复逐卷刷新元数据/广播, 这是目录"加载很久"的主因)。
+    -- 进度/阅读状态变化仍会经 persistKomgaProgressToShortcut 等路径单独刷新对应卷;
+    -- 服务器侧变更在超过 TTL 后的下次进入或手动"同步书架"时体现。
+    self._vol_sync_done_at = self._vol_sync_done_at or {}
+    local done_at = self._vol_sync_done_at[book_cache_id]
+    if done_at and os.time() - done_at < 600 then
+        return
+    end
     local volumes = KomgaModel:new(book_cache_id):getVolumes()
     if not (H.is_tbl(volumes) and #volumes > 0) then
         return
