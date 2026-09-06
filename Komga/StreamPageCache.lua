@@ -74,11 +74,9 @@ M.removeStreamPageCache = function(bookCacheId, img_src)
     end
 end
 
--- 清空流式页缓存目录(关卷时调用); 同时请求取消进行中的预取
-local cancel_requested = false
-
+-- 清空流式页缓存目录(关卷时调用)。预取子进程以"目录是否存在"为取消依据
+-- (标志位跨 fork 不可见, 目录删除跨进程可见), 在飞的页会中止、剩余页跳过。
 function M.clearStreamPageCache(bookCacheId)
-    cancel_requested = true
     local dir = M.getStreamPageCacheDir(bookCacheId)
     if not dir then
         return
@@ -125,22 +123,21 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
 
     local Http = httpReq()
     local batch_headers = Http.get_default_headers()
-    cancel_requested = false -- 新一轮预取复位取消标志(上次关卷触发的取消不再生效)
     TaskQueue.getChannel("stream", 1):push(function()
         local pStreamToFile = Http.pStreamToFile
         for i = 1, #tasks do
             local src = tasks[i]
             local base_no_ext = H.joinPath(dir, md5(src))
             -- 先流式落位到 .dl(扩展名下载后由 Content-Type 得知), 再改名为最终文件;
-            -- 中断留下的 .part/.dl 下次按 Range 续传
+            -- 中断留下的 .part/.dl 下次按 Range 续传。
+            -- should_cancel: 缓存目录被删(关卷清理)时中止剩余预取
             local ok, res = pcall(pStreamToFile, {
                 url = src,
                 dest = base_no_ext .. ".dl",
                 headers = batch_headers,
                 timeout = 30,
                 maxtime = 90,
-                -- 关卷清缓存后中止剩余预取, 不再对已删除目录刷错误日志
-                should_cancel = function() return cancel_requested end,
+                should_cancel = function() return not util.fileExists(dir) end,
             })
             if ok and H.is_tbl(res) then
                 local ext = (H.is_str(res.ext) and res.ext ~= "") and res.ext or "jpg"
@@ -148,7 +145,8 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
                 os.remove(final)
                 os.rename(base_no_ext .. ".dl", final)
             else
-                logger.err('preload stream page failed:', tostring(src), tostring(res))
+                logger.err('preload stream page failed:', tostring(src),
+                    'ok=', tostring(ok), 'res=', tostring(res))
             end
         end
         return true

@@ -336,7 +336,12 @@ local function pStreamToFile(options)
             local next_url = resolve_redirect(url, resp_headers and resp_headers["location"])
             if next_url and hops < 2 then
                 logger.dbg("following redirect:", code, "->", next_url)
-                return attempt(from_scratch, next_url, hops + 1)
+                local ok2, res2 = attempt(from_scratch, next_url, hops + 1)
+                -- 失败原因统一为字符串(底层可能抛出非字符串错误值, 不规范化会让日志无法定位)
+                if not ok2 and type(res2) ~= "string" then
+                    res2 = tostring(res2)
+                end
+                return ok2, res2
             end
             return false, describe_http_error(code) .. (next_url and " (重定向次数过多)" or "")
         end
@@ -386,6 +391,10 @@ local function pStreamToFile(options)
         -- 本地有半段但服务器不支持 Range: 清空重下
         os.remove(tmp)
         return attempt(true, url, 0)
+    end
+    -- 失败原因统一为字符串
+    if type(res) ~= "string" then
+        res = tostring(res)
     end
     return false, res
 end
