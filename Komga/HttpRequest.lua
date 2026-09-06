@@ -385,6 +385,18 @@ local function pStreamToFile(options)
 
     local ok, res = attempt(false, url, 0)
     if ok then
+        -- 契约: 成功必返回结果表。若底层异常路径只返回了裸真值,
+        -- 按已落位的 .dl 文件大小补全结果, 并留 warn 供定位
+        if type(res) ~= "table" then
+            logger.warn('[http] pStreamToFile 成功但结果值异常(', tostring(res),
+                '), 按已下载文件大小补全')
+            local f = io.open(dest, "rb")
+            local size = f and f:seek("end") or 0
+            if f then
+                f:close()
+            end
+            res = { bytes = size }
+        end
         return true, res
     end
     if res == "restart" then
