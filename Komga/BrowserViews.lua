@@ -520,6 +520,22 @@ local function init_book_browser(parent)
         UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
     end
 
+    -- 批量同步期间的挂起版: 累积待失效路径而不逐条广播。
+    -- 每条广播都会让 CoverBrowser 删缓存行并触发目录重排, 逐卷广播即
+    -- 分卷目录"频繁刷新/卡顿"的来源; 批量结束后由调用方统一失效+整目录一次刷新。
+    function book_browser:deferMetadataChanged(path)
+        if self.parent and self.parent._bulk_meta_sync then
+            local pending = self.parent._pending_meta_paths
+            if not pending then
+                pending = {}
+                self.parent._pending_meta_paths = pending
+            end
+            pending[path] = true
+            return
+        end
+        self:emitMetadataChanged(path)
+    end
+
     function book_browser:bind_provider(file)
         local doc_settings = DocSettings:open(file)
         local provider = doc_settings:readSetting("provider")
@@ -565,10 +581,10 @@ local function init_book_browser(parent)
                 doc_settings:saveSetting("doc_pages", bookinfo.booksCount)
             end
             doc_settings:flushCustomMetadata(lnk_path)
-            self:emitMetadataChanged(lnk_path)
+            self:deferMetadataChanged(lnk_path)
         end
 
-        self:emitMetadataChanged(lnk_path)
+        self:deferMetadataChanged(lnk_path)
     end
 
     parent.book_browser = book_browser

@@ -292,6 +292,11 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
     if self._vol_sync_done_at[book_cache_id] then
         return
     end
+    -- 进入即标记"已同步"(仅一次加载; 中断时后台分块仍会自行完成)
+    self._vol_sync_done_at[book_cache_id] = true
+    -- 批量期间挂起单卷元数据广播, 结束后统一失效+整目录一次刷新
+    self._bulk_meta_sync = true
+    self._pending_meta_paths = {}
     local volumes = KomgaModel:new(book_cache_id):getVolumes()
     if not (H.is_tbl(volumes) and #volumes > 0) then
         return
@@ -322,9 +327,17 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
             UIManager:scheduleIn(0.03, step)
         else
             self._bg_volume_sync[book_cache_id] = nil
-            -- 完整同步完成, 记入"已同步"; 后续进入跳过, 手动"同步书架"后失效
-            self._vol_sync_done_at = self._vol_sync_done_at or {}
-            self._vol_sync_done_at[book_cache_id] = true
+            self._bulk_meta_sync = nil
+            -- 批量结束: 统一失效期间变更的 CoverBrowser 缓存行, 整目录只刷新这一次
+            local pending = self._pending_meta_paths
+            self._pending_meta_paths = nil
+            if pending then
+                for path in pairs(pending) do
+                    pcall(function()
+                        self.book_browser:emitMetadataChanged(path)
+                    end)
+                end
+            end
             local fm = FileManager.instance
             if fm and fm.onRefresh then
                 pcall(function()

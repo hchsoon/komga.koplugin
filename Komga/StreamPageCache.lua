@@ -150,8 +150,8 @@ function M.preLoadStreamPages(bookCacheId, img_srcs)
                 os.remove(final)
                 os.rename(base_no_ext .. ".dl", final)
                 -- 成功日志: 用于确认预取生效(预取失败会在下方 error 级别单独记录)
-                logger.info('preload stream page cached:', tostring(final),
-                    'bytes=', tostring(res.bytes))
+                -- logger.info('preload stream page cached:', tostring(final),
+                --     'bytes=', tostring(res.bytes))
             else
                 logger.err('preload stream page failed:', tostring(src),
                     'ok=', tostring(ok), 'res=', tostring(res))
