@@ -333,7 +333,9 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
     -- 批量期间挂起单卷元数据广播, 结束后统一失效+整目录一次刷新
     self._bulk_meta_sync = true
     self._pending_meta_paths = {}
-    chunk_size = H.is_num(chunk_size) and chunk_size or 4
+    -- 每块 1 卷 + 0.1s 间隔: 每卷含 DB 查询/多次 sidecar 写/封面任务 fork,
+    -- 单卷即需数百毫秒; 块太大时翻页事件在块间隙得不到处理(实测首次加载期翻页无响应)
+    chunk_size = H.is_num(chunk_size) and chunk_size or 1
     local total = #volumes
     local idx = 1
     local function step()
@@ -355,7 +357,7 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
             end
         end
         if idx <= total then
-            UIManager:scheduleIn(0.03, step)
+            UIManager:scheduleIn(0.1, step)
         else
             self._bg_volume_sync[book_cache_id] = nil
             self._bulk_meta_sync = nil
