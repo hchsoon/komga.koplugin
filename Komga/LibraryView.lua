@@ -118,8 +118,13 @@ function LibraryView:addVolShortcut(bookinfo, seriename, always_add)
 end
 
 function LibraryView:onRefreshLibrary()
-    -- 手动刷新书架: 同时失效分卷目录的"已同步"标记, 下次进入分卷目录会重新逐卷刷新
-    self._vol_sync_done_at = nil
+    -- 手动刷新书架: 同时清除分卷目录的"已同步"持久标记,
+    -- 下次进入分卷目录会重新做一次完整逐卷刷新
+    local settings = self:getSettings()
+    if H.is_tbl(settings.vol_meta_synced) then
+        settings.vol_meta_synced = nil
+        Backend:saveSettings()
+    end
     if self.book_menu then
         self.book_menu:onRefreshLibrary()
     end
@@ -284,25 +289,51 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
     if self._bg_volume_sync[book_cache_id] then
         return
     end
-    -- 会话级缓存: 每个系列只在本次会话第一次进入分卷目录时做完整同步,
-    -- 后续进入直接跳过(重复逐卷刷新元数据/广播是目录"加载很久"的主因)。
-    -- 进度/阅读状态变化仍会经 persistKomgaProgressToShortcut 等路径单独刷新对应卷;
-    -- 需要强制刷新时走手动"同步书架"(onRefreshLibrary 会清除此标记)。
-    self._vol_sync_done_at = self._vol_sync_done_at or {}
-    if self._vol_sync_done_at[book_cache_id] then
+    -- 已同步标记持久化在 komga.lua 设置里(跨重启有效):
+    -- 每个系列只在首次进入分卷目录时做一次完整同步, 之后进入仅补缺失封面,
+    -- 不再逐卷刷新元数据/广播(这是目录"加载很久"+"反复刷新"的主因)。
+    -- 需要重刷时走手动"同步书架"(onRefreshLibrary 会清除标记)。
+    local settings = self:getSettings()
+    settings.vol_meta_synced = H.is_tbl(settings.vol_meta_synced) and settings.vol_meta_synced or {}
+
+    self._bg_volume_sync = self._bg_volume_sync or {}
+    if self._bg_volume_sync[book_cache_id] then
         return
     end
-    -- 进入即标记"已同步"(仅一次加载; 中断时后台分块仍会自行完成)
-    self._vol_sync_done_at[book_cache_id] = true
-    -- 批量期间挂起单卷元数据广播, 结束后统一失效+整目录一次刷新
-    self._bulk_meta_sync = true
-    self._pending_meta_paths = {}
+
     local volumes = KomgaModel:new(book_cache_id):getVolumes()
     if not (H.is_tbl(volumes) and #volumes > 0) then
         return
     end
-    chunk_size = H.is_num(chunk_size) and chunk_size or 4
+
+    -- 轻量补封面: 只检查各卷缺失的封面并入队下载(无元数据写入/无广播)。
+    -- 已同步状态下每次进入分卷目录都会跑一遍, 保证漏下的封面能自行补齐。
+    local function fill_missing_covers()
+        for _, volume in ipairs(volumes) do
+            if H.is_num(volume.number) then
+                local lnk_path = self.book_browser:writeVolLnk(volume, volume_folder, book_cache_id)
+                if lnk_path and util.fileExists(lnk_path)
+                    and not DocSettings:findCustomCoverFile(lnk_path) then
+                    self.book_browser:asyncDownloadVolumeCover(book_cache_id, volume, lnk_path)
+                end
+            end
+        end
+    end
+
+    -- 已完整同步过: 仅补缺失封面, 不再逐卷刷新元数据
+    if settings.vol_meta_synced[book_cache_id] then
+        self._bg_volume_sync[book_cache_id] = nil
+        fill_missing_covers()
+        return
+    end
+
+    -- 首次进入: 标记已同步(持久化), 后台分块做完整刷新
+    settings.vol_meta_synced[book_cache_id] = true
     self._bg_volume_sync[book_cache_id] = true
+    -- 批量期间挂起单卷元数据广播, 结束后统一失效+整目录一次刷新
+    self._bulk_meta_sync = true
+    self._pending_meta_paths = {}
+    chunk_size = H.is_num(chunk_size) and chunk_size or 4
     local total = #volumes
     local idx = 1
     local function step()
@@ -344,6 +375,10 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
                     fm:onRefresh()
                 end)
             end
+            -- 持久化"已同步"标记(连同期间写入的设置), 跨重启不再重刷
+            pcall(function()
+                Backend:saveSettings()
+            end)
         end
     end
     UIManager:scheduleIn(0.03, step)
