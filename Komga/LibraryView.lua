@@ -120,7 +120,7 @@ end
 function LibraryView:onRefreshLibrary()
     -- 手动刷新书架: 同时清除分卷目录的"已同步"持久标记,
     -- 下次进入分卷目录会重新做一次完整逐卷刷新
-    local settings = self:getSettings()
+    local settings = Backend:getSettings()
     if H.is_tbl(settings.vol_meta_synced) then
         settings.vol_meta_synced = nil
         Backend:saveSettings()
@@ -293,7 +293,7 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
     -- 每个系列只在首次进入分卷目录时做一次完整同步, 之后进入仅补缺失封面,
     -- 不再逐卷刷新元数据/广播(这是目录"加载很久"+"反复刷新"的主因)。
     -- 需要重刷时走手动"同步书架"(onRefreshLibrary 会清除标记)。
-    local settings = self:getSettings()
+    local settings = Backend:getSettings()
     settings.vol_meta_synced = H.is_tbl(settings.vol_meta_synced) and settings.vol_meta_synced or {}
 
     self._bg_volume_sync = self._bg_volume_sync or {}
