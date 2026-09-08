@@ -70,9 +70,51 @@ function Komga:isFileTypeSupported(file)
 end
 
 function Komga:registerDocumentRegistryAuxProvider()
+    -- 快捷方式 .html 的轻量"文档"类: 不打开真实引擎(无头), 元数据/进度
+    -- 直接读 sidecar —— 供 CoverBrowser 的提取子进程使用。
+    -- 没有它时: 提取子进程 openDocument 调 provider.new(不存在)必然失败,
+    -- 每次目录渲染/失效广播都会重试, 3 次后 CoverBrowser 永久放弃该文件
+    -- ("too many, ignoring it"), 封面与信息显示随之冻结。
+    local DocSettings = require("docsettings")
+    local ShortcutDocument = {}
+    ShortcutDocument.__index = ShortcutDocument
+    function ShortcutDocument.new(provider, file_tbl)
+        return setmetatable({ file = file_tbl.file }, ShortcutDocument)
+    end
+    function ShortcutDocument:getProps()
+        local props = {}
+        local ok, ds = pcall(function()
+            return DocSettings:open(self.file)
+        end)
+        if ok and ds then
+            local custom = ds:readSetting("custom_props") or {}
+            props.title = custom.title
+            if custom.authors then
+                props.authors = { custom.authors }
+            end
+            props.series = custom.series
+            props.series_index = custom.number
+            props.description = custom.description
+            local pages = tonumber(ds:readSetting("doc_pages"))
+            if pages then
+                props.pages = pages
+            end
+            local percent = tonumber(ds:readSetting("percent_finished"))
+            if percent then
+                props.percent_finished = percent
+            end
+        end
+        return props
+    end
+    function ShortcutDocument:getPageCount()
+        return 1
+    end
+    function ShortcutDocument:close() end
+
     DocumentRegistry:addAuxProvider({
         provider_name = "Komga漫画阅读",
         provider = "komga",
+        document_class = ShortcutDocument,
         order = 50, -- order in OpenWith dialog
         disable_file = true,
         disable_type = false,
