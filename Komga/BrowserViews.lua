@@ -402,7 +402,6 @@ local function init_book_browser(parent)
             end
             doc_settings:flushCustomMetadata(lnk_path)
             doc_settings:flush()
-            self:emitMetadataChanged(lnk_path)
         end
         -- 主 sidecar 也写入 number, 便于 openFile 读取
         local lnk_config = Backend:getLuaConfig(lnk_path)
@@ -507,7 +506,16 @@ local function init_book_browser(parent)
     end
 
 
+    -- 同路径失效去重(10s): 进度持久化/关书刷新等多个调用方会在数秒内对同一
+    -- 文件连发失效, CoverBrowser 每次都会重新提取并重新计数, 反复被打断会让
+    -- 其提取计数满 3 次而永久放弃该文件("too many, ignoring it", 封面/信息不再加载)
     function book_browser:emitMetadataChanged(path)
+        self._meta_emit_at = self._meta_emit_at or {}
+        local last = self._meta_emit_at[path]
+        if last and os.time() - last < 10 then
+            return
+        end
+        self._meta_emit_at[path] = os.time()
         -- CoverBrowser 对每个文件有独立缓存行, 写完 sidecar 后必须删缓存行,
         -- 否则列表/网格一直显示旧元数据(文件名/无进度)
         pcall(function()
