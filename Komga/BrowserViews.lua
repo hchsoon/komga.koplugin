@@ -553,6 +553,57 @@ local function init_book_browser(parent)
         self:emitMetadataChanged(path)
     end
 
+    -- 分卷目录行自愈: CoverBrowser 的提取子进程被翻页/退出打断时, bookinfo 行会
+    -- 停在 in_progress>0, 或被终审为 unsupported("too many interruptions or
+    -- crashes"); 两者 has_meta 都为空。而行只要存在(CoverBrowser 以"行存在"为
+    -- bookinfo_found)就永远不会被再次提取, 该卷的元数据/封面从此缺失。
+    -- 这里对"有行但没有元数据"的卷直接删行(纯 DB DELETE, 无事件/无广播),
+    -- 下一次目录绘制时 CoverBrowser 会自动重提取一次 —— ShortcutDocument 下
+    -- 提取必然成功, 状态即收敛; 健康行(has_meta)与不存在的行零触碰,
+    -- 只在确实删了行时才整目录刷新一次, 不会引发重提取风暴。
+    function book_browser:repairVolumeShortcutRows(book_cache_id, bookinfo, volume_folder)
+        local BookInfoManager
+        pcall(function()
+            BookInfoManager = require("plugins/coverbrowser.koplugin/bookinfomanager")
+        end)
+        -- CoverBrowser 未启用/不可用时静默跳过(分卷数据本身不受影响)。
+        -- 注意 Lua 5.1/LuaJIT 的 require 对"加载器返回 nil"会返回 true 而非报错,
+        -- 所以这里必须做类型判断, 不能只判空
+        if type(BookInfoManager) ~= "table"
+            or not (BookInfoManager.getBookInfo and BookInfoManager.deleteBookInfo) then
+            return
+        end
+        local volumes = KomgaModel:new(book_cache_id):getVolumes()
+        if not (H.is_tbl(volumes) and #volumes > 0) then
+            return
+        end
+        local repaired = 0
+        for _, volume in ipairs(volumes) do
+            if H.is_tbl(volume) and H.is_num(volume.number) then
+                local lnk_path = self:writeVolLnk(volume, volume_folder, book_cache_id)
+                if H.is_str(lnk_path) and util.fileExists(lnk_path) then
+                    -- 第二参 false: 不取封面 blob, 只查行状态(最轻的读)
+                    local row = BookInfoManager:getBookInfo(lnk_path, false)
+                    -- _no_provider = 无 provider 时的哑对象(未查 DB), 行状态未知, 不能据此删行
+                    if H.is_tbl(row) and not row.has_meta and not row._no_provider then
+                        BookInfoManager:deleteBookInfo(lnk_path)
+                        repaired = repaired + 1
+                    end
+                end
+            end
+        end
+        if repaired > 0 then
+            logger.warn("browser.repairVolumeShortcutRows: deleted",
+                repaired, "poisoned bookinfo rows (has_meta NULL) in", volume_folder)
+            local fm = FileManager.instance
+            if fm and fm.onRefresh then
+                pcall(function()
+                    fm:onRefresh()
+                end)
+            end
+        end
+    end
+
     function book_browser:bind_provider(file)
         local doc_settings = DocSettings:open(file)
         local provider = doc_settings:readSetting("provider")
