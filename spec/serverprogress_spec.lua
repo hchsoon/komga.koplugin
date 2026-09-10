@@ -49,6 +49,12 @@ package.preload["Komga/KomgaModel"] = function()
     end}
 end
 
+local booklist_resets = {}
+package.preload["ui/widget/booklist"] = function()
+    -- 与真实 BookList.resetBookInfoCache(file) 同为点调用
+    return {resetBookInfoCache = function(file) booklist_resets[#booklist_resets + 1] = file end}
+end
+
 local pushed = {} -- TaskQueue 收集的任务 {func, callback, opts}
 local rp_response -- Backend.getSeriesVolumesReadProgress 的返回
 local rp_series_id -- 最近一次请求的系列 id
@@ -276,16 +282,19 @@ T("persistSingle: 无变化零写入; 有变化写 komga_progress + 刷新元数
     end
     local br = new_browser(true)
     local lv = new_libview(br)
+    booklist_resets = {}
     local wrote = PS.persistServerProgressToShortcut(lv, "bc1", "/vol",
         {number = 1, bookId = "b1"}, 0.5, {name = "x"})
     eq(wrote, false, "现值 0.5 与新值 0.5 相同, 不应写入")
     ok(saved["/vol/1.html"] == nil)
+    ok(#booklist_resets == 0, "无变化不应清 BookList 缓存")
 
     wrote = PS.persistServerProgressToShortcut(lv, "bc1", "/vol",
         {number = 1, bookId = "b1"}, 0.75, {name = "x"})
     eq(wrote, true)
     ok(math.abs(saved["/vol/1.html"] - 0.75) < 1e-9, "应写入新比例")
     eq(br.writes[1] or 0, 1, "应触发一次卷元数据刷新")
+    eq(booklist_resets[1], "/vol/1.html", "写入后应清该文件的 BookList 内存缓存")
 end)
 
 T("persistSingle: 快捷方式缺失/参数非法返回 false", function()

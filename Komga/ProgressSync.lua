@@ -691,6 +691,16 @@ function ProgressSync:persistServerProgressToShortcut(book_cache_id, volume_fold
     -- komga_progress 是 refreshVolumeMetadata 的第二优先级进度源, 调它统一换算
     -- pageno/percent_finished/summary(内部对无变化有跳过保护, 不会盲目重写)
     self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, volume.number, bookinfo)
+    -- 就地让目录行显示新进度(不发失效广播/不触发重提取, 避免逐卷广播带来的
+    -- 反复重提取与目录重排): 列表行的 percent_finished/status 由 BookList 从
+    -- sidecar 直读并缓存在内存表, 清掉该条目后下一次绘制(本流程结尾的一次
+    -- onRefresh)即重读 sidecar; CoverBrowser 的 DB 行不承载进度, 无需动它。
+    pcall(function()
+        local BookList = require("ui/widget/booklist")
+        if BookList and BookList.resetBookInfoCache then
+            BookList.resetBookInfoCache(lnk_path)
+        end
+    end)
     return true
 end
 
