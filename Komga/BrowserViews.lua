@@ -142,6 +142,21 @@ local function init_book_browser(parent)
         UIManager:scheduleIn(0.05, step)
     end
 
+    -- 系列快捷方式路径(与 wirteLnk 同名规则), 只计算不落盘; 参数不全返回 nil。
+    -- 供只读场景(总进度汇总)使用, 避免为写进度而把已删除的快捷方式重建出来
+    function book_browser:getBookLnkPath(bookinfo, home_dir)
+        if not (H.is_str(home_dir) and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id) then
+            return nil
+        end
+        local book_author = bookinfo.author or "未知作者"
+        local book_lnk_name = string.format("%s-%s" .. Paths.LNK_SUFFIX, bookinfo.name, book_author)
+        book_lnk_name = util.getSafeFilename(book_lnk_name)
+        if not book_lnk_name then
+            return nil
+        end
+        return H.joinPath(home_dir, book_lnk_name), book_lnk_name
+    end
+
     function book_browser:wirteLnk(bookinfo, home_dir)
         -- local home_dir = self.parent:getBrowserHomeDir()
         if not (home_dir and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id) then
@@ -149,23 +164,17 @@ local function init_book_browser(parent)
             return
         end
 
-        local book_cache_id = bookinfo.cache_id
-        local book_name = bookinfo.name
-        local book_author = bookinfo.author or "未知作者"
-
-        local book_lnk_name = string.format("%s-%s" .. Paths.LNK_SUFFIX, book_name, book_author)
-        book_lnk_name = util.getSafeFilename(book_lnk_name)
-        if not book_lnk_name then
+        local book_lnk_path, book_lnk_name = self:getBookLnkPath(bookinfo, home_dir)
+        if not book_lnk_path then
             logger.err("book_browser.wirteLnk: getSafeFilename error")
             return
         end
-        local book_lnk_path = H.joinPath(home_dir, book_lnk_name)
-        if book_lnk_path and util.fileExists(book_lnk_path) then
+        if util.fileExists(book_lnk_path) then
             return book_lnk_path, book_lnk_name
         end
 
         local book_lnk_config = Backend:getLuaConfig(book_lnk_path)
-        book_lnk_config:saveSetting("book_cache_id", book_cache_id):flush()
+        book_lnk_config:saveSetting("book_cache_id", bookinfo.cache_id):flush()
 
         return book_lnk_path, book_lnk_name
     end
@@ -653,6 +662,107 @@ local function init_book_browser(parent)
         end
 
         self:deferMetadataChanged(lnk_path)
+    end
+
+    -- 系列总阅读进度: 按各卷页数加权汇总后写入系列快捷方式 sidecar 的
+    -- percent_finished/status, 取代 refreshBookMetadata 写入的"当前卷号/总卷数"
+    -- 粗略近似(那个值把"正在读第 5 卷"显示成整体 5/N, 与读没读完该卷无关)。
+    --   总进度 = Σ(每卷已读比例 × 该卷页数) / Σ(总页数)
+    -- 每卷比例来源: DB isRead → 100%; 否则读卷快捷方式 sidecar 的 percent_finished
+    -- (refreshVolumeMetadata/服务器进度同步已落盘); 页数用 DB 卷记录, 与比例同口径。
+    -- 系列快捷方式不存在(未在书架/已删)时跳过, 不代建; 无变化不写 sidecar。
+    function book_browser:refreshSeriesTotalProgress(book_cache_id, bookinfo)
+        if not (H.is_str(book_cache_id) and H.is_tbl(bookinfo)
+            and H.is_num(bookinfo.booksCount) and bookinfo.booksCount > 0) then
+            return
+        end
+        local parent = self.parent
+        local home_dir = parent and parent.getBrowserHomeDir and parent:getBrowserHomeDir(true)
+        if not H.is_str(home_dir) then
+            return
+        end
+        local lnk_path = self:getBookLnkPath(bookinfo, home_dir)
+        if not (H.is_str(lnk_path) and util.fileExists(lnk_path)) then
+            return
+        end
+        local model = KomgaModel:new(book_cache_id)
+        local volumes = model:getVolumes()
+        if not (H.is_tbl(volumes) and #volumes > 0) then
+            return
+        end
+        local volume_folder = self:ensureVolumeFolder(book_cache_id, bookinfo)
+        if not volume_folder then
+            return
+        end
+        local sum_pages, sum_read = 0, 0
+        for _, volume in ipairs(volumes) do
+            if H.is_tbl(volume) and H.is_num(volume.number) then
+                local full = model:getVolume(volume.number) -- 含 pages
+                local pages = H.is_tbl(full) and H.is_num(full.pages) and full.pages or 0
+                if pages > 0 then
+                    local frac = 0
+                    if volume.isRead == true then
+                        frac = 1
+                    else
+                        local vol_lnk = self:writeVolLnk(volume, volume_folder, book_cache_id)
+                        if H.is_str(vol_lnk) and util.fileExists(vol_lnk) then
+                            -- LuaJIT 的 tonumber(nil) 会报错, 先按类型取值
+                            local pf = DocSettings:open(vol_lnk):readSetting("percent_finished")
+                            if not H.is_num(pf) and H.is_str(pf) then
+                                pf = tonumber(pf)
+                            end
+                            if H.is_num(pf) then
+                                frac = math.min(math.max(pf, 0), 1)
+                            end
+                        end
+                    end
+                    sum_pages = sum_pages + pages
+                    sum_read = sum_read + frac * pages
+                end
+            end
+        end
+        if not (sum_pages > 0) then
+            return
+        end
+        local percent = math.min(sum_read / sum_pages, 1)
+        -- 生效值比较(0 与 nil 都视为"无进度"), 无变化跳过, 避免每次进目录都写 sidecar
+        local ds = DocSettings:open(lnk_path)
+        local old = ds:readSetting("percent_finished")
+        if not H.is_num(old) and H.is_str(old) then
+            old = tonumber(old)
+        end
+        if not H.is_num(old) or old <= 0 then
+            old = nil
+        end
+        local new = percent > 0 and percent or nil
+        if old == nil and new == nil then
+            return
+        end
+        if old ~= nil and new ~= nil and math.abs(old - new) < 0.0001 then
+            return
+        end
+        if new then
+            ds:saveSetting("percent_finished", new)
+            ds:saveSetting("doc_pages", bookinfo.booksCount)
+        else
+            ds:saveSetting("percent_finished", nil)
+            ds:saveSetting("doc_pages", nil)
+        end
+        local summary = ds:readSetting("summary") or {}
+        summary.status = (new ~= nil) and (new >= 0.999 and "complete" or "reading") or nil
+        summary.modified = os.date("%Y-%m-%d")
+        ds:saveSetting("summary", summary)
+        ds:flush()
+        -- 行的 percent/status 由 BookList 从 sidecar 直读并缓存在内存, 清条目让
+        -- 下一次绘制(返回书架目录时的重列)即显示新值; 纯内存操作, 无事件广播
+        pcall(function()
+            local BookList = require("ui/widget/booklist")
+            if BookList and BookList.resetBookInfoCache then
+                BookList.resetBookInfoCache(lnk_path)
+            end
+        end)
+        logger.info("browser.refreshSeriesTotalProgress:", bookinfo.name,
+            string.format("%.1f%% (%.1f / %d pages)", percent * 100, sum_read, sum_pages))
     end
 
     parent.book_browser = book_browser

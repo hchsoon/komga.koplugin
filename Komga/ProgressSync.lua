@@ -654,12 +654,21 @@ function ProgressSync:applyServerProgressToShortcuts(book_cache_id, bookinfo, vo
         end
         if idx <= total then
             UIManager:scheduleIn(0.05, step)
-        elseif changed > 0 then
-            local fm = FileManager.instance
-            if fm and fm.onRefresh then
+        else
+            -- 汇总系列总进度到书架的系列快捷方式行(与本次是否有新进度无关——
+            -- 也兜住上次阅读会话写下的各卷进度); 内部无变化自动跳过
+            if H.is_tbl(self.book_browser) and self.book_browser.refreshSeriesTotalProgress then
                 pcall(function()
-                    fm:onRefresh()
+                    self.book_browser:refreshSeriesTotalProgress(book_cache_id, bookinfo)
                 end)
+            end
+            if changed > 0 then
+                local fm = FileManager.instance
+                if fm and fm.onRefresh then
+                    pcall(function()
+                        fm:onRefresh()
+                    end)
+                end
             end
         end
     end

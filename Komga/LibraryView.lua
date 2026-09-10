@@ -391,6 +391,10 @@ function LibraryView:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volu
             pcall(function()
                 Backend:saveSettings()
             end)
+            -- 首次全量同步完成: 各卷 sidecar 已就绪, 立即汇总一次系列总进度
+            pcall(function()
+                self.book_browser:refreshSeriesTotalProgress(book_cache_id, bookinfo)
+            end)
         end
     end
     UIManager:scheduleIn(0.03, step)
