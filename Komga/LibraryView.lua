@@ -276,6 +276,9 @@ function LibraryView:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
     -- 3) 元数据/封面在后台分块补齐(块间让出 UI, 不 fork——本工作纯磁盘/DB,
     --    且本项目已验证 fork+网络/嵌套在部分平台不可靠)
     self:syncSeriesVolumesInBackground(book_cache_id, bookinfo, volume_folder)
+    -- 4) 分卷初始化: 后台一次拉取全部分卷的服务器阅读进度并落盘到各快捷方式 sidecar,
+    --    曾在其他设备读过的分卷首屏即显示正确进度(离线静默跳过, 无变化零写入)
+    self:syncAllVolumesServerProgress(book_cache_id, bookinfo, volume_folder)
 end
 
 -- 后台分块执行每卷 refreshVolumeMetadata/封面下载(每块 chunk_size 卷, 块间让出主循环)。

@@ -26,6 +26,7 @@ local FIELDS = {
     _last_epub_pos = nil,       -- 最近一次 EPUB 阅读位置 {bookId, number=内部章节, frac=章内比例}(本地断点)
     volume_lnk_path = nil,      -- 当前卷快捷方式路径(openVolumeShortcut 记录; 上传/续读时把服务器进度落盘到其 sidecar)
     _last_epub_server_frac = nil, -- 最近一次服务器空间整卷比例 {bookId, frac 0..1}(供快捷方式显示正确百分比)
+    server_rp_busy = nil,       -- 分卷初始化批量拉取服务器进度的同系列去重表 {[book_cache_id]=true}
     -- menu mode
     book_menu = nil,
     -- file browser mode

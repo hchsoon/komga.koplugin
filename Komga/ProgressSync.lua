@@ -11,8 +11,10 @@ local logger = require("logger")
 local util = require("util")
 local DocSettings = require("docsettings")
 local ReaderUI = require("apps/reader/readerui")
+local FileManager = require("apps/filemanager/filemanager")
 local KomgaModel = require("Komga/KomgaModel")
 local Backend = require("Komga/Backend")
+local TaskQueue = require("Komga/TaskQueue")
 local H = require("Komga/Helper")
 local Paths = require("Komga/Paths")
 local VolumePath = require("Komga/VolumePath")
@@ -537,6 +539,159 @@ function ProgressSync:persistStreamComicProgress(chapter, page)
     if H.is_num(chapter.number) then
         self:refreshReadVolumeShortcut(chapter.book_cache_id, chapter.number)
     end
+end
+
+-- ===== 分卷目录初始化: 批量同步全部分卷的服务器阅读进度 =====
+
+-- BookDto[] → { [bookId] = {page, completed, pages} }(纯函数, 仅保留带 readProgress 的书)。
+-- pages 用服务器自己的 media.pagesCount, 换算比例时与服务器网页端同口径。
+function ProgressSync.extractServerProgressMap(books)
+    local out = {}
+    if not H.is_tbl(books) then
+        return out
+    end
+    for _, book in ipairs(books) do
+        if H.is_tbl(book) and H.is_str(book.id) and H.is_tbl(book.readProgress) then
+            local media = H.is_tbl(book.media) and book.media or {}
+            out[book.id] = {
+                page = tonumber(book.readProgress.page),
+                completed = book.readProgress.completed == true,
+                pages = tonumber(media.pagesCount),
+            }
+        end
+    end
+    return out
+end
+
+-- readProgress 条目 → 服务器空间整卷比例(0..1], 无有效进度返回 nil(不打扰本地显示状态)。
+-- completed 直接视为读完; 比例 = 服务器 page/pagesCount(与 Komga 网页端显示一致)。
+function ProgressSync.volumeServerFrac(entry)
+    if not H.is_tbl(entry) then
+        return nil
+    end
+    if entry.completed == true then
+        return 1
+    end
+    local page = tonumber(entry.page)
+    local pages = tonumber(entry.pages)
+    if not (H.is_num(page) and page > 0 and H.is_num(pages) and pages > 0) then
+        return nil
+    end
+    return math.min(math.max(page / pages, 0), 1)
+end
+
+-- 分卷目录初始化时批量同步服务器阅读进度: 一次 books/list 请求拿到全部分卷 readProgress,
+-- 把有变化的服务器空间比例落盘到各卷快捷方式 sidecar(komga_progress)。
+-- 覆盖"曾在其他设备/端读到第 N 卷, 本地无任何进度痕迹, 目录首屏却显示未读"的场景
+-- (逐卷点开时的 persistComicServerProgress/续读只覆盖当前那一卷)。
+-- 每次进入分卷目录都执行, 离线静默跳过; 无变化零写入, 有变化整目录只刷新一次。
+function ProgressSync:syncAllVolumesServerProgress(book_cache_id, bookinfo, volume_folder)
+    if not (H.is_str(book_cache_id) and H.is_tbl(bookinfo) and H.is_str(volume_folder)) then
+        return
+    end
+    if not NetworkMgr:isConnected() then
+        return
+    end
+    -- 同系列去重: 上一次请求未回来时不重复发
+    self.server_rp_busy = self.server_rp_busy or {}
+    if self.server_rp_busy[book_cache_id] then
+        return
+    end
+    self.server_rp_busy[book_cache_id] = true
+    -- fork 前关库: 子进程只做 HTTP+JSON, 不持有 sqlite 连接
+    Backend:closeDbManager()
+    TaskQueue.getChannel("sync", 1):push(function()
+        local ok, resp = pcall(Backend.getSeriesVolumesReadProgress, Backend, book_cache_id)
+        if not (ok and H.is_tbl(resp) and resp.type == "SUCCESS" and H.is_tbl(resp.body)) then
+            return {}
+        end
+        return ProgressSync.extractServerProgressMap(resp.body)
+    end, function(ok, progress_map)
+        self.server_rp_busy[book_cache_id] = nil
+        if ok and H.is_tbl(progress_map) then
+            self:applyServerProgressToShortcuts(book_cache_id, bookinfo, volume_folder, progress_map)
+        end
+    end, {timeout = 45, tag = "series_read_progress"})
+end
+
+-- 把拉回的服务器进度逐卷落盘(分块让出 UI, 纯磁盘/DB 工作不 fork):
+-- 只处理有服务器进度且与 sidecar 现值不同的卷; 结束后整目录只 onRefresh 这一次
+-- (行失效由 persistServerProgressToShortcut -> refreshVolumeMetadata -> emitMetadataChanged 按路径完成)。
+function ProgressSync:applyServerProgressToShortcuts(book_cache_id, bookinfo, volume_folder, progress_map)
+    if not next(progress_map) then
+        return
+    end
+    local volumes = KomgaModel:new(book_cache_id):getVolumes()
+    if not (H.is_tbl(volumes) and #volumes > 0) then
+        return
+    end
+    local targets = {}
+    for _, volume in ipairs(volumes) do
+        if H.is_tbl(volume) and H.is_num(volume.number) then
+            local frac = ProgressSync.volumeServerFrac(progress_map[volume.bookId])
+            -- 本地已读(isRead)显示恒为满进度, 服务器进度无显示意义, 跳过
+            if H.is_num(frac) and volume.isRead ~= true then
+                targets[#targets + 1] = { volume = volume, frac = frac }
+            end
+        end
+    end
+    if #targets == 0 then
+        return
+    end
+    local total = #targets
+    local idx = 1
+    local changed = 0
+    -- 每块 3 卷: 单卷 = sidecar 读 + (有变化时)写 + 卷元数据重算
+    local function step()
+        local last = math.min(idx + 2, total)
+        while idx <= last do
+            local target = targets[idx]
+            idx = idx + 1
+            if self:persistServerProgressToShortcut(book_cache_id, volume_folder,
+                target.volume, target.frac, bookinfo) then
+                changed = changed + 1
+            end
+        end
+        if idx <= total then
+            UIManager:scheduleIn(0.05, step)
+        elseif changed > 0 then
+            local fm = FileManager.instance
+            if fm and fm.onRefresh then
+                pcall(function()
+                    fm:onRefresh()
+                end)
+            end
+        end
+    end
+    UIManager:scheduleIn(0.03, step)
+end
+
+-- 单卷: 服务器进度与 sidecar 现值(komga_progress)不同时写入, 并按既有层级重算显示元数据。
+-- 返回是否实际写入; 快捷方式缺失/无变化时零写入(避免无谓的行失效与目录刷新)。
+function ProgressSync:persistServerProgressToShortcut(book_cache_id, volume_folder, volume, frac, bookinfo)
+    if not (H.is_tbl(self.book_browser) and H.is_tbl(volume) and H.is_num(volume.number)
+        and H.is_num(frac) and frac > 0) then
+        return false
+    end
+    local lnk_path = self.book_browser:writeVolLnk(volume, volume_folder, book_cache_id)
+    if not (H.is_str(lnk_path) and util.fileExists(lnk_path)) then
+        return false
+    end
+    local ds = DocSettings:open(lnk_path)
+    -- LuaJIT 的 tonumber(nil) 直接报错, 先做类型判断再换算(兼容数字/数字字符串两种落盘形态)
+    local raw_old = ds:readSetting("komga_progress")
+    local old
+    if H.is_num(raw_old) or H.is_str(raw_old) then
+        old = tonumber(raw_old)
+    end
+    if H.is_num(old) and math.abs(old - frac) < 0.0001 then
+        return false
+    end
+    ds:saveSetting("komga_progress", frac):flush()
+    -- komga_progress 是 refreshVolumeMetadata 的第二优先级进度源, 调它统一换算
+    -- pageno/percent_finished/summary(内部对无变化有跳过保护, 不会盲目重写)
+    self.book_browser:refreshVolumeMetadata(nil, lnk_path, book_cache_id, volume.number, bookinfo)
+    return true
 end
 
 -- 轻量刷新分卷快捷方式进度（doc_props）

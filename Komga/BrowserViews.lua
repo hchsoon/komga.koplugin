@@ -508,17 +508,12 @@ local function init_book_browser(parent)
 
     -- 同路径失效去重(10s): 进度持久化/关书刷新等多个调用方会在数秒内对同一
     -- 文件连发失效, CoverBrowser 每次都会重新提取并重新计数, 反复被打断会让
-    -- 其提取计数满 3 次而永久放弃该文件("too many, ignoring it", 封面/信息不再加载)
-    -- komga 快捷方式(.html, ZWSP 标记)注册的是无 document_class 的 aux provider:
-    -- CoverBrowser 的提取子进程里 openDocument 必然失败, 提取从未成功过。
-    -- 对这些文件发失效广播只会删掉"已放弃"标记行并触发一次新的注定失败的
-    -- 提取尝试, 3 次后 CoverBrowser 永久放弃("too many, ignoring it")并刷错误日志。
-    -- 封面来自 custom cover 文件、元数据来自 sidecar, 都不依赖其 DB 提取,
-    -- 故对这些文件不再发失效/广播, 从根上消除该错误。
+    -- 其提取计数满 3 次而永久放弃该文件("too many, ignoring it", 封面/信息不再加载)。
+    -- 快捷方式(.html)的 aux provider 已注册 ShortcutDocument(元数据取自 sidecar、
+    -- 封面取自 custom cover, 不解析文档本体), 重提取必然成功、删除/重提取可收敛,
+    -- 因此失效/广播对快捷方式照常生效: 服务端进度等 sidecar 变更只有删掉
+    -- CoverBrowser 的缓存行, 列表/网格才会立即显示新值。
     function book_browser:emitMetadataChanged(path)
-        if path and path:find(Paths.LNK_SUFFIX, 1, true) then
-            return
-        end
         self._meta_emit_at = self._meta_emit_at or {}
         local last = self._meta_emit_at[path]
         if last and os.time() - last < 10 then
