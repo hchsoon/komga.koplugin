@@ -231,6 +231,8 @@ local function init_book_browser(parent)
                     pcall(function()
                         DocSettings:flushCustomCover(book_lnk_path, cover_path)
                     end)
+                    -- 封面已落盘: 下载完成即定向刷新系列行(不依赖 12s 轮询窗口)
+                    self:invalidateShortcutRow(book_lnk_path)
                 end
             end, {timeout = 120, tag = "series_cover"})
         end
@@ -454,7 +456,13 @@ local function init_book_browser(parent)
                 end)
             end
             return cover_path
-        end, nil, {timeout = 120, tag = "volume_cover"})
+        end, function(ok, cover_path)
+            -- 下载完成回调(UI 线程): 封面已落盘即定向刷新该行。
+            -- 12s 轮询窗口在封面队列积压时早已超时, 这里才是可靠的刷新时机
+            if ok and H.is_str(cover_path) and DocSettings:findCustomCoverFile(lnk_path) then
+                self:invalidateShortcutRow(lnk_path)
+            end
+        end, {timeout = 120, tag = "volume_cover"})
     end
 
     function book_browser:ensureVolumeFolder(book_cache_id, bookinfo)
