@@ -130,4 +130,25 @@ M.getHomeDir = function()
     return G_reader_settings and G_reader_settings:readSetting("home_dir") or
                require("apps/filemanager/filemanagerutil").getDefaultDir()
 end
+-- 作者串去重: Komga 的 booksMetadata 常把同一作者重复列出(如"岸本斉史/岸本斉史"),
+-- 按 "/" 拆分、去首尾空白、按首次出现顺序去重后重新拼接。
+-- 仅用于展示层: series.author 参与书架身份(bookCacheId = md5(书名[作者])),
+-- 在入库前去重会导致受影响系列的身份/进度/缓存整体漂移。
+M.dedupeAuthors = function(author)
+    if not M.is_str(author) or author == "" then
+        return author
+    end
+    local seen, out = {}, {}
+    for name in author:gmatch("[^/]+") do
+        name = name:gsub("^%s+", ""):gsub("%s+$", "")
+        if name ~= "" and not seen[name] then
+            seen[name] = true
+            out[#out + 1] = name
+        end
+    end
+    if #out == 0 then
+        return author
+    end
+    return table.concat(out, "/")
+end
 return M

@@ -137,8 +137,6 @@ function M:init()
                         self:toggleFirstCoverMode()
                     end,
                 },
-            },
-            {
                 {
                     id = "goto",
                     text = _("按页跳转"),

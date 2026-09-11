@@ -368,10 +368,14 @@ local function init_book_browser(parent)
         elseif H.is_num(percent) and percent > 0 then
             target_status = "reading"
         end
+        -- 作者串展示前去重(booksMetadata 常重复列出同一作者, 如"岸本斉史/岸本斉史")
+        local display_author = H.dedupeAuthors(
+            (H.is_tbl(bookinfo) and bookinfo.author) or volume.author)
         if H.is_tbl(custom) and H.is_tbl(custom.custom_props) and custom.custom_props.type == 'volume' and
             custom.custom_props.number == number and
             H.is_tbl(custom.doc_props) and custom.doc_props.pages == pages and custom.doc_props.pageno == pageno and
             custom.book_cache_id == book_cache_id and custom.number == number and
+            custom.custom_props.authors == display_author and
             lnk_percent == percent and lnk_doc_pages == (H.is_num(pages) and pages or nil) and
             lnk_status == target_status and lnk_ds:readSetting("provider") == "komga" then
             return
@@ -383,7 +387,7 @@ local function init_book_browser(parent)
             -- 否则点击快捷方式时 DocumentRegistry 读不到 komga provider, 会直接用 crengine 打开 html(书籍元信息)
             doc_settings:saveSetting("provider", "komga")
             doc_settings:saveSetting("custom_props", {
-                authors = (H.is_tbl(bookinfo) and bookinfo.author) or volume.author,
+                authors = display_author,
                 title = display_title,
                 description = (H.is_tbl(bookinfo) and bookinfo.intro) or nil,
                 -- series/series_index: KOReader 文件管理器/封面浏览器按系列归组显示
@@ -707,7 +711,8 @@ local function init_book_browser(parent)
             -- bind_provider 写入的 provider 被 data={} 清空, 必须重写, 否则点击快捷方式时 KOReader 不会分发到 komga provider
             doc_settings:saveSetting("provider", "komga")
             doc_settings:saveSetting("custom_props", {
-                authors = bookinfo.author,
+                -- 作者串展示前去重(同上)
+                authors = H.dedupeAuthors(bookinfo.author),
                 title = bookinfo.name,
                 description = bookinfo.intro,
                 -- series: KOReader 文件管理器/封面浏览器按系列归组显示
@@ -1084,7 +1089,7 @@ local function init_book_menu(parent)
         for _, bookinfo in ipairs(books) do
 
             local show_book_title = ("%s (%s)[%s]"):format(bookinfo.name or "未命名书籍",
-                bookinfo.author or "未知作者", bookinfo.originName)
+                H.dedupeAuthors(bookinfo.author) or "未知作者", bookinfo.originName)
 
             table.insert(item_table, {
                 cache_id = bookinfo.cache_id,
