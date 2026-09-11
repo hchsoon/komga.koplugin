@@ -956,14 +956,9 @@ function M:downloadVolume(volume, message_dialog)
     end
 
     local status, err = pcall(function()
-        -- P3-9 双轨: 开启整卷模式且类型受支持时走原文件下载, 失败回退逐章管线
-        if self:getSettings().whole_file_mode == true then
-            local wf = self:downloadVolumeWholeFile(volume)
-            if wf then
-                return wf
-            end
-        end
-        return self:pDownloadVolume(volume, message_dialog)
+        -- P3-9 双轨: 非 EPUB 卷(漫画)必须整卷下载(逐章管线对漫画必 400);
+        -- EPUB 卷按 whole_file_mode 选择整卷/逐章, 整卷失败回退逐章
+        return self:downloadVolumeAuto(volume, message_dialog)
     end)
     if not status then
         logger.err('下载章节失败：', err)
