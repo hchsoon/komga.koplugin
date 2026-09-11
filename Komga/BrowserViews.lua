@@ -232,7 +232,6 @@ local function init_book_browser(parent)
                         DocSettings:flushCustomCover(book_lnk_path, cover_path)
                     end)
                     -- 封面已落盘: 下载完成即定向刷新系列行(不依赖 12s 轮询窗口)
-                    H.diagLog("cover done series, refreshing row")
                     self:invalidateShortcutRow(book_lnk_path)
                 end
             end, {timeout = 120, tag = "series_cover"})
@@ -460,8 +459,6 @@ local function init_book_browser(parent)
         end, function(ok, cover_path)
             -- 下载完成回调(UI 线程): 封面已落盘即定向刷新该行。
             -- 12s 轮询窗口在封面队列积压时早已超时, 这里才是可靠的刷新时机
-            H.diagLog("cover done vol " .. tostring(chapter.number) .. " ok=" .. tostring(ok)
-                .. " path=" .. tostring(cover_path))
             if ok and H.is_str(cover_path) and DocSettings:findCustomCoverFile(lnk_path) then
                 self:invalidateShortcutRow(lnk_path)
             end
@@ -611,10 +608,8 @@ local function init_book_browser(parent)
         local BookInfoManager = self:getBookInfoManager()
         -- CoverBrowser 未启用/不可用时静默跳过(分卷数据本身不受影响)
         if not (BookInfoManager and BookInfoManager.getBookInfo and BookInfoManager.deleteBookInfo) then
-            H.diagLog("repair: BookInfoManager unavailable")
             return
         end
-        H.diagLog("repair: start " .. tostring(book_cache_id))
         local volumes = KomgaModel:new(book_cache_id):getVolumes()
         if not (H.is_tbl(volumes) and #volumes > 0) then
             return
@@ -632,26 +627,17 @@ local function init_book_browser(parent)
                         -- 封面卡死: 行标记已试过封面但没拿到, 而磁盘上封面已落盘
                         local cover_stuck = (not row.has_cover) and row.cover_fetched ~= nil
                             and DocSettings:findCustomCoverFile(lnk_path) ~= nil
-                        H.diagLog(string.format("repair: vol %s meta=%s cover=%s fetched=%s meta_stuck=%s cover_stuck=%s",
-                            tostring(volume.number), tostring(row.has_meta), tostring(row.has_cover),
-                            tostring(row.cover_fetched), tostring(meta_stuck), tostring(cover_stuck)))
                         if meta_stuck or cover_stuck then
                             BookInfoManager:deleteBookInfo(lnk_path)
                             repaired = repaired + 1
                         end
-                    else
-                        H.diagLog("repair: vol " .. tostring(volume.number) ..
-                            " row missing or dummy")
                     end
-                else
-                    H.diagLog("repair: vol " .. tostring(volume.number) .. " lnk missing")
                 end
             end
         end
         if repaired > 0 then
             logger.warn("browser.repairVolumeShortcutRows: deleted",
                 repaired, "poisoned bookinfo rows (has_meta NULL) in", volume_folder)
-            H.diagLog("repair: deleted " .. repaired .. " rows, refreshing folder")
             local fm = FileManager.instance
             if fm and fm.onRefresh then
                 pcall(function()
@@ -671,7 +657,6 @@ local function init_book_browser(parent)
         if not H.is_str(lnk_path) then
             return
         end
-        H.diagLog("invalidate: " .. lnk_path)
         pcall(function()
             local BookInfoManager = self:getBookInfoManager()
             if BookInfoManager and BookInfoManager.deleteBookInfo then

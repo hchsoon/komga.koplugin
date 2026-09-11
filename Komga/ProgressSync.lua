@@ -608,8 +608,6 @@ function ProgressSync:syncAllVolumesServerProgress(book_cache_id, bookinfo, volu
         return ProgressSync.extractServerProgressMap(resp.body)
     end, function(ok, progress_map)
         self.server_rp_busy[book_cache_id] = nil
-        H.diagLog("server rp: fetched ok=" .. tostring(ok)
-            .. " entries=" .. tostring(ok and H.is_tbl(progress_map) and next(progress_map) and "non-empty" or "empty"))
         if ok and H.is_tbl(progress_map) then
             self:applyServerProgressToShortcuts(book_cache_id, bookinfo, volume_folder, progress_map)
         end
