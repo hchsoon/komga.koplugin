@@ -395,7 +395,8 @@ function Store:findVolumesNotDownloaded(current_volume, count)
         c.title, 
         b.url,
         b.name,
-        c.bookId
+        c.bookId,
+        c.mediaType
     FROM volume AS c
     INNER JOIN series AS b
         ON c.bookCacheId = b.bookCacheId 
@@ -424,7 +425,8 @@ function Store:findVolumesNotDownloaded(current_volume, count)
                 url = row[3],
                 number = number,
                 name = row[4],
-                bookId = row[5]
+                bookId = row[5],
+                mediaType = row[6]
             }
         end
     end

@@ -439,7 +439,8 @@ function M:preLoadVolumes(volume, download_volume_count)
 
                 local status, err = pcall(function()
                     -- print("Download 2.", nextVolume.book_cache_id, " ", nextVolume.bookId)
-                    return self:pDownloadVolume(nextVolume)
+                    -- 与 downloadVolume 同策略: 漫画卷(非 EPUB)必须走整卷下载
+                    return self:downloadVolumeAuto(nextVolume)
                 end)
 
                 if not status then
@@ -886,13 +887,18 @@ function M:downloadVolumeWholeFile(volume)
     if not (H.is_str(bookId) and H.is_str(volume.url)) then
         return nil
     end
-    local ext = volume.url:match("%.([%w]+)$") or "epub"
-    ext = ext:lower()
+    local ext = volume.url:match("%.([%w]+)$")
+    ext = ext and ext:lower() or nil
     if ext == "zip" then
         ext = "cbz"
     end
     if ext ~= "epub" and ext ~= "cbz" and ext ~= "pdf" then
-        return nil
+        -- 服务器文件路径常无扩展名(series.url 即文件路径): 按媒体类型兜底。
+        -- 漫画(DIVINA)整卷文件是 cbz 系图片包; EPUB 卷识别不了时回退逐章管线
+        if volume.mediaType == "EPUB" then
+            return nil
+        end
+        ext = "cbz"
     end
     local base = H.getVolumeCacheFilePath(volume.book_cache_id, bookId, volume.number, volume.name)
     local dest = base .. "." .. ext
@@ -965,6 +971,19 @@ function M:downloadVolume(volume, message_dialog)
     end
     return wrap_response(err)
 
+end
+
+-- 下载策略选择: 非 EPUB 卷(漫画 DIVINA 等)没有内部章节, 逐章管线是 EPUB 专用
+-- (对漫画调 manifest/epub 端点必然 400), 因此无论设置如何都先走整卷原文件下载;
+-- EPUB 卷按 whole_file_mode 选择整卷/逐章, 整卷失败回退逐章。
+function M:downloadVolumeAuto(volume, message_dialog)
+    if self:getSettings().whole_file_mode == true or volume.mediaType ~= "EPUB" then
+        local wf = self:downloadVolumeWholeFile(volume)
+        if wf then
+            return wf
+        end
+    end
+    return self:pDownloadVolume(volume, message_dialog)
 end
 
 -- 打点系列"最后阅读"时间(静默, 失败不影响阅读)
