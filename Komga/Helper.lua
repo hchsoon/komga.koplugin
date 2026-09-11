@@ -130,4 +130,15 @@ M.getHomeDir = function()
     return G_reader_settings and G_reader_settings:readSetting("home_dir") or
                require("apps/filemanager/filemanagerutil").getDefaultDir()
 end
+-- 临时诊断: 关键链路直接落盘日志(append, 不依赖 logger/调试开关), 排查完可删
+M.diagLog = function(msg)
+    local ok, err = pcall(function()
+        local f = io.open(M.getTempDirectory() .. "/komga_diag.log", "a")
+        if f then
+            f:write(os.date("%H:%M:%S") .. " " .. tostring(msg) .. "\n")
+            f:close()
+        end
+    end)
+    return ok, err
+end
 return M

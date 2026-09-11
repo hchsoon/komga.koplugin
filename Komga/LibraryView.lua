@@ -281,10 +281,14 @@ function LibraryView:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
     self:syncAllVolumesServerProgress(book_cache_id, bookinfo, volume_folder)
     -- 5) 分卷行自愈: 清理被提取中断/终审卡死的 CoverBrowser 缓存行(纯 DB 删行,
     --    无事件广播, 见 book_browser:repairVolumeShortcutRows); 延后执行让目录先秒开
+    H.diagLog("doOpen: repair scheduled " .. tostring(book_cache_id))
     UIManager:scheduleIn(0.1, function()
-        pcall(function()
+        local ok, err = pcall(function()
             self.book_browser:repairVolumeShortcutRows(book_cache_id, bookinfo, volume_folder)
         end)
+        if not ok then
+            H.diagLog("doOpen: repair ERRORED: " .. tostring(err))
+        end
     end)
 end
 

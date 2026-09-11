@@ -110,6 +110,7 @@ package.preload["Komga/Helper"] = function()
         is_num = function(s) return "number" == type(s) end,
         is_tbl = function(t) return "table" == type(t) end,
         joinPath = function(a, b) return a .. "/" .. b end,
+        diagLog = function() end,
     }
 end
 

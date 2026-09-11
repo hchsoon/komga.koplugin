@@ -108,6 +108,7 @@ package.preload["Komga/Helper"] = function()
         is_num = function(s) return "number" == type(s) end,
         is_tbl = function(t) return "table" == type(t) end,
         joinPath = function(a, b) return a .. "/" .. b end,
+        diagLog = function() end,
     }
 end
 package.preload["Komga/Paths"] = function()
@@ -123,12 +124,13 @@ package.preload["ui/widget/booklist"] = function()
     return {resetBookInfoCache = function(file) booklist_resets[#booklist_resets + 1] = file end}
 end
 
--- CoverBrowser bookinfomanager 桩: cb_enabled=false 时 require 返回 true(模拟
--- LuaJIT 对"加载器无返回值"的真实行为: require 结果为布尔), 行自愈须静默跳过
+-- CoverBrowser bookinfomanager 桩: 裸名与点分全名都注册(与被测代码的
+-- 双名加载策略对应)。cb_enabled=false 时 require 返回 true(模拟 LuaJIT 对
+-- "加载器无返回值"的真实行为: require 结果为布尔), 行自愈须静默跳过
 local cb_enabled = true
 local cb_rows = {} -- { [lnk_path] = row 表或 nil }
 local cb_gets, cb_deletes = {}, {}
-package.preload["plugins/coverbrowser.koplugin/bookinfomanager"] = function()
+local function make_cb_stub()
     if not cb_enabled then
         return true
     end
@@ -143,6 +145,8 @@ package.preload["plugins/coverbrowser.koplugin/bookinfomanager"] = function()
         end,
     }
 end
+package.preload["bookinfomanager"] = make_cb_stub
+package.preload["plugins/coverbrowser.koplugin/bookinfomanager"] = make_cb_stub
 
 local PS = require("Komga/ProgressSync")
 local init_book_browser = require("Komga/BrowserViews")({})
@@ -243,12 +247,14 @@ end)
 
 T("repairRows: CoverBrowser 不可用/卷数据为空/快捷方式缺失时静默跳过", function()
     cb_enabled = false
+    package.loaded["bookinfomanager"] = nil
     package.loaded["plugins/coverbrowser.koplugin/bookinfomanager"] = nil
     volumes_reply = {{number = 1}}
     cb_gets, cb_deletes = {}, {}
     browser:repairVolumeShortcutRows("bc", {name = "x"}, VOLUME_FOLDER)
     eq(#cb_gets, 0, "不可用不应查行")
     cb_enabled = true
+    package.loaded["bookinfomanager"] = nil
     package.loaded["plugins/coverbrowser.koplugin/bookinfomanager"] = nil
 
     volumes_reply = {}
@@ -265,6 +271,7 @@ end)
 -- ===== invalidateShortcutRow: 封面落盘后的定向行刷新 =====
 T("invalidateRow: 删行+清缓存, 1.5s 窗口内重绘节流为一次, 窗口后重新调度", function()
     cb_enabled = true
+    package.loaded["bookinfomanager"] = nil
     package.loaded["plugins/coverbrowser.koplugin/bookinfomanager"] = nil
     cb_gets, cb_deletes = {}, {}
     local refreshes = 0

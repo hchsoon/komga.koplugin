@@ -79,6 +79,7 @@ package.preload["Komga/Helper"] = function()
         is_str = function(s) return "string" == type(s) end,
         is_num = function(s) return "number" == type(s) end,
         is_tbl = function(t) return "table" == type(t) end,
+        diagLog = function() end,
     }
 end
 package.preload["Komga/Paths"] = function()

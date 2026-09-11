@@ -232,6 +232,7 @@ local function init_book_browser(parent)
                         DocSettings:flushCustomCover(book_lnk_path, cover_path)
                     end)
                     -- 封面已落盘: 下载完成即定向刷新系列行(不依赖 12s 轮询窗口)
+                    H.diagLog("cover done series, refreshing row")
                     self:invalidateShortcutRow(book_lnk_path)
                 end
             end, {timeout = 120, tag = "series_cover"})
@@ -459,6 +460,8 @@ local function init_book_browser(parent)
         end, function(ok, cover_path)
             -- 下载完成回调(UI 线程): 封面已落盘即定向刷新该行。
             -- 12s 轮询窗口在封面队列积压时早已超时, 这里才是可靠的刷新时机
+            H.diagLog("cover done vol " .. tostring(chapter.number) .. " ok=" .. tostring(ok)
+                .. " path=" .. tostring(cover_path))
             if ok and H.is_str(cover_path) and DocSettings:findCustomCoverFile(lnk_path) then
                 self:invalidateShortcutRow(lnk_path)
             end
@@ -547,7 +550,7 @@ local function init_book_browser(parent)
         -- CoverBrowser 对每个文件有独立缓存行, 写完 sidecar 后必须删缓存行,
         -- 否则列表/网格一直显示旧元数据(文件名/无进度)
         pcall(function()
-            local BookInfoManager = require("plugins/coverbrowser.koplugin/bookinfomanager")
+            local BookInfoManager = self:getBookInfoManager()
             if BookInfoManager and BookInfoManager.deleteBookInfo then
                 BookInfoManager:deleteBookInfo(path)
             end
@@ -572,6 +575,27 @@ local function init_book_browser(parent)
         self:emitMetadataChanged(path)
     end
 
+    -- 加载 CoverBrowser 的 bookinfomanager。注意: CoverBrowser 自己以裸名
+    -- require("bookinfomanager")(插件加载器会把 <插件目录>/?.lua 追加进
+    -- package.path), 而点分全名 plugins/coverbrowser.koplugin/bookinfomanager
+    -- 依赖 koreader 根目录恰好在搜索路径上, 部分启动方式下解析不到,
+    -- 因此两个名字都试; 都失败返回 nil(调用方静默降级)。
+    function book_browser:getBookInfoManager()
+        local ok, mod = pcall(function()
+            return require("bookinfomanager")
+        end)
+        if ok and type(mod) == "table" and mod.getBookInfo then
+            return mod
+        end
+        ok, mod = pcall(function()
+            return require("plugins/coverbrowser.koplugin/bookinfomanager")
+        end)
+        if ok and type(mod) == "table" and mod.getBookInfo then
+            return mod
+        end
+        return nil
+    end
+
     -- 分卷目录行自愈: 两类"卡死行" CoverBrowser 都不会再自动处理, 这里删行让其
     -- 重新提取一次(纯 DB DELETE, 无事件/无广播), ShortcutDocument 下提取必然
     -- 成功, 状态即收敛; 健康行与不存在的行零触碰, 只在确实删了行时才整目录
@@ -584,17 +608,13 @@ local function init_book_browser(parent)
     --      已标记"试过了不再重试", 而磁盘上封面文件已由异步下载落盘
     --      ——封面从此不再显示(invalidateShortcutRow 负责增量, 这里兜存量)。
     function book_browser:repairVolumeShortcutRows(book_cache_id, bookinfo, volume_folder)
-        local BookInfoManager
-        pcall(function()
-            BookInfoManager = require("plugins/coverbrowser.koplugin/bookinfomanager")
-        end)
-        -- CoverBrowser 未启用/不可用时静默跳过(分卷数据本身不受影响)。
-        -- 注意 Lua 5.1/LuaJIT 的 require 对"加载器返回 nil"会返回 true 而非报错,
-        -- 所以这里必须做类型判断, 不能只判空
-        if type(BookInfoManager) ~= "table"
-            or not (BookInfoManager.getBookInfo and BookInfoManager.deleteBookInfo) then
+        local BookInfoManager = self:getBookInfoManager()
+        -- CoverBrowser 未启用/不可用时静默跳过(分卷数据本身不受影响)
+        if not (BookInfoManager and BookInfoManager.getBookInfo and BookInfoManager.deleteBookInfo) then
+            H.diagLog("repair: BookInfoManager unavailable")
             return
         end
+        H.diagLog("repair: start " .. tostring(book_cache_id))
         local volumes = KomgaModel:new(book_cache_id):getVolumes()
         if not (H.is_tbl(volumes) and #volumes > 0) then
             return
@@ -612,17 +632,26 @@ local function init_book_browser(parent)
                         -- 封面卡死: 行标记已试过封面但没拿到, 而磁盘上封面已落盘
                         local cover_stuck = (not row.has_cover) and row.cover_fetched ~= nil
                             and DocSettings:findCustomCoverFile(lnk_path) ~= nil
+                        H.diagLog(string.format("repair: vol %s meta=%s cover=%s fetched=%s meta_stuck=%s cover_stuck=%s",
+                            tostring(volume.number), tostring(row.has_meta), tostring(row.has_cover),
+                            tostring(row.cover_fetched), tostring(meta_stuck), tostring(cover_stuck)))
                         if meta_stuck or cover_stuck then
                             BookInfoManager:deleteBookInfo(lnk_path)
                             repaired = repaired + 1
                         end
+                    else
+                        H.diagLog("repair: vol " .. tostring(volume.number) ..
+                            " row missing or dummy")
                     end
+                else
+                    H.diagLog("repair: vol " .. tostring(volume.number) .. " lnk missing")
                 end
             end
         end
         if repaired > 0 then
             logger.warn("browser.repairVolumeShortcutRows: deleted",
                 repaired, "poisoned bookinfo rows (has_meta NULL) in", volume_folder)
+            H.diagLog("repair: deleted " .. repaired .. " rows, refreshing folder")
             local fm = FileManager.instance
             if fm and fm.onRefresh then
                 pcall(function()
@@ -642,9 +671,10 @@ local function init_book_browser(parent)
         if not H.is_str(lnk_path) then
             return
         end
+        H.diagLog("invalidate: " .. lnk_path)
         pcall(function()
-            local BookInfoManager = require("plugins/coverbrowser.koplugin/bookinfomanager")
-            if type(BookInfoManager) == "table" and BookInfoManager.deleteBookInfo then
+            local BookInfoManager = self:getBookInfoManager()
+            if BookInfoManager and BookInfoManager.deleteBookInfo then
                 BookInfoManager:deleteBookInfo(lnk_path)
             end
         end)
