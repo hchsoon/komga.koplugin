@@ -215,11 +215,12 @@ local function init_book_browser(parent)
             return
         end
         local book_cache_id = bookinfo.cache_id
-        local cover_url =  bookinfo.coverUrl
+        local cover_url = bookinfo.coverUrl
         if cover_url then
             Backend:runTaskWithRetry(function()
                 if DocSettings:findCustomCoverFile(book_lnk_path) then
-                    self:emitMetadataChanged(book_lnk_path)
+                    -- 封面落盘后定向刷新系列行(行可能先于封面提取, 无此刷新封面不显示)
+                    self:invalidateShortcutRow(book_lnk_path)
                     return true
                 end
             end, 12000, 2000)
@@ -439,7 +440,8 @@ local function init_book_browser(parent)
         end
         Backend:runTaskWithRetry(function()
             if DocSettings:findCustomCoverFile(lnk_path) then
-                self:emitMetadataChanged(lnk_path)
+                -- 封面落盘后定向刷新卷行(行可能先于封面提取, 无此刷新封面不显示)
+                self:invalidateShortcutRow(lnk_path)
                 return true
             end
         end, 12000, 2000)
@@ -562,14 +564,17 @@ local function init_book_browser(parent)
         self:emitMetadataChanged(path)
     end
 
-    -- 分卷目录行自愈: CoverBrowser 的提取子进程被翻页/退出打断时, bookinfo 行会
-    -- 停在 in_progress>0, 或被终审为 unsupported("too many interruptions or
-    -- crashes"); 两者 has_meta 都为空。而行只要存在(CoverBrowser 以"行存在"为
-    -- bookinfo_found)就永远不会被再次提取, 该卷的元数据/封面从此缺失。
-    -- 这里对"有行但没有元数据"的卷直接删行(纯 DB DELETE, 无事件/无广播),
-    -- 下一次目录绘制时 CoverBrowser 会自动重提取一次 —— ShortcutDocument 下
-    -- 提取必然成功, 状态即收敛; 健康行(has_meta)与不存在的行零触碰,
-    -- 只在确实删了行时才整目录刷新一次, 不会引发重提取风暴。
+    -- 分卷目录行自愈: 两类"卡死行" CoverBrowser 都不会再自动处理, 这里删行让其
+    -- 重新提取一次(纯 DB DELETE, 无事件/无广播), ShortcutDocument 下提取必然
+    -- 成功, 状态即收敛; 健康行与不存在的行零触碰, 只在确实删了行时才整目录
+    -- 刷新一次, 不会引发重提取风暴。
+    --   1) 提取从未完成: 提取子进程被翻页/退出打断, 行停在 in_progress>0,
+    --      或被终审为 unsupported("too many interruptions or crashes"),
+    --      has_meta 为空; 而行只要存在(CoverBrowser 以"行存在"为 bookinfo_found)
+    --      就永远不会被再次提取, 该卷的元数据/封面从此缺失。
+    --   2) 提取先于封面完成: 行 has_meta 正常但 has_cover 为空且 cover_fetched
+    --      已标记"试过了不再重试", 而磁盘上封面文件已由异步下载落盘
+    --      ——封面从此不再显示(invalidateShortcutRow 负责增量, 这里兜存量)。
     function book_browser:repairVolumeShortcutRows(book_cache_id, bookinfo, volume_folder)
         local BookInfoManager
         pcall(function()
@@ -594,9 +599,15 @@ local function init_book_browser(parent)
                     -- 第二参 false: 不取封面 blob, 只查行状态(最轻的读)
                     local row = BookInfoManager:getBookInfo(lnk_path, false)
                     -- _no_provider = 无 provider 时的哑对象(未查 DB), 行状态未知, 不能据此删行
-                    if H.is_tbl(row) and not row.has_meta and not row._no_provider then
-                        BookInfoManager:deleteBookInfo(lnk_path)
-                        repaired = repaired + 1
+                    if H.is_tbl(row) and not row._no_provider then
+                        local meta_stuck = not row.has_meta
+                        -- 封面卡死: 行标记已试过封面但没拿到, 而磁盘上封面已落盘
+                        local cover_stuck = (not row.has_cover) and row.cover_fetched ~= nil
+                            and DocSettings:findCustomCoverFile(lnk_path) ~= nil
+                        if meta_stuck or cover_stuck then
+                            BookInfoManager:deleteBookInfo(lnk_path)
+                            repaired = repaired + 1
+                        end
                     end
                 end
             end
@@ -610,6 +621,42 @@ local function init_book_browser(parent)
                     fm:onRefresh()
                 end)
             end
+        end
+    end
+
+    -- 封面落盘后的定向行刷新: 封面是异步下载的, 行的首次提取可能先于封面完成
+    -- ——提取时无封面则该行 has_cover 为空且 cover_fetched='Y', CoverBrowser
+    -- 以"行存在"为准不会自动重试, 封面从此不再显示。
+    -- 这里删掉该缓存行(纯 DB DELETE, 无事件广播), 下一次绘制时重新提取一次,
+    -- ShortcutDocument 会读到刚落盘的封面。重绘做节流: 多个封面在短窗口内
+    -- 先后落盘时只刷一次目录。
+    function book_browser:invalidateShortcutRow(lnk_path)
+        if not H.is_str(lnk_path) then
+            return
+        end
+        pcall(function()
+            local BookInfoManager = require("plugins/coverbrowser.koplugin/bookinfomanager")
+            if type(BookInfoManager) == "table" and BookInfoManager.deleteBookInfo then
+                BookInfoManager:deleteBookInfo(lnk_path)
+            end
+        end)
+        pcall(function()
+            local BookList = require("ui/widget/booklist")
+            if BookList and BookList.resetBookInfoCache then
+                BookList.resetBookInfoCache(lnk_path)
+            end
+        end)
+        if not self._cover_repaint_scheduled then
+            self._cover_repaint_scheduled = true
+            UIManager:scheduleIn(1.5, function()
+                self._cover_repaint_scheduled = nil
+                local fm = FileManager.instance
+                if fm and fm.onRefresh then
+                    pcall(function()
+                        fm:onRefresh()
+                    end)
+                end
+            end)
         end
     end
 
