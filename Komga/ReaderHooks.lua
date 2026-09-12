@@ -445,14 +445,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             ReaderUI:showReader(path, nil, true)
         end
 
-        local function getCustomMetaData(filepath)
-            local custom_metadata_file = DocSettings:findCustomMetadataFile(filepath)
-            local props = custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
-            if H.is_tbl(props) and props.number == nil and props.chapters_index ~= nil then
-                props.number = props.chapters_index -- 兼容旧版快捷方式(升级前 custom_props 用 chapters_index 存卷号)
-            end
-            return props
-        end
         if not (is_komga_browser_path(file) and file:find(Paths.LNK_SUFFIX, 1, true)) then
             open_regular_file(file)
             return
@@ -460,7 +452,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         -- prioritize using custom matedata book_cache_id
         local doc_settings = DocSettings:open(file)
         local book_cache_id = doc_settings:readSetting("book_cache_id")
-        local customedata = getCustomMetaData(file)
+        local customedata = H.getCustomProps(file)
         local booktype = customedata and customedata.type
 
         if not book_cache_id then

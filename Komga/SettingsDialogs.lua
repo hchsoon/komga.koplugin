@@ -328,7 +328,7 @@ function LibraryView:openBrowserMenu(file)
     self:getBrowserWidget()
     -- 分卷快捷方式分流到卷级菜单（此入口仅对 /Komga漫画/ 下的文件触发）
     if H.is_str(file) and file:find(Paths.LNK_SUFFIX, 1, true) then
-        local customedata = self.book_browser:getCustomMateData(file)
+        local customedata = H.getCustomProps(file)
         if H.is_tbl(customedata) and customedata.type == 'volume' then
             self:openVolumeBrowserMenu(file, customedata)
             return

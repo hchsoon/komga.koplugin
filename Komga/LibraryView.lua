@@ -666,7 +666,7 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, number)
             return
         end
         if util.fileExists(fullpath) and name:find(Paths.LNK_SUFFIX, 1, true) then
-            local customedata = self.book_browser:getCustomMateData(fullpath)
+            local customedata = H.getCustomProps(fullpath)
             if H.is_tbl(customedata) and customedata.type == 'volume' and
                 customedata.number == number then
                 local doc_settings = DocSettings:open(fullpath)

@@ -30,24 +30,6 @@ local M = {
     in_transaction = false
 }
 
-local function custom_concat(tbl, sep)
-    sep = sep or ""
-    local result = {}
-
-    for i, v in ipairs(tbl) do
-        if v == nil then
-            result[i] = "nil"
-        elseif type(v) == "table" then
-
-            result[i] = "{" .. custom_concat(v, ",") .. "}"
-        else
-            result[i] = tostring(v)
-        end
-    end
-
-    return table.concat(result, sep)
-end
-
 local BOOKINFO_DB_VERSION = 20260829
 
 local BOOKINFO_DB_SCHEMA = [[
@@ -428,7 +410,7 @@ function M:batch_insert(sql_template, data_list, batch_size, pre_sql)
                 if #params ~= param_count then
                     error(string.format(
                         "The number of parameters does not match (requires %d, actual %d, parameter %s)", param_count,
-                        #params, custom_concat(params, ", ")))
+                        #params, H.custom_concat(params, ", ")))
                 end
 
                 for i, v in ipairs(params) do
@@ -441,7 +423,7 @@ function M:batch_insert(sql_template, data_list, batch_size, pre_sql)
                 local step_ok, step_err = pcall(stmt.step, stmt)
                 if not step_ok then
                     error(string.format("Step execution failed:%s\n Parameters:%s", step_err,
-                        custom_concat(params, ", ")))
+                        H.custom_concat(params, ", ")))
                 end
                 stmt:reset()
             end
@@ -492,7 +474,7 @@ function M:execute(sql, params, options)
     if placeholder_count ~= #params then
         error(string.format(
             "The number of parameters does not match (SQL has %d placeholders, %d parameters are passed in, parameter %s)",
-            placeholder_count, #params, custom_concat(params, ", ")))
+            placeholder_count, #params, H.custom_concat(params, ", ")))
     end
 
     local conn = self:getDB()

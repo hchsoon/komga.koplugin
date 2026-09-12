@@ -20,6 +20,31 @@ local Paths = require("Komga/Paths")
 local VolumePath = require("Komga/VolumePath")
 
 local ProgressSync = {}
+
+-- 章内/整卷比例统一钳到 0..1(调用方保证 x 为数字)
+local function clamp01(x)
+    return math.min(math.max(x, 0), 1)
+end
+
+-- 取路径/URL 的基名并小写(href_map 反查键与 positions 表 href 对齐用)
+local function basename_key(s)
+    return (s:match("([^/]+)$") or s):lower()
+end
+
+-- 防回退冲刷: 本次位置几乎在卷首(整卷比例 < 2%)而服务器已知进度领先(>5%)时,
+-- 视为续读失败落在第 1 页而非用户主动回开, 上层应跳过本次上传,
+-- 避免把服务器进度和本地 komga_progress 一并冲刷成 ~0。
+function ProgressSync:resumeFlushGuard(bookId, frac)
+    if H.is_num(frac) and frac < 0.02 then
+        local last_server = self._last_epub_server_frac
+        if H.is_tbl(last_server) and last_server.bookId == bookId
+            and H.is_num(last_server.frac) and last_server.frac > 0.05 then
+            return true
+        end
+    end
+    return false
+end
+
 function ProgressSync:getChapterFraction(doc_settings)
     if not (doc_settings and doc_settings.readSetting) then
         return 0
@@ -34,7 +59,7 @@ function ProgressSync:getChapterFraction(doc_settings)
         return 1.0
     end
     if doc_pages > 0 then
-        return math.min(math.max(last_page / doc_pages, 0), 1)
+        return clamp01(last_page / doc_pages)
     end
     return 0
 end
@@ -69,7 +94,7 @@ function ProgressSync:epubFractionToLocator(bookId, frac)
     if not (H.is_tbl(list) and #list > 0) then
         return nil
     end
-    frac = math.min(math.max(frac, 0), 1)
+    frac = clamp01(frac)
     -- 二分找第一个 totalProgression >= frac 的位置
     local lo, hi = 1, #list
     while lo < hi do
@@ -140,7 +165,7 @@ function ProgressSync:epubChapterHrefMap(bookId)
                 -- url 形如 .../resource/OEBPS/Text/Section000.xhtml, 取其相对路径
                 local rel = url:match("resource/([^?#]+)") or url
                 rel = rel:gsub("^%./", "")
-                local key = (rel:match("([^/]+)$") or rel):lower()
+                local key = basename_key(rel)
                 map[idx] = rel
                 rev[key] = idx
             end
@@ -167,11 +192,11 @@ function ProgressSync:epubChapterFracToServerFrac(bookId, number, frac, map)
     if not (H.is_tbl(list) and #list > 0) then
         return nil
     end
-    frac = math.min(math.max(frac, 0), 1)
-    local hkey = (href:match("([^/]+)$") or href):lower()
+    frac = clamp01(frac)
+    local hkey = basename_key(href)
     local prev_tp, prev_p
     for _, pos in ipairs(list) do
-        local ph = pos.href and (pos.href:match("([^/]+)$") or pos.href):lower()
+        local ph = pos.href and basename_key(pos.href)
         if ph == hkey then
             local ptp = pos.locations and pos.locations.totalProgression
             local pp = pos.locations and pos.locations.progression
@@ -246,7 +271,7 @@ function ProgressSync:scanEpubVolumeChapters(book_cache_id, bookId, book_name, c
                 elseif H.is_num(cur_idx) and idx == cur_idx and H.is_num(cur_frac) then
                     frac = cur_frac
                 end
-                data[idx] = { cp = cp, frac = math.min(math.max(frac, 0), 1) }
+                data[idx] = { cp = cp, frac = clamp01(frac) }
                 table.insert(order, idx)
             end
         end
@@ -342,21 +367,14 @@ function ProgressSync:uploadCurrentProgress()
         local href_map = self:epubChapterHrefMap(chapter.bookId)
         local vol_frac
         if cur_idx == nil and H.is_num(frac) then
-            vol_frac = math.min(math.max(frac, 0), 1)
+            vol_frac = clamp01(frac)
         else
             vol_frac = cur_idx and self:epubChapterFracToServerFrac(chapter.bookId, cur_idx, frac, href_map)
         end
         local href = cur_idx and href_map[cur_idx]
         local loc
-        -- 防回退冲刷: 若本次位置几乎在卷首(整卷比例 < 2%)而服务器已知进度领先(>5%),
-        -- 说明是续读失败(未缓存卷首次打开/定位失败)落在第 1 页, 而非用户主动回到开头。
-        -- 此时跳过上传, 避免把服务器进度和本地 komga_progress 一并冲刷成 ~0。
-        if H.is_num(vol_frac) and vol_frac < 0.02 then
-            local last_server = self._last_epub_server_frac
-            if H.is_tbl(last_server) and last_server.bookId == chapter.bookId
-                and H.is_num(last_server.frac) and last_server.frac > 0.05 then
-                return
-            end
+        if self:resumeFlushGuard(chapter.bookId, vol_frac) then
+            return
         end
         if H.is_num(vol_frac) then
             loc = self:epubFractionToLocator(chapter.bookId, vol_frac)
@@ -371,14 +389,14 @@ function ProgressSync:uploadCurrentProgress()
         else
             local read_pages = self:calcVolumeLocalRead(chapter.book_cache_id, chapter.bookId, chapter.name,
                 { number = cur_idx, frac = frac })
-            loc = self:epubFractionToLocator(chapter.bookId, math.min(math.max(read_pages / pages, 0), 1))
+            loc = self:epubFractionToLocator(chapter.bookId, clamp01(read_pages / pages))
         end
         if H.is_tbl(loc) then
             epub_locator = loc
             -- 记录服务器空间整卷比例(totalProgression), 供快捷方式 sidecar 显示正确的整卷百分比
             local tp = loc.locations and loc.locations.totalProgression
             if H.is_num(tp) then
-                self._last_epub_server_frac = { bookId = chapter.bookId, frac = math.min(math.max(tp, 0), 1) }
+                self._last_epub_server_frac = { bookId = chapter.bookId, frac = clamp01(tp) }
             end
         end
         -- 记录本地断点: 关闭/翻章后按内部章节 + 章内比例直接定位(与上传同源)
@@ -405,14 +423,9 @@ function ProgressSync:uploadCurrentProgress()
             current_page = math.min(math.max(last_page, 1), pages)
         end
         -- 与 EPUB 一致: 记录服务器空间整卷比例并落盘到快捷方式 sidecar(供文件夹显示正确百分比)
-        -- 防回退冲刷: 位置几乎在卷首而服务器已知进度领先 → 跳过上传, 保住服务器进度
         local comic_frac = current_page / pages
-        if comic_frac < 0.02 then
-            local last_server = self._last_epub_server_frac
-            if H.is_tbl(last_server) and last_server.bookId == chapter.bookId
-                and H.is_num(last_server.frac) and last_server.frac > 0.05 then
-                return
-            end
+        if self:resumeFlushGuard(chapter.bookId, comic_frac) then
+            return
         end
         self._last_epub_server_frac = { bookId = chapter.bookId, frac = comic_frac }
         self:persistKomgaProgressToShortcut()
@@ -503,6 +516,14 @@ function ProgressSync:persistKomgaProgressToShortcut()
     end
 end
 
+-- 共同核心: 记录最近服务器空间整卷比例并落盘到快捷方式 sidecar(比例 <= 0 不动)
+function ProgressSync:stampServerFracAndPersist(bookId, frac)
+    if H.is_num(frac) and frac > 0 then
+        self._last_epub_server_frac = { bookId = bookId, frac = clamp01(frac) }
+        self:persistKomgaProgressToShortcut()
+    end
+end
+
 -- 漫画打开前: 读取服务器 readProgress.page/pages 落盘到快捷方式 sidecar(供文件夹显示正确百分比)。
 -- 只做显示, 不改变阅读位置; 服务器无进度或离线时静默跳过。
 function ProgressSync:persistComicServerProgress(chapter)
@@ -513,11 +534,7 @@ function ProgressSync:persistComicServerProgress(chapter)
     local rp = ok and resp and resp.body and resp.body.readProgress
     local page = rp and tonumber(rp.page)
     if H.is_num(page) and page > 0 then
-        local frac = math.min(math.max(page / chapter.pages, 0), 1)
-        if frac > 0 then
-            self._last_epub_server_frac = { bookId = chapter.bookId, frac = frac }
-            self:persistKomgaProgressToShortcut()
-        end
+        self:stampServerFracAndPersist(chapter.bookId, page / chapter.pages)
     end
 end
 
@@ -531,11 +548,7 @@ function ProgressSync:persistStreamComicProgress(chapter, page)
     if not (pages > 0) then
         return
     end
-    local frac = math.min(math.max(page / pages, 0), 1)
-    if frac > 0 then
-        self._last_epub_server_frac = { bookId = chapter.bookId, frac = frac }
-        self:persistKomgaProgressToShortcut()
-    end
+    self:stampServerFracAndPersist(chapter.bookId, page / pages)
     if H.is_num(chapter.number) then
         self:refreshReadVolumeShortcut(chapter.book_cache_id, chapter.number)
     end
@@ -577,7 +590,7 @@ function ProgressSync.volumeServerFrac(entry)
     if not (H.is_num(page) and page > 0 and H.is_num(pages) and pages > 0) then
         return nil
     end
-    return math.min(math.max(page / pages, 0), 1)
+    return clamp01(page / pages)
 end
 
 -- 分卷目录初始化时批量同步服务器阅读进度: 一次 books/list 请求拿到全部分卷 readProgress,

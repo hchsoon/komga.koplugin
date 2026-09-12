@@ -111,7 +111,7 @@ local function init_book_browser(parent)
             end
 
             -- 分卷快捷方式走卷级元数据修复，避免被重写为系列
-            local customedata = self:getCustomMateData(fullpath)
+            local customedata = H.getCustomProps(fullpath)
             local number = H.is_tbl(customedata) and customedata.number or nil
             if H.is_tbl(customedata) and customedata.type == 'volume' and H.is_num(number) then
                 self:refreshVolumeMetadata(nil, fullpath, book_cache_id, number, bookinfo)
@@ -171,15 +171,6 @@ local function init_book_browser(parent)
         return book_lnk_path, book_lnk_name
     end
 
-    function book_browser:getCustomMateData(filepath)
-        local custom_metadata_file = DocSettings:findCustomMetadataFile(filepath)
-        local props = custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
-        if H.is_tbl(props) and props.number == nil and props.chapters_index ~= nil then
-            props.number = props.chapters_index -- 兼容旧版快捷方式(升级前 custom_props 用 chapters_index 存卷号)
-        end
-        return props
-    end
-
     function book_browser:addBookShortcut(bookinfo)
         local home_dir = self.parent:getBrowserHomeDir()
         if not (home_dir and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id and bookinfo.coverUrl) then
@@ -193,7 +184,7 @@ local function init_book_browser(parent)
             return
         end
 
-        if not self:getCustomMateData(book_lnk_path) then
+        if not H.getCustomProps(book_lnk_path) then
             self:refreshBookMetadata(book_lnk_name, book_lnk_path, bookinfo)
         else
             self:bind_provider(book_lnk_path)

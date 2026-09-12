@@ -34,6 +34,36 @@ M.is_tbl = function(t)
     return "table" == type(t)
 end
 
+-- 序列化任意值表为可读串(nil 显式为 "nil", 嵌套表展开; 日志/错误信息用)
+M.custom_concat = function(tbl, sep)
+    sep = sep or ""
+    local result = {}
+
+    for i, v in ipairs(tbl) do
+        if v == nil then
+            result[i] = "nil"
+        elseif type(v) == "table" then
+
+            result[i] = "{" .. M.custom_concat(v, ",") .. "}"
+        else
+            result[i] = tostring(v)
+        end
+    end
+
+    return table.concat(result, sep)
+end
+
+-- 快捷方式 sidecar 的 custom_props(含旧版 chapters_index -> number 兼容)
+M.getCustomProps = function(filepath)
+    local DocSettings = require("docsettings") -- 延迟加载: Helper 最早被 require, 避免加载环
+    local custom_metadata_file = DocSettings:findCustomMetadataFile(filepath)
+    local props = custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
+    if M.is_tbl(props) and props.number == nil and props.chapters_index ~= nil then
+        props.number = props.chapters_index -- 兼容旧版快捷方式(升级前 custom_props 用 chapters_index 存卷号)
+    end
+    return props
+end
+
 
 
 -- pay attention to infinite recursion
@@ -121,6 +151,8 @@ M.getCoverCacheFilePath = function(book_cache_id)
     return M.joinPath(book_cache_path, 'cover')
 end
 M.getVolumeCacheFilePath = function(book_cache_id, book_id, number, book_name)
+    -- 文件名格式(<安全书名>-<bookId>-<number>)必须与 VolumePath.chapterFileName 保持一致:
+    -- ContentProcessor 落盘用的文件名即在此路径上追加扩展名, 漂移会导致缓存定位失败
     book_name = util.getSafeFilename(book_name)
     local book_cache_path = M.getBookCachePath(book_cache_id)
     local volume_cache_name = string.format("%s-%s-%s", book_name or "", book_id, number)

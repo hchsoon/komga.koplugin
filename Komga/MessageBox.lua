@@ -7,23 +7,7 @@ local Trapper = require("ui/trapper")
 
 local _ = require("gettext")
 
-local function custom_concat(tbl, sep)
-    sep = sep or ""
-    local result = {}
-
-    for i, v in ipairs(tbl) do
-        if v == nil then
-            result[i] = "nil"
-        elseif type(v) == "table" then
-
-            result[i] = "{" .. custom_concat(v, ",") .. "}"
-        else
-            result[i] = tostring(v)
-        end
-    end
-
-    return table.concat(result, sep)
-end
+local H = require("Komga/Helper")
 
 local M = {}
 
@@ -58,7 +42,7 @@ end
 
 local function join_args(message, args)
     if #args > 0 then
-        return message .. " " .. custom_concat(args, " ")
+        return message .. " " .. H.custom_concat(args, " ")
     end
     return message
 end
