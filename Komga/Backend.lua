@@ -638,10 +638,11 @@ function M:after_reader_chapter_show(volume)
 
     local number = volume.number
     local cache_file_path = volume.cacheFilePath
-    -- EPUB 分卷打开不标记已读: isRead 在 refreshVolumeMetadata 被当作"整卷满进度 100%"。
-    -- 打开即标已读会把"没读完的卷"显示成 100%(用户反馈)。EPUB 整卷读完才标记,
-    -- 由 saveBookProgression 按服务器空间整卷比例(totalProgression)>=99.9% 统一处理。
-    -- 漫画单文件卷保持原"打开即已读"行为。
+    -- 打开不标记已读(EPUB 与漫画一致): isRead 在 refreshVolumeMetadata 被当作
+    -- "整卷满进度 100%", 打开即标已读会让"没读完的卷"一直显示 100%。
+    -- 已读统一由进度同步按真实完成状态写入:
+    --   EPUB: saveBookProgression(整卷比例 totalProgression >= 99.9%)
+    --   漫画: saveVolumeProgress(读到最后一页, current_page == pages)
     local is_epub = volume.mediaType == "EPUB"
         or (H.is_str(volume.cacheFilePath) and volume.cacheFilePath:match("%.x?html$") ~= nil)
 
@@ -654,14 +655,7 @@ function M:after_reader_chapter_show(volume)
             update_state.cacheFilePath = cache_file_path
         end
 
-        if not is_epub and volume.isRead ~= true then
-            update_state.isRead = true
-            update_state.lastUpdated = {
-                _set = "= strftime('%s', 'now')"
-            }
-        end
-
-        -- update_state 可能为空(EPUB 且已下载), 空更新直接跳过
+        -- update_state 可能为空(已下载过), 空更新直接跳过
         if next(update_state) then
             self.dbManager:transaction(function()
                 self.dbManager:dynamicUpdateVolume(volume, update_state)
@@ -716,9 +710,6 @@ function M:after_reader_chapter_show(volume)
         end
     end
 
-    if not is_epub then
-        volume.isRead = true
-    end
     volume.isDownLoaded = true
 end
 

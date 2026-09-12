@@ -55,12 +55,18 @@ package.preload["ui/widget/booklist"] = function()
     return {resetBookInfoCache = function(file) booklist_resets[#booklist_resets + 1] = file end}
 end
 
-local pushed = {} -- TaskQueue 收集的任务 {func, callback, opts}
+local pushed = {}
+local backend_marks = {} -- TaskQueue 收集的任务 {func, callback, opts}
 local rp_response -- Backend.getSeriesVolumesReadProgress 的返回
 local rp_series_id -- 最近一次请求的系列 id
 package.preload["Komga/Backend"] = function()
     return {
         closeDbManager = function() end,
+        marks = {}, -- markVolumeRead 调用记录 { {book_cache_id, number, isRead} }
+        markVolumeRead = function(_, volume, isRead)
+            backend_marks[#backend_marks + 1] = { volume.book_cache_id, volume.number, isRead }
+            volume.isRead = isRead
+        end,
         getSeriesVolumesReadProgress = function(_, series_id)
             rp_series_id = series_id
             return rp_response
@@ -217,13 +223,52 @@ T("applyVolumes: 无服务器进度卷与 isRead 卷被过滤, 空目标不安�
         {number = 1, bookId = "b1", isRead = true},
         {number = 2, bookId = "b2"}, -- 无服务器进度
     }
+    backend_marks = {}
     local br = new_browser(true)
     local lv = new_libview(br)
     scheduled = {}
     PS.applyServerProgressToShortcuts(lv, "bc", {name = "x"}, "/vol", {
-        b1 = {page = 10, pages = 100, completed = false},
+        b1 = {page = 10, pages = 100, completed = true},
     })
     eq(#scheduled, 0, "目标为空不应安排分块任务")
+end)
+
+T("applyVolumes: 已读纠偏(服务器 completed=true 吸收, completed=false 清污染)", function()
+    volumes_reply = {
+        {number = 1, bookId = "b1", isRead = false}, -- 服务器标记已读 → 本地置已读
+        {number = 2, bookId = "b2", isRead = true},  -- 服务器在读未完 → 清污染
+        {number = 3, bookId = "b3", isRead = true},  -- 服务器无记录 → 不动(尊重离线手动标记)
+    }
+    backend_marks = {}
+    DocSettingsStub.open = function(_, path)
+        return {
+            readSetting = function() return nil end,
+            saveSetting = function(self, _, _) return self end,
+            flush = function() end,
+        }
+    end
+    local br = new_browser(true)
+    local lv = new_libview(br)
+    scheduled = {}
+    PS.applyServerProgressToShortcuts(lv, "bc", {name = "x"}, "/vol", {
+        b1 = {page = 100, pages = 100, completed = true},
+        b2 = {page = 30, pages = 100, completed = false},
+    })
+    eq(#backend_marks, 2, "应有两次纠偏写入")
+    ok(backend_marks[1][1] == "bc" and backend_marks[1][2] == 1 and backend_marks[1][3] == true,
+        "卷 1 应置已读")
+    ok(backend_marks[2][2] == 2 and backend_marks[2][3] == false, "卷 2 应清污染")
+    ok(backend_marks[1][1] == "bc", "纠偏需携带 book_cache_id")
+    -- 纠偏后: 卷 1 isRead=true 不写显示进度; 卷 2 污染清除后按真实比例落盘
+    drain_scheduled()
+    local refreshed = {}
+    for _, call in ipairs(br.calls) do
+        if call[1] == "refresh" then
+            refreshed[#refreshed + 1] = call[2]
+        end
+    end
+    eq(#refreshed, 1, "只有卷 2 落显示进度")
+    ok(refreshed[1] == 2)
 end)
 
 T("applyVolumes: 有变化卷落盘并刷新元数据, 无变化/isRead 卷零写入", function()
@@ -231,7 +276,7 @@ T("applyVolumes: 有变化卷落盘并刷新元数据, 无变化/isRead 卷零�
         {number = 1, bookId = "b1"},               -- sidecar 现值与服务器相同 → 零写入
         {number = 2, bookId = "b2"},               -- 有变化 → 写入
         {number = 3, bookId = "b3"},               -- 无现值 → 写入
-        {number = 4, bookId = "b4", isRead = true}, -- isRead → 过滤
+        {number = 4, bookId = "b4", isRead = true}, -- isRead+服务器已读完 → 过滤
     }
     -- sidecar 现值: 卷 1 = 0.5, 其余无
     DocSettingsStub.open = function(_, path)
@@ -252,7 +297,7 @@ T("applyVolumes: 有变化卷落盘并刷新元数据, 无变化/isRead 卷零�
         b1 = {page = 50, pages = 100, completed = false},
         b2 = {page = 20, pages = 100, completed = false},
         b3 = {completed = true},
-        b4 = {page = 90, pages = 100},
+        b4 = {page = 90, pages = 100, completed = true},
     })
     drain_scheduled()
     local refreshed = {}
@@ -261,8 +306,9 @@ T("applyVolumes: 有变化卷落盘并刷新元数据, 无变化/isRead 卷零�
             refreshed[#refreshed + 1] = call[2]
         end
     end
-    eq(#refreshed, 2, "只应有卷 2/3 触发元数据刷新")
-    ok(refreshed[1] == 2 and refreshed[2] == 3, "处理顺序按卷号")
+    -- 卷 3 服务器已读: 纠偏为 isRead=true 后走已读层显示, 不写显示进度
+    eq(#refreshed, 1, "只应有卷 2 触发元数据刷新")
+    ok(refreshed[1] == 2, "处理顺序按卷号")
     ok(br.writes[4] == nil, "isRead 卷不应被处理")
 end)
 

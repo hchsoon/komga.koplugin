@@ -641,7 +641,24 @@ function ProgressSync:applyServerProgressToShortcuts(book_cache_id, bookinfo, vo
     local targets = {}
     for _, volume in ipairs(volumes) do
         if H.is_tbl(volume) and H.is_num(volume.number) then
-            local frac = ProgressSync.volumeServerFrac(progress_map[volume.bookId])
+            local entry = progress_map[volume.bookId]
+            -- 已读标记纠偏(仅当服务器有明确证据时):
+            --   completed=true  -> 本地置已读(吸收其他端的标记)
+            --   有进度记录但 completed=false -> 清本地已读。旧版漫画"打开即标已读"
+            --   给大量未读完的卷留下 isRead=true 污染(显示恒 100%), 由此一并治愈。
+            --   服务器无进度记录的卷不动(尊重离线时的手动标记)。
+            -- 注意不能写 "X and entry.completed == true or nil": completed=false
+            -- 是假值会被 or 吞成 nil, 清污染分支将永不触发
+            local completed
+            if H.is_tbl(entry) then
+                completed = (entry.completed == true)
+            end
+            if completed ~= nil and volume.isRead ~= completed then
+                volume.book_cache_id = book_cache_id
+                volume.isRead = completed
+                pcall(Backend.markVolumeRead, Backend, volume, completed)
+            end
+            local frac = ProgressSync.volumeServerFrac(entry)
             -- 本地已读(isRead)显示恒为满进度, 服务器进度无显示意义, 跳过
             if H.is_num(frac) and volume.isRead ~= true then
                 targets[#targets + 1] = { volume = volume, frac = frac }
