@@ -29,18 +29,13 @@ M.install = function()
         return
     end
     M._installed = true
-    M.patch_status = {}
 
-    -- 每个补丁独立 pcall + 状态记录: 单个失败(如 KOReader 升级改了模块接口)
-    -- 不再拖垮后续补丁, 失败名单可经 M.patch_status 查询。
+    -- 每个补丁独立 pcall: 单个失败(如 KOReader 升级改了模块接口)
+    -- 不再拖垮后续补丁。
     -- 注意: 各补丁正文保持原有缩进未重排(Lua 不依赖缩进), 减少无谓 diff。
     local logger = require("logger")
     local function apply(name, patch_fn)
-        if M.patch_status[name] ~= nil then
-            return
-        end
         local ok, err = pcall(patch_fn)
-        M.patch_status[name] = ok == true or tostring(err)
         if ok then
             logger.dbg("komga patch applied:", name)
         else

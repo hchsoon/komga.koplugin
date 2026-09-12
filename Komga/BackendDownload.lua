@@ -18,33 +18,19 @@ local Paths = require("Komga/Paths")
 local CacheJanitor = require("Komga/CacheJanitor")
 local ContentProcessor = require("Komga/ContentProcessor")
 local get_img_src = ContentProcessor.get_img_src
-local get_url_extension = ContentProcessor.get_url_extension
 local custom_urlEncode = ContentProcessor.custom_urlEncode
 local H = require("Komga/Helper")
 
 return function(M)
 local wrap_response = M.wrap_response
 local pGetUrlContent = M.pGetUrlContent
-function M:pDownloadVolume(volume, message_dialog, is_recursive)
+function M:pDownloadVolume(volume)
 
     local series_url = volume.url
     local book_cache_id = volume.book_cache_id
-    local number = volume.number
-    local chapter_title = volume.title or ''
     local down_number = volume.number
     if volume.bookId == nil then
         volume.bookId = volume.book_cache_id
-    end
-
-    -- logger.info('pDownloadVolume called',volume)
-
-    -- print(series_url, book_cache_id, volume.bookId ,number, chapter_title, down_number)
-    local function message_show(msg)
-        if message_dialog then
-            message_dialog.text = msg
-            UIManager:setDirty(message_dialog, "ui")
-            UIManager:forceRePaint()
-        end
     end
 
     if series_url == nil or not book_cache_id then
@@ -56,7 +42,7 @@ function M:pDownloadVolume(volume, message_dialog, is_recursive)
         return cache_chapter
     end
 
-    local url = nil
+    local url
     -- 分卷(volume 表)没有 url 列, 以前每下载一个未缓存章节都会先调
     -- pGetEpubManifest 拉取整个 manifest(getEpubManifest, 超时 18-25s), 导致下载卡住数秒到数十秒。
     -- 内部章节 URL(epub_chapter.url)通常已在库中, 直接使用即可跳过该慢请求。
@@ -103,17 +89,13 @@ function M:pDownloadVolume(volume, message_dialog, is_recursive)
             if url:lower():match("%.x?html$") then
                 data = url .. "\n" .. data
             end
-            -- print(data)
             return self:_processVolumeContent(volume, data)
         else
             logger.err("download volume error: ", url, err)
         end
     end
-    -- if not H.is_tbl(response) or response.type ~= 'SUCCESS' then
-    --     error(response.message or '章节下载失败')
-    -- end
 
-    return nil --
+    return nil
 end
 
 function M:getCacheVolumeFilePath(volume)
@@ -944,21 +926,21 @@ function M:downloadVolumeWholeFile(volume)
     return volume
 end
 
-function M:downloadVolume(volume, message_dialog)
+function M:downloadVolume(volume)
 
     local bookCacheId = volume.book_cache_id
     local number = volume.number
     local volume_book_id = volume.bookId
-    -- print(bookCacheId, number, volume_book_id)
 
     if self.dbManager:isVolumeDownloading(bookCacheId, volume_book_id, number) == true and self:isExtractingInBackground() == true then
         return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 
     local status, err = pcall(function()
-        -- P3-9 双轨: 非 EPUB 卷(漫画)必须整卷下载(逐章管线对漫画必 400);
+        -- P3-9 双轨: 非 EPUB 卷(漫画)必须走整卷下载
+        -- (逐章管线对漫画必 400);
         -- EPUB 卷按 whole_file_mode 选择整卷/逐章, 整卷失败回退逐章
-        return self:downloadVolumeAuto(volume, message_dialog)
+        return self:downloadVolumeAuto(volume)
     end)
     if not status then
         logger.err('下载章节失败：', err)
@@ -971,14 +953,14 @@ end
 -- 下载策略选择: 非 EPUB 卷(漫画 DIVINA 等)没有内部章节, 逐章管线是 EPUB 专用
 -- (对漫画调 manifest/epub 端点必然 400), 因此无论设置如何都先走整卷原文件下载;
 -- EPUB 卷按 whole_file_mode 选择整卷/逐章, 整卷失败回退逐章。
-function M:downloadVolumeAuto(volume, message_dialog)
+function M:downloadVolumeAuto(volume)
     if self:getSettings().whole_file_mode == true or volume.mediaType ~= "EPUB" then
         local wf = self:downloadVolumeWholeFile(volume)
         if wf then
             return wf
         end
     end
-    return self:pDownloadVolume(volume, message_dialog)
+    return self:pDownloadVolume(volume)
 end
 
 -- 打点系列"最后阅读"时间(静默, 失败不影响阅读)

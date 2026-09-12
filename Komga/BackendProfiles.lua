@@ -2,7 +2,6 @@
 
 install(M) 把方法装回 Backend 表; wrap_response 经 M 字段做 local 别名, 函数体零改动。
 ]]
-local logger = require("logger")
 local dbg = require("dbg")
 local LuaSettings = require("luasettings")
 local socket_url = require("socket.url")

@@ -43,24 +43,7 @@ T("chapterIndex 非 x/html 扩展名返回 nil", function()
     eq(VP.chapterIndex(nil), nil)
 end)
 
--- ===== fileExt / bookIdOf / pathPrefix =====
-T("fileExt 返回扩展名", function()
-    eq(VP.fileExt("/p/x-2.html"), "html")
-    eq(VP.fileExt("/p/x-14.xhtml"), "xhtml")
-    eq(VP.fileExt("/p/x-2.jpg"), nil)
-end)
-
-T("bookIdOf 解析 bookId", function()
-    eq(VP.bookIdOf("/path/女校之星-0RF8YN5NVADW9-2.html"), "0RF8YN5NVADW9")
-    eq(VP.bookIdOf("/p/x-0RE05D8BZD1VG-14.xhtml"), "0RE05D8BZD1VG")
-    eq(VP.bookIdOf("/p/no-id-2.html"), nil) -- 纯数字"bookId"不匹配大写+digit模式
-end)
-
-T("pathPrefix 截到 bookId 后", function()
-    eq(VP.pathPrefix("/path/女校之星-0RF8YN5NVADW9-2.html"), "/path/女校之星-0RF8YN5NVADW9")
-    eq(VP.pathPrefix("/p/x-0RE05D8BZD1VG-14.xhtml"), "/p/x-0RE05D8BZD1VG")
-end)
-
+-- ===== chapterFileName =====
 T("chapterFileName 生成文件名(默认/显式扩展)", function()
     eq(VP.chapterFileName("书名", "B1", 3), "书名-B1-3.xhtml")
     eq(VP.chapterFileName("书名", "B1", 3, "html"), "书名-B1-3.html")
@@ -76,19 +59,11 @@ T("basenameKey 相对路径/全 URL/查询串", function()
     eq(VP.basenameKey(nil), nil)
 end)
 
--- ===== coverVersion / escapeVersion =====
-T("coverVersion 提取 ?v= 参数", function()
-    eq(VP.coverVersion("http://h/thumbnail?v=abc"), "abc")
-    eq(VP.coverVersion("http://h/t?x=1&v=abc"), "abc")
-    eq(VP.coverVersion("http://h/thumbnail"), nil)
-    eq(VP.coverVersion(nil), nil)
-end)
-
-T("escapeVersion URL 转义与回环", function()
+-- ===== escapeVersion =====
+T("escapeVersion URL 转义", function()
     local lm = "2026-08-30T14:45:28.123Z"
     local escaped = VP.escapeVersion(lm)
     eq(escaped, "2026%2D08%2D30T14%3A45%3A28%2E123Z")
-    eq(VP.coverVersion("http://h/t?v=" .. escaped), escaped, "转义后应能被 coverVersion 取回")
     eq(VP.escapeVersion(""), "")
     eq(VP.escapeVersion(nil), "")
 end)
@@ -156,7 +131,7 @@ else
             print(string.format("FAIL %s\n     %s", c.name, tostring(err)))
         end
     end
-    truthy(#checks >= 15, "用例数量异常")
+    truthy(#checks >= 12, "用例数量异常")
     if failed > 0 then
         print(string.format("\n%d/%d 用例失败", failed, #checks))
         os.exit(1)

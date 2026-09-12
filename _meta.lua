@@ -1,5 +1,3 @@
-local _ = require("gettext")
-
 return {
     name = "komga",
     fullname = "Komga 漫画库",

@@ -3,7 +3,6 @@ local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
 local Notification = require("ui/widget/notification")
-local Screen = require("device").screen
 local Trapper = require("ui/trapper")
 
 local _ = require("gettext")
@@ -64,7 +63,7 @@ local function join_args(message, args)
     return message
 end
 
--- error/info/success 三态同构: 仅图标与是否过 gettext 不同
+-- error/success 两态同构: 仅图标与是否过 gettext 不同
 local function notify_dialog(message, icon, timeout, wrap_gettext)
     return M:custom({
         text = wrap_gettext and _(message) or message,
@@ -77,12 +76,6 @@ function M:error(message, ...)
     local args = {...}
     local timeout = pick_timeout(args)
     return notify_dialog(join_args(message, args), "notice-warning", timeout)
-end
-
-function M:info(message, ...)
-    local args = {...}
-    local timeout = pick_timeout(args)
-    return notify_dialog(join_args(message, args), "notice-info", timeout)
 end
 
 function M:success(message, ...)
@@ -229,15 +222,6 @@ function M:notice(msg, timeout)
     else
         Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
     end
-end
-
-function M:askForRestart(msg)
-    self:confirm(msg or "", function()
-        UIManager:restartKOReader()
-    end, {
-        ok_text = "重启",
-        cancel_text = "稍后"
-    })
 end
 
 return M

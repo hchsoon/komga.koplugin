@@ -3,13 +3,7 @@
 BookInfoDB 实例(dbPath/db_conn/execute/transaction 等基础设施在 M)。
 ]]
 
-local SQ3 = require("lua-ljsqlite3/init")
-local logger = require("logger")
 local dbg = require("dbg")
-local Device = require("device")
-local util = require("util")
-local VolumePath = require("Komga/VolumePath")
-local md5 = require("ffi/sha2").md5
 local H = require("Komga/Helper")
 
 local Store = {}

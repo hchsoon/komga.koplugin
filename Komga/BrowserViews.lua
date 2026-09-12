@@ -10,7 +10,6 @@ install(LibraryView) 返回两个构造函数供 LibraryView 以同名 local 调
 local UIManager = require("ui/uimanager")
 local Menu = require("ui/widget/menu")
 local BD = require("ui/bidi")
-local Font = require("ui/font")
 local T = require("ffi/util").template
 local _ = require("gettext")
 local Event = require("ui/event")
@@ -28,7 +27,6 @@ local ChapterListing = require("Komga/ChapterListing")
 local FileManager = require("apps/filemanager/filemanager")
 local H = require("Komga/Helper")
 local Paths = require("Komga/Paths")
-local VolumePath = require("Komga/VolumePath")
 
 return function(LibraryView)
 local function init_book_browser(parent)
@@ -55,12 +53,6 @@ local function init_book_browser(parent)
             return
         end
         self.parent:openKomgaFolder(homedir, focused_file, selected_files)
-    end
-
-    function book_browser:goHome()
-        if FileManager.instance then
-            FileManager.instance:goHome()
-        end
     end
 
     function book_browser:refreshItems()
@@ -235,18 +227,6 @@ local function init_book_browser(parent)
                     self:invalidateShortcutRow(book_lnk_path)
                 end
             end, {timeout = 120, tag = "series_cover"})
-        end
-    end
-
-    function book_browser:addVolumeShortcut(bookinfo, seriename)
-        -- 生成该系列分卷目录并同步各分卷快捷方式（不再写入 .sdr 隐藏目录）
-        if not (H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id) then
-            logger.err("addVolumeShortcut: parameter error")
-            return
-        end
-        local volume_folder = self:ensureVolumeFolder(bookinfo.cache_id, bookinfo)
-        if volume_folder then
-            self:syncSeriesVolumes(bookinfo.cache_id, bookinfo, volume_folder)
         end
     end
 
@@ -505,29 +485,6 @@ local function init_book_browser(parent)
         end
         return volume_folder
     end
-
-    function book_browser:syncSeriesVolumes(book_cache_id, bookinfo, volume_folder)
-        if not (H.is_str(book_cache_id) and H.is_tbl(bookinfo) and H.is_str(volume_folder)) then
-            logger.err("syncSeriesVolumes parameter error")
-            return
-        end
-        local volumes = KomgaModel:new(book_cache_id):getVolumes() -- Komga Book 列表(分卷)
-        if not (H.is_tbl(volumes) and #volumes > 0) then
-            return
-        end
-        for _, volume in ipairs(volumes) do
-            if H.is_num(volume.number) then
-                local lnk_path, lnk_name = self:writeVolLnk(volume, volume_folder, book_cache_id)
-                if lnk_path and util.fileExists(lnk_path) then
-                    self:refreshVolumeMetadata(lnk_name, lnk_path, book_cache_id, volume.number, bookinfo)
-                    if not DocSettings:findCustomCoverFile(lnk_path) then
-                        self:asyncDownloadVolumeCover(book_cache_id, volume, lnk_path)
-                    end
-                end
-            end
-        end
-    end
-
 
     -- 同路径失效去重(10s): 进度持久化/关书刷新等多个调用方会在数秒内对同一
     -- 文件连发失效, CoverBrowser 每次都会重新提取并重新计数, 反复被打断会让
@@ -935,10 +892,7 @@ local function init_book_menu(parent)
             durChapterIndex = bookinfo.durChapterIndex,
             name = bookinfo.name,
             author = bookinfo.author,
-            cacheExt = bookinfo.cacheExt,
-            origin = bookinfo.origin,
-            originName = bookinfo.originName,
-            originOrder = bookinfo.originOrder
+            cacheExt = bookinfo.cacheExt
         }, self.parent_ref.onReturnCallback, function(chapter)
             self.parent_ref.instance:loadAndRenderChapter(chapter)
         end, true)

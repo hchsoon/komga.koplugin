@@ -1,13 +1,11 @@
 local BD = require("ui/bidi")
 local Font = require("ui/font")
-local util = require("util")
 local logger = require("logger")
 local dbg = require("dbg")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 local NetworkMgr = require("ui/network/manager")
 local Device = require("device")
-local time = require("ui/time")
 local SpinWidget = require("ui/widget/spinwidget")
 local ButtonDialog = require("ui/widget/buttondialog")
 local Screen = Device.screen
@@ -34,7 +32,6 @@ local ChapterListing = Menu:extend{
     toc_items_per_page_default = 14,
 
     bookinfo = nil,
-    chapter_sorting_mode = nil,
     all_chapters_count = nil,
     on_return_callback = nil,
     on_show_chapter_callback = nil,
@@ -106,7 +103,6 @@ function ChapterListing:generateItemTableFromChapters(chapters)
         local mandatory = (chapter.number == last_read_chapter and Icons.FA_THUMB_TACK or '') ..
                               (chapter.isRead and Icons.FA_CHECK_CIRCLE or "") ..
                               (chapter.isDownLoaded ~= true and Icons.FA_DOWNLOAD or "")
-        -- print(chapter.bookId,chapter.number,chapter.title)
         table.insert(item_table, {
             chapterId = chapter.bookId,
             number = chapter.number,
@@ -137,8 +133,7 @@ function ChapterListing:onCloseWidget()
     Menu.onCloseWidget(self)
 end
 
-function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, hide)
-    accept_cached_results = accept_cached_results or false
+function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, hide)
 
     if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.cache_id) then
         MessageBox:error('漫画信息出错')
@@ -157,7 +152,6 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
 
     local chapter_listing = ChapterListing:new{
         bookinfo = bookinfo,
-        chapter_sorting_mode = settings.chapter_sorting_mode,
         on_return_callback = onReturnCallBack,
         on_show_chapter_callback = showChapterCallBack,
 
@@ -190,7 +184,7 @@ function ChapterListing:onMenuChoice(item)
     local chapter = Backend:getVolumeInfoCache(book_cache_id, number)
 
     if Backend:getSettings().stream_image_view == true and chapter.mediaType ~= "EPUB" then
-        ChapterListing.onReturnCallback = function()
+        local on_return_callback = function()
             self:gotoLastReadChapter()
         end
         NetworkMgr:runWhenOnline(function()
@@ -198,14 +192,12 @@ function ChapterListing:onMenuChoice(item)
                 StreamImageView:fetchAndShow({
                     bookinfo = self.bookinfo,
                     chapter = chapter,
-                    on_return_callback = ChapterListing.onReturnCallback
+                    on_return_callback = on_return_callback
                 })
             end)
         end)
         Backend:show_notice("流式漫画开启")
     elseif chapter.mediaType == "EPUB" then
-        -- 显示 epub 内部目录
-        -- self:showEpubToc(chapter)
         self:showReaderUI(chapter)
     else
         self:showReaderUI(chapter)
@@ -246,9 +238,6 @@ function ChapterListing:onMenuHold(item)
         text = "打开目录",
         callback = function()
             UIManager:close(dialog)
-            -- local chapter = Backend:getEpubChapterInfoCache(item.chapterId, item.number)
-            local chapter = Backend:getVolumeInfoCache(book_cache_id, number)
-            -- chapter.bookId = item.chapterId
             self:showEpubToc(chapter)
         end
     }},

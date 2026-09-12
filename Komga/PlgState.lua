@@ -15,7 +15,6 @@ local FIELDS = {
     ui_refresh_time = os.time(),
     displayed_chapter = nil,
     readerui_is_showing = nil,
-    volume_reading = nil, -- 当前阅读是否为分卷快捷方式进入的 EPUB（用于 TOC 决策）
     chapter_call_event = nil,
     volume_reading_index = nil, -- 当前正读的分卷卷号（openVolumeShortcut 记录, 翻章后仍指向卷）
     volume_pages = nil,         -- 当前卷总页数快照（showReaderUI 记录）
@@ -40,23 +39,6 @@ function M.libraryState()
         t[k] = v
     end
     return t
-end
-
--- 重置可变阅读状态(保留菜单/浏览器等 UI 字段)
-function M.resetReading(t)
-    t.displayed_chapter = nil
-    t.readerui_is_showing = nil
-    t.volume_reading = nil
-    t.chapter_call_event = nil
-    t.volume_reading_index = nil
-    t.volume_pages = nil
-    t.volume_bookId = nil
-    t.progress_sync_busy = nil
-    t.progress_sync_pending = nil
-    t.resume_goto_frac = nil
-    t._last_epub_pos = nil
-    t.volume_lnk_path = nil
-    t._last_epub_server_frac = nil
 end
 
 return M

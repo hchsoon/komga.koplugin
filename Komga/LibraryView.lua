@@ -1,4 +1,3 @@
-local BD = require("ui/bidi")
 local Font = require("ui/font")
 local ffiUtil = require("ffi/util")
 local util = require("util")
@@ -11,7 +10,6 @@ local Device = require("device")
 local T = ffiUtil.template
 local _ = require("gettext")
 
-local ChapterListing = require("Komga/ChapterListing")
 local ReaderUI = require("apps/reader/readerui")
 local FileManager = require("apps/filemanager/filemanager")
 local DocSettings = require("docsettings")
@@ -21,8 +19,6 @@ local KomgaModel = require("Komga/KomgaModel")
 local MessageBox = require("Komga/MessageBox")
 local H = require("Komga/Helper")
 local TaskQueue = require("Komga/TaskQueue")
-local Config = require("Komga/Config")
-local VolumePath = require("Komga/VolumePath")
 local Paths = require("Komga/Paths")
 
 local PlgState = require("Komga/PlgState")
@@ -78,7 +74,6 @@ end
 
 function LibraryView:fetchAndShow()
     local is_first = not LibraryView.instance
-    local library_view = LibraryView.instance or self:getInstance()
     local use_browser = not self:isDisableBrowserMode() and is_first and self:browserViewHasLnk()
     local widget = use_browser and self:getBrowserWidget() or self:getMenuWidget()
     if widget then
@@ -104,16 +99,6 @@ function LibraryView:addBkShortcut(bookinfo, always_add)
     local browser = self:getBrowserWidget()
     if browser then
         browser:addBookShortcut(bookinfo)
-    end
-end
-
-function LibraryView:addVolShortcut(bookinfo, seriename, always_add)
-    if not always_add and self:isDisableBrowserMode() then
-        return
-    end
-    local browser = self:getBrowserWidget()
-    if browser then
-        browser:addVolumeShortcut(bookinfo, seriename)
     end
 end
 
@@ -1020,8 +1005,6 @@ function LibraryView:showReaderUI(chapter)
         chapter.mediaType = "EPUB"
     end
     self.displayed_chapter = chapter
-    -- 记录当前阅读是否为分卷快捷方式进入（TOC 决策依据）
-    self.volume_reading = chapter.volume_read == true
     -- 快照卷数据: 翻章后内部章节对象可能丢失 pages/bookId, 上传与续读依赖
     if H.is_num(chapter.pages) and chapter.pages > 0 then
         self.volume_pages = chapter.pages

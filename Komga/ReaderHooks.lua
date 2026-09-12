@@ -98,14 +98,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     durChapterIndex = bookinfo.durChapterIndex,
                     name = bookinfo.name,
                     author = bookinfo.author,
-                    cacheExt = bookinfo.cacheExt,
-                    origin = bookinfo.origin,
-                    originName = bookinfo.originName,
-                    originOrder = bookinfo.originOrder
+                    cacheExt = bookinfo.cacheExt
                 }, function()
                 end, function(chapter)
                     library_view_ref.instance:loadAndRenderChapter(chapter)
-                end, true, true)
+                end, true)
             end
 
             local number = last_read_chapter - 1
@@ -172,10 +169,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 durChapterIndex = bookinfo.durChapterIndex,
                 name = bookinfo.name,
                 author = bookinfo.author,
-                cacheExt = bookinfo.cacheExt,
-                origin = bookinfo.origin,
-                originName = bookinfo.originName,
-                originOrder = bookinfo.originOrder
+                cacheExt = bookinfo.cacheExt
             }, onReturnCallBack, function(chapter)
                 library_view_ref.instance:loadAndRenderChapter(chapter)
             end, true)
@@ -255,18 +249,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end
 
             -- statistics.koplugin
-            if document then
-                document.is_pic = true
-            end
-            -- Does it affect the future ？
-            --[=[
-                    if document_is_new then  
-                        local bookinfo = library_view_ref.instance.book_toc.bookinfo
-                        doc_settings.data.doc_props = doc_settings.data.doc_props or {}
-                        doc_settings.data.doc_props.title = bookinfo.name or "N/A"
-                        doc_settings.data.doc_props.authors = bookinfo.author or "N/A"
-                    end
-                ]=]
+            document.is_pic = true
 
             -- current_page == nil
             -- self.ui.document:getPageCount() unreliable, sometimes equal to 0

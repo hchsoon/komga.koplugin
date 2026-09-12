@@ -1,5 +1,4 @@
 local UIManager = require("ui/uimanager")
-local InputDialog = require("ui/widget/inputdialog")
 local RenderImage = require("ui/renderimage")
 local ImageViewer = require("ui/widget/imageviewer")
 local logger = require("logger")
@@ -11,10 +10,8 @@ local CenterContainer = require("ui/widget/container/centercontainer")
 local Geom = require("ui/geometry")
 local _ = require("gettext")
 
-local MessageBox = require("Komga/MessageBox")
 local Backend = require("Komga/Backend")
 local H = require("Komga/Helper")
-local KLog = require("Komga/Logger")
 local VolumePath = require("Komga/VolumePath")
 
 local Screen = Device.screen
@@ -358,7 +355,6 @@ end
 -- 不在此处做高度归一缩放: bb:scale 是纯 Lua 逐像素缩放(太慢),
 -- 整体缩放交给 ImageViewer/ImageWidget 原生适配; 页尺寸不一致时顶对齐即可。
 function M:composeDualPages(bb_list)
-    local BlitBuffer = require("ffi/blitbuffer")
     local total_w, max_h = 0, 0
     for _, bb in ipairs(bb_list) do
         total_w = total_w + bb:getWidth()
@@ -369,7 +365,7 @@ function M:composeDualPages(bb_list)
     if total_w <= 0 or max_h <= 0 then
         return nil
     end
-    local composed = BlitBuffer.new(total_w, max_h, bb_list[1]:getType())
+    local composed = Blitbuffer.new(total_w, max_h, bb_list[1]:getType())
     local x = 0
     for _, bb in ipairs(bb_list) do
         pcall(function()

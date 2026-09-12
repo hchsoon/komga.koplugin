@@ -3,8 +3,6 @@ local Dispatcher = require("dispatcher")
 local DocumentRegistry = require("document/documentregistry")
 local UIManager = require("ui/uimanager")
 local Event = require("ui/event")
-local util = require("util")
-local logger = require("logger")
 local _ = require("gettext")
 local H = require("Komga/Helper") -- need to load first 
 local Backend = require("Komga/Backend") -- two
@@ -13,7 +11,6 @@ local verify_patched = require("patches.core").verifyPatched
 
 local Komga = WidgetContainer:extend({
     name = "Komga漫画库",
-    library_view = nil,
     patches_ok = nil
 })
 
@@ -153,12 +150,11 @@ function Komga:addToMainMenu(menu_items)
 end
 
 function Komga:openLibraryView()
-    self.library_view = LibraryView:fetchAndShow()
+    LibraryView:fetchAndShow()
     UIManager:nextTick(function()
         if not self.patches_ok then
             Backend:installPatches()
         end
-        -- Backend:checkOta()
     end)
 end
 return Komga

@@ -3,7 +3,7 @@ Komga/Logger.lua — 分级日志(参考 koobone logger, 极简版)
 
 - 级别: debug < info < warn < error; 低于当前级别的只进 KOReader logger, 不落盘
 - 设置项 debug_log = true 时级别提到 debug(诊断日志如 [komga-layout] 收编于此)
-- 文件: <临时目录>/komga.log, 自 init 起追加; M.clear() 清空
+- 文件: <临时目录>/komga.log, 自 init 起追加
 - 无 KOReader 依赖(纯 io), 可在任何加载阶段使用
 ]]
 local M = {
@@ -23,25 +23,6 @@ end
 
 function M.setDebug(on)
     M._level = on and LEVELS.debug or LEVELS.info
-end
-
-function M.isDebug()
-    return M._level <= LEVELS.debug
-end
-
-function M.path()
-    return M._path
-end
-
-function M.clear()
-    if M._path then
-        pcall(function()
-            local f = io.open(M._path, "wb")
-            if f then
-                f:close()
-            end
-        end)
-    end
 end
 
 local function write(level, msg)
@@ -74,20 +55,12 @@ local function fmt(...)
     return table.concat(parts, " ")
 end
 
-function M.debug(...)
-    write(LEVELS.debug, fmt(...))
-end
-
 function M.info(...)
     write(LEVELS.info, fmt(...))
 end
 
 function M.warn(...)
     write(LEVELS.warn, fmt(...))
-end
-
-function M.error(...)
-    write(LEVELS.error, fmt(...))
 end
 
 return M

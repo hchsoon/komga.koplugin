@@ -14,25 +14,19 @@ Komga/BookInfoDB.lua — SQLite 数据层(缓存 Komga 服务端数据)
 ]]
 
 local SQ3 = require("lua-ljsqlite3/init")
-local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local dbg = require("dbg")
 local Device = require("device")
 local util = require("util")
-local VolumePath = require("Komga/VolumePath")
-local md5 = require("ffi/sha2").md5
 local H = require("Komga/Helper")
 
 if not dbg.log then
     dbg.log = logger.dbg
 end
 
-local custom_type_variable = {}
 local M = {
     dbPath = nil,
-    db_conn = nil,
     isConnected = false,
-    dbCreated = false,
     in_transaction = false
 }
 
@@ -171,18 +165,6 @@ function M:nil_object()
     })
 end
 
-function M:blob_object(byte_array, size)
-    return setmetatable({
-        __type_ext = 'blob',
-        __ext_size = size,
-        [1] = byte_array
-    }, {
-        __tostring = function()
-            return "blob"
-        end
-    })
-end
-
 function M:_setJournalMode()
     local mode = Device:canUseWAL() and "WAL" or "TRUNCATE"
     local success, err = pcall(function()
@@ -260,7 +242,6 @@ function M:_initDB(is_repair)
     end)
     if success and rc == SQ3.OK then
         dbg.v("Database schema initialized successfully.")
-        self.dbCreated = true
         self:closeDB()
     else
         dbg.log("Failed to initialize database schema. Return code: " .. tostring(rc))

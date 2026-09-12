@@ -18,38 +18,21 @@ Komga/Backend.lua — Komga HTTP 层与业务编排
 ]]
 
 local logger = require("logger")
-local Device = require("device")
 local NetworkMgr = require("ui/network/manager")
 local ffiUtil = require("ffi/util")
-local md5 = require("ffi/sha2").md5
 local dbg = require("dbg")
 local LuaSettings = require("luasettings")
-local socket_url = require("socket.url")
 local util = require("util")
-local time = require("ui/time")
 
 local UIManager = require("ui/uimanager")
 local H = require("Komga/Helper")
-local Paths = require("Komga/Paths")
 local Config = require("Komga/Config")
-local VolumePath = require("Komga/VolumePath")
 local ApiClient = require("Komga/ApiClient")
-local Async = require("Komga/Async")
 local TaskQueue = require("Komga/TaskQueue")
 local KLog = require("Komga/Logger")
 local StreamPageCache = require("Komga/StreamPageCache")
 local CacheJanitor = require("Komga/CacheJanitor")
 local ContentProcessor = require("Komga/ContentProcessor")
-local get_img_src = ContentProcessor.get_img_src
-local get_url_extension = ContentProcessor.get_url_extension
-local custom_urlEncode = ContentProcessor.custom_urlEncode
-local splitParagraphsPreserveBlank = ContentProcessor.splitParagraphsPreserveBlank
-local has_img_tag = ContentProcessor.has_img_tag
-local has_other_content = ContentProcessor.has_other_content
-local get_chapter_content_type = ContentProcessor.get_chapter_content_type
-local normalize_rel_href = ContentProcessor.normalize_rel_href
-local get_cached_chapter_filename = ContentProcessor.get_cached_chapter_filename
-local plain_text_replace = ContentProcessor.plain_text_replace
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -504,10 +487,6 @@ function M:preLoadStreamPages(bookCacheId, img_srcs)
 end
 
 -- chapter content pipeline moved to Komga/ContentProcessor; thin delegates here
-local processLink = function(book_cache_id, resources_src, base_url, is_porxy, callback)
-    return ContentProcessor.process_link(M, book_cache_id, resources_src, base_url, is_porxy, callback)
-end
-
 function M:_processVolumeContent(volume, content)
     return ContentProcessor.process_volume_content(self, volume, content)
 end
@@ -518,11 +497,6 @@ require("Komga/BackendDownload")(M)
 function M:getVolumeInfoCache(bookCacheId, number)
     local volume_data = self.dbManager:getVolumeInfo(bookCacheId, number)
     return volume_data
-end
-
-function M:getEpubChapterInfoCache(chapterId, number)
-    local chapter_data = self.dbManager:getEpubChapterInfo(chapterId, number)
-    return chapter_data
 end
 
 function M:getVolumeCount(bookCacheId)

@@ -18,30 +18,6 @@ function VolumePath.chapterIndex(file)
     return tonumber(file:match("%-(%d+)%.x?html$"))
 end
 
--- 缓存文件扩展名: "xhtml" / "html" / nil(其他类型)
-function VolumePath.fileExt(file)
-    if type(file) ~= "string" then
-        return nil
-    end
-    return file:match("%.(x?html)$")
-end
-
--- 从缓存文件全路径解析 bookId
-function VolumePath.bookIdOf(file)
-    if type(file) ~= "string" then
-        return nil
-    end
-    return file:match("-([%u%d]+)-%d+%.x?html$")
-end
-
--- 缓存文件名前缀(到 <书名>-<bookId>- 为止, 不含章节号与扩展名)
-function VolumePath.pathPrefix(file)
-    if type(file) ~= "string" then
-        return nil
-    end
-    return file:match("^(.*)-%d+%.x?html$")
-end
-
 -- 生成缓存章节文件名(book_name 需调用方先经 util.getSafeFilename 处理)
 function VolumePath.chapterFileName(book_name, bookId, number, ext)
     return string.format("%s-%s-%s.%s", book_name or "", bookId, number, ext or "xhtml")
@@ -69,14 +45,6 @@ function VolumePath.basenameKey(href)
 end
 
 -- ===== 封面版本参数(?v=<服务器 lastModified>) =====
-
--- 封面 URL 的 ?v= 版本参数(无则 nil)
-function VolumePath.coverVersion(url)
-    if type(url) ~= "string" then
-        return nil
-    end
-    return url:match("[?&]v=([^&]*)")
-end
 
 -- 版本串 URL 转义(lastModified 中的非字母数字 → %XX)
 function VolumePath.escapeVersion(v)

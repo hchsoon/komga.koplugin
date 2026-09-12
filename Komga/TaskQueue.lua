@@ -5,11 +5,9 @@ Komga/TaskQueue.lua — 具名任务通道(设计参考 legado.koplugin task/Que
   本插件的后台域约定: "pages"/"stream"/"volume" 均为 1 worker, "cover" 为 2
 - 任务经 Komga/Async.run 在子进程执行: 超时/终止/回收由 Async 托管,
   fork 不可用时 Async 自动同步降级(此时任务在主进程串行执行)
-- 支持重试(max_retries + 可选 retry_delay 退避)、插队(insert_at_head)、暂停/恢复、清空队列
-- 失败重试不回调原 callback; 重试耗尽后才回调 (false, nil, err)
+- 失败即终局并回调 (false, nil, err); 支持按 id 取消与清空队列
 ]]
 local logger = require("logger")
-local UIManager = require("ui/uimanager")
 
 -- Async 延迟绑定(避免模块加载顺序问题, 且便于测试桩替换)
 local Async_run_guarded = function(func, callback, opts)
@@ -32,7 +30,6 @@ function TaskQueue.getChannel(name, max_workers)
             max_workers = math.max(1, max_workers or 1),
             active = 0,
             queue = {},
-            paused = false,
             seq = 0,
             tasks = {}, -- id -> task(queued/running + handle)
         }, Channel)
@@ -65,40 +62,14 @@ function TaskQueue.cancel(channel_name, id)
     return ch:cancelTask(id)
 end
 
-function TaskQueue.hasAnyTasks()
-    for _, ch in pairs(TaskQueue.channels) do
-        if ch:hasTasks() then
-            return true
-        end
-    end
-    return false
-end
-
-function TaskQueue.getEngineStatus()
-    local status = {}
-    for name, ch in pairs(TaskQueue.channels) do
-        status[name] = ch:getStatus()
-    end
-    return status
-end
-
 function Channel:hasTasks()
     return self.active > 0 or #self.queue > 0
 end
 
-function Channel:getStatus()
-    return {
-        queued = #self.queue,
-        active = self.active,
-        paused = self.paused,
-        max_workers = self.max_workers,
-    }
-end
-
 -- push(func, callback, opts)
 --   func:      无参函数, 在子进程执行, 返回值经管道回传
---   callback:  function(ok, result, err), 仅在最终成败时调用一次(重试期间不调用)
---   opts:      { timeout, max_retries, insert_at_head, tag }
+--   callback:  function(ok, result, err), 仅在最终成败时调用一次
+--   opts:      { timeout, tag }
 function Channel:push(func, callback, opts)
     if type(func) ~= "function" then
         return nil
@@ -111,24 +82,16 @@ function Channel:push(func, callback, opts)
         func = func,
         callback = callback,
         opts = opts,
-        retries = 0,
         status = "queued",
         channel = self.name,
     }
     self.tasks[task.id] = task
-    if opts.insert_at_head then
-        table.insert(self.queue, 1, task)
-    else
-        table.insert(self.queue, task)
-    end
+    table.insert(self.queue, task)
     self:_pump()
     return task.id
 end
 
 function Channel:_pump()
-    if self.paused then
-        return
-    end
     while self.active < self.max_workers and #self.queue > 0 do
         local task = table.remove(self.queue, 1)
         self.active = self.active + 1
@@ -140,50 +103,17 @@ function Channel:_run(task)
     task.status = "running"
     task.handle = Async_run_guarded(task.func, function(ok, result, err)
         self.active = self.active - 1
-        -- 任务终结(完成/失败/取消/超时)即离册; 重试的重新入册由下方 queue 插入时补回
-        if not (not ok and task.retries < (task.opts.max_retries or 0)) then
-            self.tasks[task.id] = nil
+        -- 任务终结(完成/失败/取消/超时)即离册
+        self.tasks[task.id] = nil
+        if not ok and task.opts.tag then
+            logger.warn(string.format("[task:%s] #%d(%s) 最终失败: %s",
+                self.name, task.id, tostring(task.tag), tostring(err)))
         end
-        local max_retries = task.opts.max_retries or 0
-        if not ok and task.retries < max_retries then
-            task.retries = task.retries + 1
-            logger.warn(string.format("[task:%s] #%d(%s) 失败, 重试 %d/%d: %s",
-                self.name, task.id, tostring(task.tag), task.retries, max_retries, tostring(err)))
-            task.status = "queued"
-            self.tasks[task.id] = task
-            local delay = tonumber(task.opts.retry_delay) or 0
-            if delay > 0 then
-                -- 带退避的延迟重排: 延迟窗口内任务仍登记在册(hasTasks 为真)但不在队列
-                UIManager:scheduleIn(delay, function()
-                    if self.tasks[task.id] then
-                        table.insert(self.queue, task)
-                        self:_pump()
-                    end
-                end)
-            else
-                table.insert(self.queue, task)
-                self:_pump()
-            end
-        else
-            if not ok and task.opts.tag then
-                logger.warn(string.format("[task:%s] #%d(%s) 最终失败: %s",
-                    self.name, task.id, tostring(task.tag), tostring(err)))
-            end
-            if task.callback then
-                pcall(task.callback, ok, result, err)
-            end
+        if task.callback then
+            pcall(task.callback, ok, result, err)
         end
         self:_pump()
     end, {timeout = task.opts.timeout or 300})
-end
-
-function Channel:pause()
-    self.paused = true
-end
-
-function Channel:resume()
-    self.paused = false
-    self:_pump()
 end
 
 -- 清空待处理队列(已启动的子进程任务不受影响, 由其超时/完成自行收敛)

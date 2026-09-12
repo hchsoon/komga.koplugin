@@ -33,11 +33,6 @@ function KomgaModel:new(book_cache_id)
     return setmetatable({ book_cache_id = book_cache_id }, { __index = KomgaModel })
 end
 
--- 当前模型对应的系列 ID
-function KomgaModel:getBookCacheId()
-    return self.book_cache_id
-end
-
 -- ===== Series(系列) =====
 
 -- 系列信息(series 表 → Komga Series)
@@ -46,24 +41,12 @@ function KomgaModel:getSeries()
     return Backend:getSeriesInfoCache(self.book_cache_id)
 end
 
--- 系列名（常用，快捷便利方法）
-function KomgaModel:getSeriesName()
-    local series = self:getSeries()
-    return series and series.name or nil
-end
-
 -- ===== Volume(分卷) =====
 
 -- 全部分卷列表(volume 表 → Komga Book)，按 number 排序
 -- 返回 volume 数组: number/title/bookId/isRead/isDownLoaded/cacheFilePath/durChapterIndex
 function KomgaModel:getVolumes()
     return Backend:getVolumesCache(self.book_cache_id)
-end
-
--- 分卷总数（= 系列卷数）
-function KomgaModel:getVolumeCount()
-    local volumes = self:getVolumes()
-    return volumes and #volumes or 0
 end
 
 -- 按 Komga Book(卷)的 bookId 反查卷号(volume.number)。
@@ -101,44 +84,6 @@ function KomgaModel:getVolume(number)
         return nil
     end
     return Backend:getVolumeInfoCache(self.book_cache_id, number)
-end
-
--- ===== EpubChapter(书内章节) =====
-
--- 某分卷的 EPUB 内部章节列表(epub_chapter 表 → Komga Chapter)
--- volume 传入 getVolume 返回的分卷(volume 表行)
--- 返回 epub_chapter 数组: number/title/chapterId/cacheFilePath/isRead
-function KomgaModel:getEpubChapters(volume)
-    if not H.is_tbl(volume) then
-        return {}
-    end
-    return Backend:getAllEpubChapters(volume)
-end
-
--- ===== 完整层级树（供展示/理解/调试） =====
-
--- 返回 { series = bookinfo, volumes = { { volume = chapter, epub_chapters = {...} } } }
-function KomgaModel:getHierarchy()
-    local hierarchy = {
-        series = self:getSeries(),
-        volumes = {},
-    }
-    for _, vol in ipairs(self:getVolumes() or {}) do
-        local node = {
-            volume = vol,
-            epub_chapters = {},
-        }
-        -- getVolumes 缺 mediaType，用 getVolume 补全(含 pages/mediaType)，失败则退回列表行
-        local full = self:getVolume(vol.number)
-        if H.is_tbl(full) and H.is_str(full.mediaType) then -- full 非表即短路，避免取 nil 字段
-            node.volume = full
-        end
-        if node.volume.mediaType == "EPUB" then
-            node.epub_chapters = self:getEpubChapters(node.volume)
-        end
-        hierarchy.volumes[#hierarchy.volumes + 1] = node
-    end
-    return hierarchy
 end
 
 return KomgaModel

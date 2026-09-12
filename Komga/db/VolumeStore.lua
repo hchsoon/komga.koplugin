@@ -3,11 +3,8 @@
 BookInfoDB 实例(dbPath/db_conn/execute/transaction 等基础设施在 M)。
 ]]
 
-local SQ3 = require("lua-ljsqlite3/init")
 local logger = require("logger")
 local dbg = require("dbg")
-local Device = require("device")
-local util = require("util")
 local VolumePath = require("Komga/VolumePath")
 local md5 = require("ffi/sha2").md5
 local H = require("Komga/Helper")
@@ -33,7 +30,6 @@ local function mergeCols(...)
     end
     return t
 end
-local VOL_FINDNEXT_COLS = mergeCols(VOL_BASE_COLS, { { "cacheExt" }, DOWNLOADED_COL })
 local VOL_INFO_COLS = mergeCols(VOL_BASE_COLS,
     { { "cacheExt" }, { "bookId" }, { "pages", "number" }, { "mediaType" }, DOWNLOADED_COL })
 local VOL_GETALL_COLS = mergeCols(VOL_BASE_COLS, { DOWNLOADED_COL })
@@ -438,61 +434,6 @@ function Store:findVolumesNotDownloaded(current_volume, count)
     return volumes
 
 end
-function Store:findNextVolumeInfo(current_volume, is_downloaded)
-    if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.number == nil then
-        dbg.log('findNextVolumeInfo:', current_volume)
-        return {}
-    end
-
-    local bookCacheId = current_volume.book_cache_id
-    local current_volume_index = current_volume.number
-    local call_event_type = current_volume.call_event
-    if call_event_type == nil then
-        call_event_type = 'next'
-    end
-
-    local sql_stmt = [[
-        SELECT 
-        c.number, 
-        c.title, 
-        c.isRead, 
-        c.cacheFilePath,
-        b.name,
-        b.author,
-        b.url,
-        b.durChapterIndex,
-        b.durChapterTime,
-        b.booksCount,
-        b.cacheExt
-    FROM volume AS c
-    INNER JOIN series AS b
-        ON c.bookCacheId = b.bookCacheId 
-    WHERE 
-         c.bookCacheId = ? AND b.isEnabled = 1 ]]
-
-    if is_downloaded == false then
-        sql_stmt = sql_stmt .. ' AND c.cacheFilePath IS NULL '
-    elseif is_downloaded == true then
-        sql_stmt = sql_stmt .. ' AND c.cacheFilePath IS NOT NULL '
-    end
-
-    local suffix = "  AND c.number > ?  ORDER BY c.number ASC LIMIT 1;"
-    if call_event_type ~= 'next' then
-
-        suffix = "  AND c.number < ? ORDER BY c.number DESC LIMIT 1;"
-    end
-
-    sql_stmt = sql_stmt .. suffix
-
-    local result = self:queryObjects(sql_stmt, {bookCacheId, current_volume_index}, VOL_FINDNEXT_COLS,
-        { book_cache_id = bookCacheId })
-
-    if not H.is_tbl(result[1]) then
-        return {}
-    end
-
-    return result[1]
-end
 function Store:updateVolumeIsRead(volume, chapter_page ,isRead, is_update_timestamp)
     local bookCacheId = volume.book_cache_id
     local number = volume.number
@@ -535,25 +476,6 @@ function Store:updateVolumeCacheFilePath(volume, cacheFilePath)
     return self:dynamicUpdateVolume(volume, {
         cacheFilePath = cacheFilePath_add
     })
-end
-function Store:isVolumeDownloaded(bookCacheId, number)
-    local sql_stmt = [[
-        SELECT 1 
-        FROM volume
-        WHERE bookCacheId = '%s'
-          AND number = %d AND cacheFilePath IS NOT NULL;
-    ]]
-
-    sql_stmt = string.format(sql_stmt, bookCacheId, number)
-
-    local ok, ret = pcall(function()
-        self:getDB():rowexec(sql_stmt)
-    end)
-    local is_downed = ret == 1
-    if not ok then
-        is_downed = false
-    end
-    return is_downed
 end
 function Store:cleanVolumeDownloading()
     local sql_stmt = [[

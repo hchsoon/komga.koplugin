@@ -3,17 +3,6 @@ local H = require("Komga/Helper")
 local Config = require("Komga/Config")
 local LuaSettings = require("luasettings")
 
---- Common timeout values
--- Large content 块超时 总超时
-local LARGE_BLOCK_TIMEOUT = 10
-local LARGE_TOTAL_TIMEOUT = 30
--- File downloads
-local FILE_BLOCK_TIMEOUT = 15
-local FILE_TOTAL_TIMEOUT = 60
--- Upstream defaults
-local DEFAULT_BLOCK_TIMEOUT = 60
-local DEFAULT_TOTAL_TIMEOUT = -1   
-
 local Paths = require("Komga/Paths")
 local USER_AGENT = Paths.USER_AGENT -- (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
 

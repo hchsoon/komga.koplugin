@@ -192,20 +192,6 @@ T("getVolumeInfo: 14 字段映射", function()
     eq(type(empty), "table")
 end)
 
-T("findNextVolumeInfo: next/prev/已下载过滤", function()
-    local nxt = db:findNextVolumeInfo({book_cache_id = "C1", number = 1, call_event = "next"})
-    eq(nxt.number, 2)
-    eq(nxt.title, "第2卷")
-    eq(nxt.book_cache_id, "C1")
-    eq(nxt.isDownLoaded, false)
-    local nxt_dl = db:findNextVolumeInfo({book_cache_id = "C1", number = 1, call_event = "next"}, true)
-    eq(nxt_dl.number, 3)
-    local prev = db:findNextVolumeInfo({book_cache_id = "C1", number = 2, call_event = "prev"})
-    eq(prev.number, 1)
-    local none = db:findNextVolumeInfo({book_cache_id = "C1", number = 3, call_event = "next"})
-    eq(next(none), nil)
-end)
-
 -- EpubChapterStore
 local EpubChapterStore_ok, EpubChapterStore = pcall(require, "Komga/db/EpubChapterStore")
 if not EpubChapterStore_ok then

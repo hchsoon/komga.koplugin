@@ -1,2 +1,4 @@
 crash.log
 .DS_Store
+.crash.log.swp
+*.swp
