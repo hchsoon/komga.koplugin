@@ -46,8 +46,8 @@ function Store:upsertSeries(bookShelfId, komga_data, server_address,isUpdate)
         -- Komga Series: 书名在 metadata.title, 作者在 booksMetadata.authors(拼接)
         series.name = series.metadata.title
         local authorname = ""
-        for index, author in ipairs(series.booksMetadata.authors) do
-            if index == 1 then
+        for ai, author in ipairs(series.booksMetadata.authors) do
+            if ai == 1 then
                 authorname = author.name
             else
                 authorname = author.name .. "/" .. authorname
@@ -303,7 +303,7 @@ function Store:getReadAheadVolumeCount(current_volume)
         call_event_type = 'next'
     end
 
-    local sql_stmt = ''
+    local sql_stmt
     if call_event_type == 'next' then
         sql_stmt = [[
 SELECT COUNT(*) AS continuous_count
@@ -459,7 +459,7 @@ function Store:touchVolumeLastRead(bookCacheId, number)
     })
 end
 function Store:updateVolumeDownloadState(volume, is_downloaded)
-    local content = ''
+    local content
     if is_downloaded == true then
         content = 'downloaded'
     elseif is_downloaded == nil or is_downloaded == false then
@@ -474,7 +474,7 @@ function Store:updateVolumeDownloadState(volume, is_downloaded)
 end
 function Store:updateVolumeCacheFilePath(volume, cacheFilePath)
 
-    local cacheFilePath_add = ''
+    local cacheFilePath_add
     if type(cacheFilePath) == 'string' then
         cacheFilePath_add = cacheFilePath
     else

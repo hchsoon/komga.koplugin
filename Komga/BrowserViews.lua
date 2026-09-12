@@ -708,8 +708,8 @@ local function init_book_browser(parent)
             and H.is_num(bookinfo.booksCount) and bookinfo.booksCount > 0) then
             return
         end
-        local parent = self.parent
-        local home_dir = parent and parent.getBrowserHomeDir and parent:getBrowserHomeDir(true)
+        local lv = self.parent
+        local home_dir = lv and lv.getBrowserHomeDir and lv:getBrowserHomeDir(true)
         if not H.is_str(home_dir) then
             return
         end

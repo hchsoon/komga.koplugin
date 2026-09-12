@@ -731,7 +731,6 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             if display then
                 adopt_image(display, is_bb)
                 self.chapter_imglist_cur = new_image_num
-                is_success = true
             else
                 -- 获取失败: 不把 nil 交给尾部渲染(空画面崩溃), 提示后保留返回
                 Backend:show_notice("页面加载失败，请重试")

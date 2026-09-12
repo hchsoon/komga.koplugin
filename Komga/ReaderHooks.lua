@@ -38,7 +38,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
     local Event = require("ui/event")
     local UIManager = require("ui/uimanager")
     local ChapterListing = require("Komga/ChapterListing")
-    local Backend = require("Komga/Backend")
     local H = require("Komga/Helper")
 
     local library_view_ref = self
@@ -440,10 +439,10 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if not H.is_str(file) then
             return
         end
-        local function open_regular_file(file)
+        local function open_regular_file(path)
             local ReaderUI = require("apps/reader/readerui")
             UIManager:broadcastEvent(Event:new("SetupShowReader"))
-            ReaderUI:showReader(file, nil, true)
+            ReaderUI:showReader(path, nil, true)
         end
 
         local function getCustomMetaData(filepath)

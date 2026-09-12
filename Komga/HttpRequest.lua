@@ -214,16 +214,16 @@ local function pStreamToFile(options)
     local socketutil = require("socketutil")
     local socket_url = require("socket.url")
 
-    local url = options.url
-    local http, http_err = pick_http(url)
+    local init_url = options.url
+    local http, http_err = pick_http(init_url)
     if not http then
         return false, http_err
     end
     local dest = options.dest
-    if type(url) ~= "string" or type(dest) ~= "string" or dest == "" then
+    if type(init_url) ~= "string" or type(dest) ~= "string" or dest == "" then
         return false, "bad params"
     end
-    local parsed = socket_url.parse(url)
+    local parsed = socket_url.parse(init_url)
     if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
         return false, "Unsupported protocol"
     end
@@ -372,7 +372,7 @@ local function pStreamToFile(options)
         return false, describe_http_error(code)
     end
 
-    local ok, res = attempt(false, url, 0)
+    local ok, res = attempt(false, init_url, 0)
     if ok then
         -- 契约: 成功必返回结果表。若底层异常路径只返回了裸真值,
         -- 按已落位的 .dl 文件大小补全结果, 并留 warn 供定位
@@ -391,7 +391,7 @@ local function pStreamToFile(options)
     if res == "restart" then
         -- 本地有半段但服务器不支持 Range: 清空重下
         os.remove(tmp)
-        return attempt(true, url, 0)
+        return attempt(true, init_url, 0)
     end
     -- 失败原因统一为字符串
     if type(res) ~= "string" then

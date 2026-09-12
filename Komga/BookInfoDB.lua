@@ -532,7 +532,6 @@ function M:execute(sql, params, options)
         else
 
             local result = {}
-            local row = {}
 
             local i = 1
             for row in stmt:rows() do

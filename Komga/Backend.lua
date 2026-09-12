@@ -694,7 +694,7 @@ function M:after_reader_chapter_show(volume)
         local _, extension = util.splitFileNameSuffix(cache_name)
 
         if extension and volume.cacheExt ~= extension then
-            local status, err = pcall(function()
+            local ext_ok, ext_err = pcall(function()
 
                 local bookShelfId = self:getServerPathCode()
                 self.dbManager:transaction(function()
@@ -707,8 +707,8 @@ function M:after_reader_chapter_show(volume)
                 end)()
             end)
 
-            if not status then
-                dbg.log('updating cache ext err:', tostring(err))
+            if not ext_ok then
+                dbg.log('updating cache ext err:', tostring(ext_err))
             end
         end
     end

@@ -306,7 +306,7 @@ function M:preLoadVolumes(volume, download_volume_count)
         download_volume_count = 1
     end
 
-    local volume_down_tasks = {}
+    local volume_down_tasks
 
     if volume[1] and volume[1].number ~= nil and volume[1].book_cache_id ~= nil and volume[1].bookId ~= nil then
 
@@ -372,19 +372,19 @@ function M:preLoadVolumes(volume, download_volume_count)
             end)
 
         local task_return_db_clear = self.dbManager:transaction(
-            function(volume_down_tasks, task_return_ok_list)
+            function(volumes, ok_list)
 
-                for i = 1, #volume_down_tasks do
-                    local nextVolume = volume_down_tasks[i]
+                for i = 1, #volumes do
+                    local nextVolume = volumes[i]
                     if H.is_tbl(nextVolume) and nextVolume.number ~= nil and nextVolume.book_cache_id ~= nil and nextVolume.bookId ~= nil then
 
                         local number = tonumber(nextVolume.number)
                         local book_cache_id = nextVolume.book_cache_id
                         local volume_book_id = nextVolume.bookId
 
-                        if task_return_ok_list['ok_' .. number] == nil then
+                        if ok_list['ok_' .. number] == nil then
 
-                            local status, err = pcall(function()
+                            local ok, cerr = pcall(function()
                                 self.dbManager:updateVolumeDownloadState({
                                     number = number,
                                     book_cache_id = book_cache_id,
@@ -392,8 +392,8 @@ function M:preLoadVolumes(volume, download_volume_count)
                                 }, false)
                             end)
 
-                            if not status then
-                                dbg.log("Error cleaning download task for database write:", H.errorHandler(err))
+                            if not ok then
+                                dbg.log("Error cleaning download task for database write:", H.errorHandler(cerr))
                             end
                         end
                     end
@@ -415,19 +415,19 @@ function M:preLoadVolumes(volume, download_volume_count)
                 nextVolume.is_pre_loading = true
                 dbg.v('Threaded tasks running:runInSubProcess_start_title:', nextVolume.title)
 
-                local status, err = pcall(function()
-                    -- print("Download 2.", nextVolume.book_cache_id, " ", nextVolume.bookId)
+                -- 注意: pcall 第二返回值在这里是下载结果(cacheFilePath 所在), 不是错误信息
+                local ok, dl = pcall(function()
                     -- 与 downloadVolume 同策略: 漫画卷(非 EPUB)必须走整卷下载
                     return self:downloadVolumeAuto(nextVolume)
                 end)
 
-                if not status then
-                    logger.err("Chapter download failed: ", tostring(err))
+                if not ok then
+                    logger.err("Chapter download failed: ", tostring(dl))
                 else
 
-                    if H.is_tbl(err) and err.cacheFilePath then
+                    if H.is_tbl(dl) and dl.cacheFilePath then
 
-                        local cache_file_path = err.cacheFilePath
+                        local cache_file_path = dl.cacheFilePath
                         local number = tonumber(nextVolume.number)
                         local book_cache_id = nextVolume.book_cache_id
 
@@ -435,11 +435,11 @@ function M:preLoadVolumes(volume, download_volume_count)
 
                         dbg.v('Download volume successfully:', book_cache_id, number, cache_file_path)
 
-                        status, err = pcall(function()
+                        local db_ok, dberr = pcall(function()
                             return task_return_db_add(book_cache_id, number, cache_file_path)
                         end)
-                        if not status then
-                            logger.err('Error saving download to database:', tostring(err))
+                        if not db_ok then
+                            logger.err('Error saving download to database:', tostring(dberr))
                         end
                     end
 
@@ -457,19 +457,16 @@ function M:preLoadVolumes(volume, download_volume_count)
         end
 
         dbg.v("Clean up unfinished downloads")
-        local status, err = pcall(function()
+        local cleanup_ok, cleanup_err = pcall(function()
             return task_return_db_clear(volume_down_tasks, task_return_ok_list)
         end)
-        if not status and err then
-            dbg.v("Incomplete volume cleanup after load", tostring(err))
+        if not cleanup_ok and cleanup_err then
+            dbg.v("Incomplete volume cleanup after load", tostring(cleanup_err))
         end
 
         self:closeDbManager()
 
-        volume_down_tasks = nil
-        task_return_ok_list = nil
-
-        status, err = pcall(function()
+        pcall(function()
             util.removeFile(self.task_pid_file)
             ffiUtil.usleep(50)
             util.removeFile(self.task_pid_file)

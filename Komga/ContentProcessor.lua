@@ -140,8 +140,8 @@ function M.utf8_trim(str)
     local whitespace = WHITESPACE_CP
 
     -- 字节级 UTF-8 遍历: 首字节定长, 逐字符取码点
-    local function each_char(str, from)
-        local b = string.byte(str, from)
+    local function each_char(s, from)
+        local b = string.byte(s, from)
         if not b then
             return nil
         end
@@ -151,7 +151,7 @@ function M.utf8_trim(str)
         elseif b >= 0xE0 then len = 3
         elseif b >= 0xC0 then len = 2
         else len = 1 end -- 孤立续字节按单字节容错
-        local char = str:sub(from, from + len - 1)
+        local char = s:sub(from, from + len - 1)
         return from, ffiUtil.utf8charcode(char), char, from + len
     end
 
@@ -909,7 +909,6 @@ function M.process_volume_content(ctx, volume, content)
             end
             first_line = paragraphs[1] or ""
             content = table.concat(paragraphs, "\n")
-            paragraphs = nil
 
             if not string.find(first_line, chapter_title, 1, true) then
                 content = table.concat({"\t\t", tostring(chapter_title), "\n\n", content})
