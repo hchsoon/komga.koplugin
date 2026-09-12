@@ -14,11 +14,11 @@ local UIManager = require("ui/uimanager")
 local Device = require("device")
 local TaskQueue = require("Komga/TaskQueue")
 local KLog = require("Komga/Logger")
-local Paths = require("Komga/Paths")
 local CacheJanitor = require("Komga/CacheJanitor")
 local ContentProcessor = require("Komga/ContentProcessor")
 local get_img_src = ContentProcessor.get_img_src
 local custom_urlEncode = ContentProcessor.custom_urlEncode
+local HttpRequest = require("Komga/HttpRequest")
 local H = require("Komga/Helper")
 
 return function(M)
@@ -67,17 +67,12 @@ function M:pDownloadVolume(volume)
             url = epubchapter.url
         end
     end
-    
     if url ~= nil then
-        -- print("Downloading Url is ...",url)
         local status, err = pGetUrlContent({
                             url = url,
                             timeout = 120,
                             maxtime = 120,
-                            headers = {
-                                ["user-agent"] = Paths.USER_AGENT,
-                                ["X-API-Key"] = self:getApiKey()
-                            }
+                            headers = HttpRequest.get_default_headers(self:getApiKey())
                     })
 
         if status and err and err['data'] then
@@ -207,17 +202,10 @@ function M:getProxyEpubUrl(url, htmlUrl)
     end
 end
 
-function M:getProxyImageUrl(url, img_src)
-    local res_img_src = img_src
-    local width = Device.screen:getWidth() or 800
-    local server_address = self.settings_data.data.server_address
-    
-    local api_root_url = server_address
+function M:getProxyImageUrl(_, img_src)
     -- <img src='__API_ROOT__/book-assets/guest/剑来_/剑来.cbz/index/1.png' />
-    res_img_src = custom_urlEncode(img_src):gsub("^__API_ROOT__", "")
-    res_img_src = socket_url.absolute(api_root_url, res_img_src)
-
-    return res_img_src
+    local res_img_src = custom_urlEncode(img_src):gsub("^__API_ROOT__", "")
+    return socket_url.absolute(self.settings_data.data.server_address, res_img_src)
 end
 
 function M:getPorxyPicUrls(url, content)
@@ -239,10 +227,7 @@ function M:pDownload_Image(img_src, timeout)
                     url = img_src,
                     timeout = timeout or 15,
                     maxtime = 60,
-                    headers = {
-                        ["user-agent"] = Paths.USER_AGENT,
-                        ["X-API-Key"] = self:getApiKey()
-                    }
+                    headers = HttpRequest.get_default_headers(self:getApiKey())
                 })
     if status and H.is_tbl(err) and err['data'] then
         return wrap_response(err)
@@ -738,10 +723,7 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
                         url = img_src,
                         timeout = 120,
                         maxtime = 120,
-                        headers = {
-                            ["user-agent"] = Paths.USER_AGENT,
-                            ["X-API-Key"] = self:getApiKey()
-                        }
+                        headers = HttpRequest.get_default_headers(self:getApiKey())
                 })
     if status and err and err['data'] then
         local cover_img_data = err['data']
@@ -891,16 +873,10 @@ function M:downloadVolumeWholeFile(volume)
         H.checkAndCreateFolder(dir)
     end
     local url = (self.settings_data.data.server_address or "") .. "/api/v1/books/" .. bookId .. "/file"
-    if not self.httpReq then
-        self.httpReq = require("Komga.HttpRequest")
-    end
-    local ok, res = self.httpReq.pStreamToFile({
+    local ok, res = HttpRequest.pStreamToFile({
         url = url,
         dest = dest,
-        headers = {
-            ["X-API-Key"] = self:getApiKey(),
-            ["user-agent"] = Paths.USER_AGENT,
-        },
+        headers = HttpRequest.get_default_headers(self:getApiKey()),
         timeout = 30,
         maxtime = 600,
     })

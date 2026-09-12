@@ -23,48 +23,28 @@ end
 
 -- 分卷目录初始化用: 一次拉取全部分卷的 BookDto(BookDto 自带该用户的 readProgress)。
 -- 与 refreshVolumesCache 同端点同条件(POST /api/v1/books/list, seriesId is), 但不做任何 DB 写入;
--- 分页参数只认 query string(size=1000 逐页拉齐, 汇总为单一 content 数组, komgaApi 缺省回调时自动摘取)。
+-- 分页拉齐为单一 content 数组(komgaApi 缺省回调时自动摘取)。
 function M:getSeriesVolumesReadProgress(series_id)
     if not H.is_str(series_id) then
         return wrap_response(nil, '参数错误')
     end
 
     return self:komgaApi(function()
-        local all_content, total_pages, page = {}, 1, 0
-        local first
-        while page < total_pages do
-            local r = self.api:post("/api/v1/books/list",
-                {size = 1000, page = page}, {
-                    condition = {
-                        allOf = {
-                            {
-                                seriesId = {
-                                    operator = "is",
-                                    value = series_id
-                                }
+        return self:fetchAllPages("/api/v1/books/list",
+            function(page)
+                return {size = 1000, page = page}
+            end, {
+                condition = {
+                    allOf = {
+                        {
+                            seriesId = {
+                                operator = "is",
+                                value = series_id
                             }
                         }
                     }
-                }, {timeouts = {5, 8}})
-            if not H.is_tbl(r) then
-                return r
-            end
-            if not first then
-                first = r
-            end
-            local content = r.body and r.body.content
-            if H.is_tbl(content) then
-                for _, item in ipairs(content) do
-                    all_content[#all_content + 1] = item
-                end
-            end
-            total_pages = tonumber(r.body and r.body.totalPages) or 1
-            page = page + 1
-        end
-        if first then
-            first.body.content = all_content
-        end
-        return first
+                }
+            }, {5, 8})
     end, nil, 'getSeriesVolumesReadProgress')
 
 end

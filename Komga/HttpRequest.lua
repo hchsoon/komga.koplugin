@@ -19,11 +19,16 @@ local function get_api_key()
     return Config.DEFAULT_API_KEY
 end
 
--- 默认请求头: 调用方未显式传 headers 时使用, X-API-Key 取当前配置
-local function get_default_headers()
+-- 默认请求头: 调用方未显式传 headers 时使用。
+-- api_key 可显式传入(如 Backend:getApiKey(), 走内存配置, 多服务器切换即时生效);
+-- 缺省时直接读设置文件(避免模块环)。
+local function get_default_headers(api_key)
+    if type(api_key) ~= "string" or api_key == "" then
+        api_key = get_api_key()
+    end
     return {
         ["user-agent"] = USER_AGENT,
-        ["X-API-Key"] = get_api_key()
+        ["X-API-Key"] = api_key
     }
 end
 
