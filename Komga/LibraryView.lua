@@ -580,8 +580,8 @@ function LibraryView:openVolumeShortcut(book_cache_id, number, lnk_path)
         self.volume_reading_index = number
         self.volume_pages = volume.pages
         self.volume_bookId = volume.bookId
-        -- 自动续读: 服务器进度更新时跳到服务器位置(章节级近似); 离线或设置关闭时不查
-        if NetworkMgr:isConnected() and Backend:getSettings().auto_resume_volume ~= false then
+        -- 自动续读: 服务器进度更新时跳到服务器位置(章节级近似); 离线时不查
+        if NetworkMgr:isConnected() then
             return self:resumeAndOpenVolume(volume)
         end
     else
@@ -592,7 +592,7 @@ function LibraryView:openVolumeShortcut(book_cache_id, number, lnk_path)
         self.volume_pages = volume.pages
         self.volume_bookId = volume.bookId
         local is_stream = Backend:getSettings().stream_image_view == true
-        if NetworkMgr:isConnected() and Backend:getSettings().auto_resume_volume ~= false then
+        if NetworkMgr:isConnected() then
             if is_stream then
                 self:persistComicServerProgress(volume)
             else
@@ -778,7 +778,6 @@ function LibraryView:openVolumeBrowserMenu(file, customedata)
             UIManager:close(dialog)
             Backend:HandleResponse(Backend:toggleVolumeRead({
                 number = number,
-                chapter_page = 0,
                 isRead = is_read,
                 book_cache_id = book_cache_id
             }), function(data)

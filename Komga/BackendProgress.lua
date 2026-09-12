@@ -81,11 +81,13 @@ function M:saveVolumeProgress(volume)
 
     local number = volume.number
     local finish = (volume.current_page == volume.pages)
-    -- print(finish)
     if finish then
-        volume.isRead = finish
-        -- print("Mark volume read...", volume.number)
-        self:toggleVolumeRead(volume)
+        -- 读完直接标已读。旧实现先 volume.isRead = finish 再经 toggleVolumeRead
+        -- 翻转, 会把刚置的 true 翻回 false 写库(服务器 completed 会在下次同步纠偏)
+        self.dbManager:updateVolumeIsRead(volume, true)
+    else
+        -- 打点"最后阅读卷"(目录 pin/继续阅读按 volume.lastUpdated 排序)
+        self.dbManager:touchVolumeLastRead(volume.book_cache_id, number)
     end
     return self:komgaApi(function()
         -- PATCH /api/v1/books/:id/read-progress(漫画分卷页码进度)
@@ -107,7 +109,6 @@ function M:getBookProgression(bookId)
         -- GET /api/v1/books/:id/progression(R2Progression)
         return self.api:get("/api/v1/books/" .. bookId .. "/progression", nil, {timeouts = {3, 5}})
     end, nil, 'getBookProgression')
-    local loc = r and r.body and r.body.locator
     return r
 end
 
@@ -119,9 +120,12 @@ function M:saveBookProgression(upload)
         and H.is_str(upload.name) and H.is_str(upload.url)) then
         return wrap_response(nil, '参数错误')
     end
-    -- 读完(整卷比例 >= 99.9%): 本地标记已读, 服务器读满(totalProgression=1)会自动标 completed
+    -- 读完(整卷比例 >= 99.9%): 本地标记已读, 服务器读满(totalProgression=1)会自动标 completed;
+    -- 未读完也要打点"最后阅读卷"(目录 pin/继续阅读按 volume.lastUpdated 排序)
     if H.is_num(upload.frac) and upload.frac >= 0.999 then
-        self.dbManager:updateVolumeIsRead(upload, upload.current_page, true)
+        self.dbManager:updateVolumeIsRead(upload, true)
+    else
+        self.dbManager:touchVolumeLastRead(upload.book_cache_id, upload.number)
     end
     -- modified 必须严格递增, 否则服务器 409 Conflict; 同秒内多次上传时间戳加 1 秒
     local ts = os.time()

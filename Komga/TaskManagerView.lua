@@ -43,6 +43,7 @@ local function buildItems()
     for _, t in ipairs(tasks) do
         local channel, id = t.channel, t.id
         items[#items + 1] = {
+            task_id = id,
             text = string.format("[%s] #%d %s — %s",
                 tostring(channel), t.id, tostring(t.tag or "未命名"),
                 STATUS_TEXT[t.status] or tostring(t.status)),

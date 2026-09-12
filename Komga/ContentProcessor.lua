@@ -202,7 +202,6 @@ function M.splitParagraphsPreserveBlank(text)
     local indentChinese = "\u{0020}\u{0020}\u{3000}"
     local indentEnglish = "\u{0020}\u{0020}"
     local paragraphs = {}
-    local allow_split = true
     local buffer = ""
     local prefix = nil
     local lines = {}
@@ -244,37 +243,22 @@ function M.splitParagraphsPreserveBlank(text)
         else
             if not prefix then
                 prefix = util.hasCJKChar(line:sub(1, 9)) and indentChinese or indentEnglish
-                -- logger.dbg('isChinese:', prefix == indentChinese)
             end
 
             local line_len = #line
             local word_end = line:match(util.UTF8_CHAR_PATTERN .. "$")
-            local next_word_start = (lines[i + 1] or ""):match(util.UTF8_CHAR_PATTERN)
             local word_end_isPunctuation = isPunctuation(word_end)
 
-            -- 中文段末没有标点不允许换行, 避免触发koreader的章节标题渲染规则
-            if prefix == indentChinese and (not word_end_isPunctuation or line_len < 7) then
-                allow_split = false
-            else
-                allow_split = util.isSplittable and util.isSplittable(word_end, next_word_start, word_end) or true
-            end
-
-            -- logger.dbg(i,line_len,word_end,next_word_start, word_end_isPunctuation, allow_split)
-
-            if not allow_split and i < #lines then
-
-                if prefix == indentEnglish and not word_end_isPunctuation and not isPunctuation(next_word_start) then
-                    -- 非CJK两个单词间补充个空格
-                    line = line .. "\u{0020}"
-                end
+            -- 中文段末没有标点(或行过短)不允许换行, 避免触发koreader的章节标题渲染规则,
+            -- 折入 buffer 与下一行合并; 英文段落按行切分。
+            -- (曾经的"英文不可拆行时词间补空格"分支被 `or true` 短路, 从未生效, 已删除)
+            if prefix == indentChinese and (not word_end_isPunctuation or line_len < 7) and i < #lines then
                 buffer = table.concat({buffer, line})
             else
                 table.insert(paragraphs, prefix .. line)
             end
         end
     end
-
-    lines = nil
 
     return paragraphs
 end

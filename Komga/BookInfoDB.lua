@@ -121,10 +121,7 @@ CREATE TABLE IF NOT EXISTS epub_chapter (
 );
 
 CREATE INDEX IF NOT EXISTS idx_series_main ON series (bookShelfId, bookCacheId, isEnabled);
-CREATE INDEX IF NOT EXISTS idx_series_bookcacheid ON series (bookCacheId);
 CREATE INDEX IF NOT EXISTS idx_series_bookCacheId_isenabled ON series (bookCacheId, isEnabled);
-CREATE INDEX IF NOT EXISTS idx_volume_basic ON volume (bookCacheId, number);
-CREATE INDEX IF NOT EXISTS idx_volume_book_cacheid_number ON volume (bookCacheId, number);
 CREATE INDEX IF NOT EXISTS idx_series_sortorder_lastread ON series ( sortOrder );
 CREATE INDEX IF NOT EXISTS idx_volume_number ON volume (number);
 CREATE INDEX IF NOT EXISTS idx_volume_cachefilepath ON volume (cacheFilePath);
@@ -132,12 +129,14 @@ CREATE INDEX IF NOT EXISTS idx_volume_content_cache ON volume(content, cacheFile
 CREATE INDEX IF NOT EXISTS idx_lastread_volume ON volume (lastUpdated);
 
 CREATE INDEX IF NOT EXISTS idx_epub_chapter_book_cacheid_number ON epub_chapter (bookCacheId, number);
-CREATE INDEX IF NOT EXISTS idx_epub_chapter_number ON epub_chapter (number);
-CREATE INDEX IF NOT EXISTS idx_epub_chapter_cachefilepath ON epub_chapter (cacheFilePath);
-CREATE INDEX IF NOT EXISTS idx_epub_chapter_content_cache ON epub_chapter(content, cacheFilePath);
-CREATE INDEX IF NOT EXISTS idx_lastread_epub_chapter ON epub_chapter (lastUpdated);
 
 ]]
+
+-- 索引只保留有查询支撑的(裁掉: 与 UNIQUE(bookCacheId, number) 自动索引重复的
+-- idx_volume_basic/idx_volume_book_cacheid_number, (bookCacheId) 前缀冗余的
+-- idx_series_bookcacheid, 以及 epub_chapter 上 cacheFilePath/content/lastUpdated
+-- 这些从不写入的列的全部索引; volume.lastUpdated 例外 — getLastReadVolumeIndex
+-- 按它排序, idx_lastread_volume 保留。注释不可写进上方 SQL 串: ljsqlite3 按 ';' 切分)。
 
 function M:new(o)
     o = o or {}

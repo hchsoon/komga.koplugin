@@ -223,7 +223,6 @@ function ChapterListing:onMenuHold(item)
             UIManager:close(dialog)
             Backend:HandleResponse(Backend:toggleVolumeRead({
                 number = item.number,
-                chapter_page = 0,
                 isRead = chapter.isRead,
                 book_cache_id = chapter.book_cache_id
             }), function(data)
@@ -525,11 +524,10 @@ function ChapterListing:syncProgressShow(chapter)
 
                 if H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex) then
 
-                    Backend:toggleVolumeRead({
+                    -- 直接置已读: 旧实现经 toggleVolumeRead 会把 isRead=true 翻回 false 写库
+                    Backend:markVolumeRead({
                         book_cache_id = bookCacheId,
-                        number = bookinfo.durChapterIndex,
-                        chapter_page = 0,
-                        isRead = true
+                        number = bookinfo.durChapterIndex
                     }, true)
                     self:refreshItems(true)
                     Backend:show_notice('同步完成')

@@ -46,12 +46,6 @@ function Komga:onDispatcherRegisterActions()
         title = _("返回 Komga 目录"),
         reader = true
     })
-    Dispatcher:registerAction("show_komga_search", {
-        category = "none",
-        event = "ShowKomgaSearch",
-        title = _("以书籍信息搜索 Komga 漫画源"),
-        reader = true
-    })
 end
 
 function Komga:isFileTypeSupported(file)

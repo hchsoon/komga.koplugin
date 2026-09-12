@@ -227,6 +227,21 @@ T("getEpubChapterInfo: 单章映射", function()
     eq(c.chapterId, "B1")
 end)
 
+-- lastUpdated 打点(回归: 修复前 lastUpdated 从不写入, "最后阅读卷"排序失效)
+T("updateVolumeIsRead/touchVolumeLastRead: lastUpdated 打点 + getLastReadVolumeIndex", function()
+    -- 种子数据里 C1 的 lastUpdated 全是 1700000xxx; 此前标已读后应领先
+    db:updateVolumeIsRead({book_cache_id = "C1", number = 3, isRead = false}, true)
+    local idx = db:getLastReadVolumeIndex("C1")
+    eq(idx, 3, "标已读后最后阅读卷应为卷3")
+    -- 未读完的进度上传打点: 覆盖到卷2
+    db:touchVolumeLastRead("C1", 2)
+    eq(db:getLastReadVolumeIndex("C1"), 2, "touch 后最后阅读卷应为卷2")
+    -- 非法参数静默返回, 不抛错
+    eq(db:touchVolumeLastRead(nil, 2), nil)
+    eq(db:updateVolumeIsRead({book_cache_id = "C1"}, true), nil)
+    eq(db:getLastReadVolumeIndex("C1"), 2, "非法参数不应改变最后阅读卷")
+end)
+
 os.remove(db_path)
 if failed > 0 then
     print(("\n失败 %d 处 (%d 断言)"):format(failed, checks))

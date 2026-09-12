@@ -163,22 +163,18 @@ function M:findVolumesNotDownloaded(current_volume, count)
     return next_volumes
 end
 
-function M:findNextVolume(current_volume, is_downloaded)
+function M:findNextVolume(current_volume)
 
     if not H.is_tbl(current_volume) or current_volume.book_cache_id == nil or current_volume.number == nil then
         dbg.log("findNextVolume: bad params", current_volume)
         return
     end
 
-    local book_cache_id = current_volume.book_cache_id
-    local bookId = current_volume.bookId
-    local current_volume_index = current_volume.number
-
     if current_volume.call_event == nil then
         current_volume.call_event = 'next'
     end
 
-    local next_volume = self.dbManager:findNextEpubChapterInfo(current_volume, is_downloaded)
+    local next_volume = self.dbManager:findNextEpubChapterInfo(current_volume)
 
     if not H.is_tbl(next_volume) or next_volume.number == nil then
         dbg.log('not found', current_volume.number)
@@ -585,10 +581,15 @@ function M:preLoadEpubChapters(volume, count)
 end
 
 
-function M:toggleVolumeRead(volume, volume_page, is_update_timestamp)
-    local number = volume.number
+function M:toggleVolumeRead(volume)
     volume.isRead = not volume.isRead
-    self.dbManager:updateVolumeIsRead(volume, volume_page ,volume.isRead, is_update_timestamp)
+    self.dbManager:updateVolumeIsRead(volume, volume.isRead)
+    return wrap_response(true)
+end
+
+-- 直接置已读状态(不经 toggle 翻转): 进度同步完成等"确定目标状态"的场景用
+function M:markVolumeRead(volume, isRead)
+    self.dbManager:updateVolumeIsRead(volume, isRead)
     return wrap_response(true)
 end
 

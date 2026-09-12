@@ -156,12 +156,11 @@ WHERE
 
     return result[1]
 end
-function Store:findNextEpubChapterInfo(current_chapter, is_downloaded)
+function Store:findNextEpubChapterInfo(current_chapter)
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.number == nil then
         dbg.log('findNextEpubChapterInfo:', current_chapter)
         return {}
     end
-    -- print("Next Epub Chapter Info book is ...", current_chapter.bookId)
     local bookCacheId = current_chapter.book_cache_id
     local bookId = current_chapter.bookId
     local current_number = current_chapter.number
@@ -189,12 +188,8 @@ function Store:findNextEpubChapterInfo(current_chapter, is_downloaded)
     WHERE 
         c.bookCacheId = ? AND c.chapterId = ? AND b.isEnabled = 1 ]]
 
-    if is_downloaded == false then
-        sql_stmt = sql_stmt .. ' AND c.cacheFilePath IS NULL '
-    elseif is_downloaded == true then
-        sql_stmt = sql_stmt .. ' AND c.cacheFilePath IS NOT NULL '
-    end
-
+    -- 注: 不提供"已下载过滤"分支 — epub_chapter.cacheFilePath 从不写入,
+    -- IS NOT NULL 恒假; 调用方也从未传过该参数。
     local suffix = "  AND c.number > ?  ORDER BY c.number ASC LIMIT 1;"
     if call_event_type ~= 'next' then
 

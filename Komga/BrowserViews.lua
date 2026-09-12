@@ -822,7 +822,6 @@ local function init_book_menu(parent)
         close_callback = function()
             Backend:closeDbManager()
         end,
-        show_search_item = nil,
         parent_ref = parent
     }
 
@@ -919,7 +918,6 @@ local function init_book_menu(parent)
                 if state == true then
                     Backend:HandleResponse(response, function(data)
                         MessageBox:notice('同步成功')
-                        self.show_search_item = true
                         self:refreshItems()
                         self.parent_ref.ui_refresh_time = os.time()
                     end, function(err_msg)
@@ -1031,13 +1029,6 @@ local function init_book_menu(parent)
                 }
                 break
             end
-        end
-        if self.show_search_item == true then
-            item_table[1] = {
-                text = string.format('%s Search...', Icons.FA_MAGNIFYING_GLASS),
-                mandatory = "[Go]"
-            }
-            self.show_search_item = nil
         end
 
         for _, bookinfo in ipairs(books) do

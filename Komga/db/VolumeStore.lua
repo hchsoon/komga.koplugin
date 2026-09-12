@@ -434,21 +434,29 @@ function Store:findVolumesNotDownloaded(current_volume, count)
     return volumes
 
 end
-function Store:updateVolumeIsRead(volume, chapter_page ,isRead, is_update_timestamp)
+function Store:updateVolumeIsRead(volume, isRead)
     local bookCacheId = volume.book_cache_id
     local number = volume.number
     if not H.is_str(bookCacheId) or not H.is_num(number) then
         return
     end
     volume.isRead = isRead
-    local update_state = {}
-    update_state.isRead = isRead
-    if is_update_timestamp == true then
-        update_state.lastUpdated = {
-            _set = "= strftime('%s', 'now')"
-        }
+    -- lastUpdated 必须在此打点: getLastReadVolumeIndex(目录 pin/继续阅读)按它排序,
+    -- 恒 0 时 ORDER BY 取行是任意的, "最后阅读卷"实际失效
+    return self:dynamicUpdateVolume(volume, {
+        isRead = isRead,
+        lastUpdated = { _set = "= strftime('%s', 'now')" },
+    })
+end
+
+-- 进度上传(未读完)同样打点"最后阅读卷", 否则只有标已读才会更新 lastUpdated
+function Store:touchVolumeLastRead(bookCacheId, number)
+    if not H.is_str(bookCacheId) or not H.is_num(number) then
+        return
     end
-    return self:dynamicUpdateVolume(volume, update_state)
+    return self:dynamicUpdateVolume({ book_cache_id = bookCacheId, number = number }, {
+        lastUpdated = { _set = "= strftime('%s', 'now')" },
+    })
 end
 function Store:updateVolumeDownloadState(volume, is_downloaded)
     local content = ''
