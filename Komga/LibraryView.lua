@@ -525,12 +525,22 @@ function LibraryView:resumeAndOpenVolume(volume, server_data)
             end
         end
     else
-        -- 漫画: 卷级缓存文件比例即整卷进度(单文件整卷, 与 EPUB 不同)
+        -- 漫画: 本地断点 = 缓存整卷文件的 last_page(单文件整卷;
+        -- calcVolumeLocalRead 只认 EPUB 内部章节, 对漫画恒返回 0)
         if not (H.is_num(pages) and pages > 0) then
             self:loadAndRenderChapter(volume)
             return
         end
-        local local_global = self:calcVolumeGlobalPage(volume.book_cache_id, volume, pages)
+        local local_global = 0
+        local cache_chapter = Backend:getCacheVolumeFilePath(volume)
+        if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)
+            and util.fileExists(cache_chapter.cacheFilePath) then
+            local last_page = tonumber(DocSettings:open(cache_chapter.cacheFilePath)
+                :readSetting("last_page"))
+            if H.is_num(last_page) then
+                local_global = last_page
+            end
+        end
         local local_frac = math.min(math.max(local_global / pages, 0), 1)
         local target_frac
         if server_completed == true then
@@ -1023,14 +1033,25 @@ function LibraryView:showReaderUI(chapter)
     local goto_resume_target = function()
         local target = self.resume_goto_frac
         self.resume_goto_frac = nil
-        if H.is_num(target) and target > 0 then
-            local ui = ReaderUI.instance
-            if ui and ui.document then
-                local pct = target * 100
-                if pct > 100 then
-                    pct = 100
-                end
-                ui:handleEvent(Event:new("GotoPercent", pct))
+        if not (H.is_num(target) and target > 0) then
+            return
+        end
+        local ui = ReaderUI.instance
+        if not (ui and ui.document) then
+            return
+        end
+        if ui.rolling then
+            -- 滚动模式(cre 渲染): GotoPercent 由 readerrolling 处理, 章内比例直接可用
+            local pct = math.min(target * 100, 100)
+            ui:handleEvent(Event:new("GotoPercent", pct))
+        elseif ui.paging then
+            -- 分页模式(漫画 cbz 等): GotoPercent 事件只有 readerrolling 有处理器,
+            -- 分页文档下是空操作(续读失效、恒开第一页的原因), 按比例换算页码跳转
+            local pages = ui.document:getPageCount() or 0
+            if pages > 0 then
+                local page = math.floor(target * pages + 0.5)
+                page = math.max(1, math.min(page, pages))
+                ui:handleEvent(Event:new("GotoPage", page))
             end
         end
     end
