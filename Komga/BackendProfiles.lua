@@ -9,6 +9,9 @@ local util = require("util")
 local md5 = require("ffi/sha2").md5
 local Config = require("Komga/Config")
 local H = require("Komga/Helper")
+local Json = require("Komga/Json")
+local Paths = require("Komga/Paths")
+local ltn12 = require("ltn12")
 
 return function(M)
 local wrap_response = M.wrap_response
@@ -91,6 +94,91 @@ function M:setApiKey(new_api_key)
     self.settings_data.data.api_key = new_api_key
     self.settings_data:flush()
     return wrap_response(self.settings_data.data)
+end
+
+-- Basic base64(账号:密码): 优先 luasocket 的 mime 库, 缺失时纯 Lua 兜底
+local function basic_auth_b64(data)
+    local ok_mime, mime = pcall(require, "mime")
+    if ok_mime and mime and type(mime.b64) == "function" then
+        return mime.b64(data)
+    end
+    local b = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    return ((data:gsub(".", function(x)
+        local r, bits = "", x:byte()
+        for i = 8, 1, -1 do
+            r = r .. (bits % 2 ^ i - bits % 2 ^ (i - 1) > 0 and "1" or "0")
+        end
+        return r
+    end) .. "0000"):gsub("%d%d%d?%d?%d?%d?", function(x)
+        if #x < 6 then
+            return ""
+        end
+        local c = 0
+        for i = 1, 6 do
+            c = c + (x:sub(i, i) == "1" and 2 ^ (6 - i) or 0)
+        end
+        return b:sub(c + 1, c + 1)
+    end) .. ({ "", "==", "=" })[#data % 3 + 1])
+end
+
+-- 账号密码自动获取 API Key(参考 kokomga 插件): Basic 鉴权调
+-- POST /api/v2/users/me/api-keys(Komga >= 1.11), 响应 {key = "明文密钥", ...}。
+-- 密码仅本次使用不落盘; 旧版服务器无此端点(404), 需在网页端手动创建。
+-- 本方法含网络请求, 可能在 MessageBox:loading 的子进程中执行(与 saveVolumeProgress 同法)。
+function M:generateApiKeyWithCredentials(username, password)
+    if not (H.is_str(username) and username ~= "" and H.is_str(password) and password ~= "") then
+        return wrap_response(nil, "用户名和密码不能为空")
+    end
+    local data = (self.settings_data and self.settings_data.data) or {}
+    if not H.is_str(data.server_address) or data.server_address == "" then
+        return wrap_response(nil, "请先设置服务器地址")
+    end
+    local ok_b64, basic = pcall(function()
+        return "Basic " .. basic_auth_b64(username .. ":" .. password)
+    end)
+    if not ok_b64 or not H.is_str(basic) then
+        return wrap_response(nil, "凭据编码失败")
+    end
+    local body = Json.encode({ comment = "KOReader komga.koplugin" })
+    if not self.httpReq then
+        self.httpReq = require("Komga.HttpRequest")
+    end
+    local ok_req, res_or_err = pcall(self.pGetUrlContent, self, {
+        url = data.server_address:gsub("/+$", "") .. "/api/v2/users/me/api-keys",
+        method = "POST",
+        headers = {
+            ["user-agent"] = Paths.USER_AGENT,
+            ["Authorization"] = basic,
+            ["content-type"] = "application/json",
+            ["content-length"] = tostring(#body),
+        },
+        source = ltn12.source.string(body),
+        timeout = 8,
+        maxtime = 12,
+    })
+    if not ok_req then
+        return wrap_response(nil, H.errorHandler(res_or_err))
+    end
+    if res_or_err == false or type(res_or_err) ~= "table" then
+        -- 非 2xx: pGetUrlContent 返回 (false, "HTTP/1.1 4xx ..."), 状态码在错误串里
+        local err_msg = tostring(res_or_err)
+        local detail
+        if err_msg:find("401") or err_msg:find("403") then
+            detail = "用户名或密码错误"
+        elseif err_msg:find("404") then
+            detail = "服务器版本过旧(需 Komga 1.11+), 请在网页端手动创建 API Key"
+        end
+        return wrap_response(nil, detail or ("服务器返回: " .. err_msg))
+    end
+    local raw = res_or_err.data
+    local ok_json, decoded = pcall(function()
+        return Json.decode(H.is_str(raw) and raw or "")
+    end)
+    local new_key = ok_json and H.is_tbl(decoded) and decoded.key or nil
+    if not H.is_str(new_key) or new_key == "" then
+        return wrap_response(nil, "服务器响应中没有 API Key")
+    end
+    return wrap_response(new_key)
 end
 
 -- ---------------------------------------------------------------------------
