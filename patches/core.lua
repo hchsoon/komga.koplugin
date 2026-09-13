@@ -2,6 +2,13 @@ local M = {
     _mark = "_c8eeb679e"
 }
 
+-- 模块自注册: 补丁引导(数据目录 2-komga_plugin_func.lua)用 dofile 加载本文件,
+-- 插件运行时(LibraryView 的 switching_chapter 窗口期等)用 require("patches.core")
+-- 加载——dofile 与 require 各自执行一次会产出两个模块实例, switching_chapter
+-- 等共享标志永远传不到已打补丁的闭包上(表现为跨章屏蔽提示失效)。
+-- 占住 require 的缓存键后, 两条路径拿到的是同一张表。
+package.loaded["patches.core"] = M
+
 M._setMark = function(instance)
     instance[M._mark] = true
 end
@@ -156,7 +163,8 @@ M.install = function()
         UIManager.show = function(self, widget, ...)
             if M.switching_chapter and widget and type(widget.text) == "string"
                 and (widget.text:find("Closing book", 1, true)
-                    or widget.text:find("关闭书籍", 1, true)) then
+                    or widget.text:find("关闭书籍", 1, true)
+                    or widget.text:find("正在关闭", 1, true)) then
                 return
             end
             return original_show(self, widget, ...)
