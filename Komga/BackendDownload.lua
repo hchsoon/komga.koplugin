@@ -871,12 +871,9 @@ function M:downloadVolumeWholeFile(volume)
         ext = "cbz"
     end
     if ext ~= "epub" and ext ~= "cbz" and ext ~= "pdf" then
-        -- 服务器文件路径常无扩展名(series.url 即文件路径): 按媒体类型兜底。
-        -- 漫画(DIVINA)整卷文件是 cbz 系图片包; EPUB 卷识别不了时回退逐章管线
-        if volume.mediaType == "EPUB" then
-            return nil
-        end
-        ext = "cbz"
+        -- 服务器文件路径常无扩展名(series.url 即文件路径): 按媒体类型兜底——
+        -- EPUB 整卷文件就是 epub, 漫画(DIVINA)是 cbz 系图片包
+        ext = (volume.mediaType == "EPUB") and "epub" or "cbz"
     end
     local base = H.getVolumeCacheFilePath(volume.book_cache_id, bookId, volume.number, volume.name)
     local dest = base .. "." .. ext
