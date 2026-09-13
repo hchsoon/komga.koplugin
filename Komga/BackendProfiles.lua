@@ -143,7 +143,9 @@ function M:generateApiKeyWithCredentials(username, password)
     if not self.httpReq then
         self.httpReq = require("Komga.HttpRequest")
     end
-    local ok_req, res_or_err = pcall(self.pGetUrlContent, self, {
+    -- 注意: pGetUrlContent(options) 是点调用(参数表就是 options),
+    -- 不能按方法调用多传一个 self, 否则 options 收到的是 Backend 表
+    local ok_req, res_or_err = pcall(self.pGetUrlContent, {
         url = data.server_address:gsub("/+$", "") .. "/api/v2/users/me/api-keys",
         method = "POST",
         headers = {
