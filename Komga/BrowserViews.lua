@@ -43,16 +43,20 @@ local function init_book_browser(parent)
         if not homedir then
             return
         end
-        local current_dir = self.parent:getBrowserCurrentDir()
-        if current_dir and current_dir == homedir then
-            if not self.parent.book_menu then
-                self.parent.book_menu = self.parent:getMenuWidget()
-            end
-            self.parent.book_menu:show_view()
-            self.parent.book_menu:refreshItems(true)
-            return
+        -- 一次点击即进入书架菜单。旧实现是两段式: 第一次点击仅把文件管理器
+        -- 导航到书架目录(若启动时已在该目录则视觉零变化, 用户感知为"没反应"),
+        -- 第二次点击才打开书架菜单。
+        if not self.parent.book_menu then
+            self.parent.book_menu = self.parent:getMenuWidget()
         end
-        self.parent:openKomgaFolder(homedir, focused_file, selected_files)
+        self.parent.book_menu:show_view()
+        self.parent.book_menu:refreshItems(true)
+        -- 书架菜单之下仍是书架目录本身(封面墙): 当前不在书架目录时后台导航,
+        -- 关闭书架菜单后露出的就是封面墙, 两种视图都保留
+        local current_dir = self.parent:getBrowserCurrentDir()
+        if current_dir ~= homedir then
+            self.parent:openKomgaFolder(homedir, focused_file, selected_files)
+        end
     end
 
     function book_browser:refreshItems()

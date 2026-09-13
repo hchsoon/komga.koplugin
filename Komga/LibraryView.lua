@@ -75,6 +75,10 @@ end
 function LibraryView:fetchAndShow()
     local is_first = not LibraryView.instance
     local use_browser = not self:isDisableBrowserMode() and is_first and self:browserViewHasLnk()
+    H.diagLog(string.format("fetchAndShow: is_first=%s use_browser=%s disable_browser=%s has_lnk=%s fm=%s",
+        tostring(is_first), tostring(use_browser),
+        tostring(self:isDisableBrowserMode()), tostring(self:browserViewHasLnk()),
+        tostring(FileManager.instance ~= nil)))
     local widget = use_browser and self:getBrowserWidget() or self:getMenuWidget()
     if widget then
         widget:show_view()
@@ -140,6 +144,8 @@ function LibraryView:openKomgaFolder(path, focused_file, selected_files, done_ca
         end
         local fm = FileManager.instance
         local fc = fm and fm.file_chooser
+        H.diagLog(string.format("openKomgaFolder nextTick: path=%s fc=%s fm=%s",
+            tostring(path), tostring(fc ~= nil), tostring(fm ~= nil)))
         if H.is_str(path) and fc and fc.changeToPath then
             -- 轻量导航: 直接驱动当前 FileChooser 切换到目标目录。
             -- 这与用户点击文件夹走同一条代码路径, 比 FileManager:reinit 重建整个

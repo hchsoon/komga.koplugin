@@ -183,4 +183,15 @@ M.dedupeAuthors = function(author)
     end
     return table.concat(out, "/")
 end
+-- 临时诊断: 启动首次点击链路落盘日志(append), 定位后移除
+M.diagLog = function(msg)
+    local ok, err = pcall(function()
+        local f = io.open(M.getTempDirectory() .. "/komga_diag.log", "a")
+        if f then
+            f:write(os.date("%H:%M:%S") .. "." .. string.format("%03d", math.floor((os.clock() % 1) * 1000)) .. " " .. tostring(msg) .. "\n")
+            f:close()
+        end
+    end)
+    return ok, err
+end
 return M
