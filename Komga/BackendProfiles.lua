@@ -139,7 +139,9 @@ function M:generateApiKeyWithCredentials(username, password)
     if not ok_b64 or not H.is_str(basic) then
         return wrap_response(nil, "凭据编码失败")
     end
-    local body = Json.encode({ comment = "KOReader komga.koplugin" })
+    -- 注释必须对用户唯一(Komga 限制: 同名注释重复创建报 ERR_1034),
+    -- 且明文 Key 只在创建响应里出现一次, 每次登录都生成新 Key + 时间戳注释
+    local body = Json.encode({ comment = "KOReader komga.koplugin " .. os.date("%Y-%m-%d %H:%M:%S") })
     if not self.httpReq then
         self.httpReq = require("Komga.HttpRequest")
     end
@@ -171,6 +173,8 @@ function M:generateApiKeyWithCredentials(username, password)
             detail = "用户名或密码错误"
         elseif err_msg:find("404") then
             detail = "服务器版本过旧(需 Komga 1.11+), 请在网页端手动创建 API Key"
+        elseif err_msg:find("ERR_1034") then
+            detail = "同名 API Key 已存在, 请到 Komga 网页端删除旧 Key 后重试"
         end
         return wrap_response(nil, detail or ("服务器返回: " .. err_msg))
     end
