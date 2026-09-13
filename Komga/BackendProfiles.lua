@@ -145,7 +145,9 @@ function M:generateApiKeyWithCredentials(username, password)
     end
     -- 注意: pGetUrlContent(options) 是点调用(参数表就是 options),
     -- 不能按方法调用多传一个 self, 否则 options 收到的是 Backend 表
-    local ok_req, res_or_err = pcall(self.pGetUrlContent, {
+    -- 注意: pGetUrlContent 点调用, 返回 (true, {data,...}) 或 (false, 错误串);
+    -- pcall 再前置一层成功标志, 所以这里要接三个返回值
+    local ok_req, req_ok, res_or_err = pcall(self.pGetUrlContent, {
         url = data.server_address:gsub("/+$", "") .. "/api/v2/users/me/api-keys",
         method = "POST",
         headers = {
@@ -161,9 +163,9 @@ function M:generateApiKeyWithCredentials(username, password)
     if not ok_req then
         return wrap_response(nil, H.errorHandler(res_or_err))
     end
-    if res_or_err == false or type(res_or_err) ~= "table" then
-        -- 非 2xx: pGetUrlContent 返回 (false, "HTTP/1.1 4xx ..."), 状态码在错误串里
-        local err_msg = tostring(res_or_err)
+    if req_ok == false or type(res_or_err) ~= "table" then
+        -- 非 2xx: 状态码在错误串里(如 "HTTP/1.1 401 Unauthorized")
+        local err_msg = type(res_or_err) == "string" and res_or_err or tostring(req_ok)
         local detail
         if err_msg:find("401") or err_msg:find("403") then
             detail = "用户名或密码错误"
