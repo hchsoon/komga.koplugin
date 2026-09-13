@@ -694,18 +694,16 @@ function M:after_reader_chapter_show(volume)
     end
 
     if volume.isRead ~= true and NetworkMgr:isConnected() then
-        if is_epub then
-            -- EPUB: 预下载当前卷的后几页(内部章节), 翻到时即开; 全程静默
+        if is_epub and self:getSettings().whole_file_mode ~= true then
+            -- 逐章模式: 预下载当前卷的后几页(内部章节), 翻到时即开; 全程静默。
+            -- 整卷原文件模式下跳过: 整卷已在本地, 逐章预载无意义
             self:preLoadEpubChapters(volume, tonumber(self:getSettings().preload_count) or 3)
         else
-            -- 漫画: 预下载后续整卷(cbz 单文件较大, 只预下载 1 卷)
+            -- 整卷文件在本地后翻卷即开, 预下载后续整卷(文件较大, 只预下载 1 卷):
+            -- 漫画(DIVINA)与整卷原文件模式下的 EPUB
             local complete_count = self:getReadAheadVolumeCount(volume)
             if complete_count < 40 then
-                local preDownloadNum = tonumber(self:getSettings().preload_count) or 3
-                if volume.cacheExt and volume.cacheExt == 'cbz' then
-                    preDownloadNum = 1
-                end
-                self:preLoadVolumes(volume, preDownloadNum)
+                self:preLoadVolumes(volume, 1)
             end
         end
     end

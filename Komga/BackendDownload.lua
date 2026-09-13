@@ -122,6 +122,17 @@ function M:getCacheVolumeFilePath(volume)
 
     local extensions = {'html', 'cbz', 'xhtml', 'txt', 'png', 'jpg'}
 
+    -- 整卷原文件模式: 优先命中整卷缓存(epub/cbz/pdf), 避免被旧的逐章缓存(xhtml/html)抢占
+    if self:getSettings().whole_file_mode == true then
+        for _, ext in ipairs({'epub', 'cbz', 'pdf'}) do
+            local fullPath = filePath .. '.' .. ext
+            if util.fileExists(fullPath) then
+                volume.cacheFilePath = fullPath
+                return volume
+            end
+        end
+    end
+
     if H.is_str(cacheExt) then
 
         table.insert(extensions, 1, volume.cacheExt)
@@ -525,6 +536,7 @@ function M:preLoadEpubChapters(volume, count)
                     bookId = bookId,
                     number = num,
                     name = book_name,
+                    url = chapter.url,
                     title = chapter.title or '',
                     is_pre_loading = true
                 })
