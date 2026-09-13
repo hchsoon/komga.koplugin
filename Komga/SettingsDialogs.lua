@@ -327,73 +327,87 @@ end
 -- POST /api/v2/users/me/api-keys(Komga >= 1.11)。两步输入用户名/密码,
 -- 密码仅本次使用不保存; 成功后自动写入 api_key 并持久化。
 function LibraryView:openApiKeyLogin()
+    local MultiInputDialog = require("ui/widget/multiinputdialog")
     local setting_data = Backend:getSettings()
-    MessageBox:input(nil, nil, {
-        title = "输入 Komga 用户名",
-        description = [[使用账号密码向服务器申请 API Key(需要 Komga 1.11+)。
-密码仅本次登录使用, 不会保存。]],
-        input = H.is_str(setting_data.login_username) and setting_data.login_username or "",
-        input_hint = "用户名",
-        save_callback = function(input_text)
-            local username = util.trim(input_text or "")
-            if username == "" then
-                MessageBox:notice("用户名不能为空")
-                return false
-            end
-            local sd = Backend:getSettings()
-            sd.login_username = username
-            Backend:saveSettings()
-            MessageBox:input(nil, nil, {
-                title = "输入 Komga 密码",
-                description = "将用账号 " .. username .. " 向服务器申请 API Key",
-                input_hint = "密码",
+    local dialog
+    dialog = MultiInputDialog:new{
+        title = "账号密码获取 API Key(需要 Komga 1.11+)",
+        fields = {
+            {
+                text = H.is_str(setting_data.login_username) and setting_data.login_username or "",
+                hint = "用户名(默认保存)",
+            },
+            {
+                hint = "密码(仅本次使用, 不保存)",
                 text_type = "password",
-                save_callback = function(pass_text)
-                    local password = pass_text or ""
-                    if password == "" then
-                        MessageBox:notice("密码不能为空")
-                        return false
-                    end
-                    Backend:closeDbManager()
-                    MessageBox:loading("正在登录并生成 API Key", function()
-                        return Backend:generateApiKeyWithCredentials(username, password)
-                    end, function(state, response)
-                        if state ~= true then
-                            MessageBox:error("登录失败：任务被取消")
+            },
+        },
+        buttons = {
+            {
+                {
+                    text = "取消",
+                    id = "close",
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+                {
+                    text = "登录并生成",
+                    is_enter_default = true,
+                    callback = function()
+                        local fields = dialog:getFields()
+                        local username = util.trim(fields[1] or "")
+                        local password = fields[2] or ""
+                        if username == "" or password == "" then
+                            MessageBox:notice("用户名和密码不能为空")
                             return
                         end
-                        Backend:HandleResponse(response, function(new_key)
-                            local r = Backend:setApiKey(new_key)
-                            if H.is_tbl(r) and r.type == "SUCCESS" then
-                                -- 同步更新匹配地址的服务器档案, 避免切换档案时把新 key 冲掉
-                                local sd = Backend:getSettings()
-                                if H.is_tbl(sd.server_profiles) then
-                                    local changed = false
-                                    for _, profile in ipairs(sd.server_profiles) do
-                                        if profile.server_address == sd.server_address
-                                            and profile.api_key ~= new_key then
-                                            profile.api_key = new_key
-                                            changed = true
+                        -- 默认保存用户名(不保存密码)
+                        local sd = Backend:getSettings()
+                        sd.login_username = username
+                        Backend:saveSettings()
+                        UIManager:close(dialog)
+                        Backend:closeDbManager()
+                        MessageBox:loading("正在登录并生成 API Key", function()
+                            return Backend:generateApiKeyWithCredentials(username, password)
+                        end, function(state, response)
+                            if state ~= true then
+                                MessageBox:error("登录失败：任务被取消")
+                                return
+                            end
+                            Backend:HandleResponse(response, function(new_key)
+                                local r = Backend:setApiKey(new_key)
+                                if H.is_tbl(r) and r.type == "SUCCESS" then
+                                    -- 同步更新匹配地址的服务器档案, 避免切换档案时把新 key 冲掉
+                                    local sd = Backend:getSettings()
+                                    if H.is_tbl(sd.server_profiles) then
+                                        local changed = false
+                                        for _, profile in ipairs(sd.server_profiles) do
+                                            if profile.server_address == sd.server_address
+                                                and profile.api_key ~= new_key then
+                                                profile.api_key = new_key
+                                                changed = true
+                                            end
+                                        end
+                                        if changed then
+                                            Backend:saveSettings()
                                         end
                                     end
-                                    if changed then
-                                        Backend:saveSettings()
-                                    end
+                                    MessageBox:notice("API Key 获取成功, 已自动填入")
+                                else
+                                    MessageBox:error("保存失败: " .. tostring(r and r.message))
                                 end
-                                MessageBox:notice("API Key 获取成功, 已自动填入")
-                            else
-                                MessageBox:error("保存失败: " .. tostring(r and r.message))
-                            end
-                        end, function(err_msg)
-                            MessageBox:error("获取失败: " .. tostring(err_msg))
+                            end, function(err_msg)
+                                MessageBox:error("获取失败: " .. tostring(err_msg))
+                            end)
                         end)
-                    end)
-                    return true
-                end,
-            })
-            return true
-        end,
-    })
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
 end
 
 function LibraryView:openBrowserMenu(file)
