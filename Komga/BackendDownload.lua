@@ -122,7 +122,8 @@ function M:getCacheVolumeFilePath(volume)
 
     local extensions = {'html', 'cbz', 'xhtml', 'txt', 'png', 'jpg'}
 
-    -- 整卷原文件模式: 优先命中整卷缓存(epub/cbz/pdf), 避免被旧的逐章缓存(xhtml/html)抢占
+    -- 整卷原文件模式: 只认整卷缓存(epub/cbz/pdf), 不回退旧的逐章缓存
+    -- (xhtml/html)——否则旧章节缓存会一直抢占命中, 整卷文件永远不下载
     if self:getSettings().whole_file_mode == true then
         for _, ext in ipairs({'epub', 'cbz', 'pdf'}) do
             local fullPath = filePath .. '.' .. ext
@@ -131,6 +132,9 @@ function M:getCacheVolumeFilePath(volume)
                 return volume
             end
         end
+        -- 无整卷缓存: 视为未下载(命中过的旧逐章缓存不再算数), 交由
+        -- downloadVolume -> downloadVolumeAuto 走整卷下载
+        return volume
     end
 
     if H.is_str(cacheExt) then

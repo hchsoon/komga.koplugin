@@ -446,6 +446,17 @@ function LibraryView:resumeAndOpenVolume(volume, server_data)
         local tp = loc and loc.locations and loc.locations.totalProgression
         local prog_in_ch = loc and loc.locations and loc.locations.progression
         local href = loc and loc.href
+        if self:getSettings().whole_file_mode == true then
+            -- 整卷原文件模式: 打开的就是整卷 epub, 续读交给 KOReader 原生
+            -- (doc sidecar 自带上次位置)。不做内部章节重定位——那会错改
+            -- volume.number, 导致缓存键与整卷下载按章节号错位、反复重下
+            if H.is_num(tp) and tp > 0 then
+                self._last_epub_server_frac = { bookId = volume.bookId, frac = math.min(math.max(tp, 0), 1) }
+                self:persistKomgaProgressToShortcut()
+            end
+            self:loadAndRenderChapter(volume)
+            return
+        end
         if H.is_num(tp) then
             server_frac = math.min(math.max(tp, 0), 1)
             server_completed = tp >= 0.999
