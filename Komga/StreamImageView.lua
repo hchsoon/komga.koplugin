@@ -36,9 +36,7 @@ function M:paintTo(bb, x, y)
     local ok, paint_err = pcall(function()
         local w = Screen:getWidth()
         local h = Screen:getHeight()
-        -- 背景色跟随设置: 黑底(夜间减眩光, 参考 Artgallery) / 白底(默认)
-        local black_bg = Backend:getSettings().stream_black_bg == true
-        bb:paintRect(0, 0, w, h, black_bg and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE)
+        bb:paintRect(0, 0, w, h, Blitbuffer.COLOR_WHITE)
         if self.main_frame then
             local content_size = self.main_frame:getSize()
             self.main_frame:paintTo(bb,
@@ -84,7 +82,6 @@ function M:init()
     -- 原生按钮表在 ImageViewer.init 内部是局部量无法追加, 这里按同参数重建
     -- ButtonTable(保留 scale/rotate/close 的 id, update() 会按 id 刷新其文案)。
     -- 不改任何手势: 点击/滑动/双指均为 KOReader 原生行为(中间点击呼出本按钮栏)。
-    self._black_bg = Backend:getSettings().stream_black_bg == true
     -- 缩放三态(参考 Artgallery 铺满/适配/原始): fit -> cover -> original 循环
     self._scale_state = self._scale_state or "fit"
     if self.button_table and self.button_container then
@@ -140,18 +137,6 @@ function M:init()
                     text = _("Close"),
                     callback = function()
                         self:onClose()
-                    end,
-                },
-                {
-                    id = "blackbg",
-                    text = self._black_bg and _("白底") or _("黑底"),
-                    callback = function()
-                        self._black_bg = not self._black_bg
-                        -- getSettings() 返回的是 data 表, 持久化要经 Backend:saveSettings
-                        local settings = Backend:getSettings()
-                        settings.stream_black_bg = self._black_bg and true or nil
-                        Backend:saveSettings()
-                        self:update()
                     end,
                 },
             },
