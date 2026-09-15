@@ -588,20 +588,41 @@ function LibraryView:openMenu()
         local rows = {
             {
                 {
-        text = string.format("%s 整卷原文件模式 %s", Icons.FA_BOOK,
-            (settings.whole_file_mode and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        text = string.format("%s 阅读模式 %s", Icons.FA_BOOK,
+            (settings.reading_mode == "stream" and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
+            local new_mode = (settings.reading_mode == "stream") and "whole" or "stream"
             MessageBox:confirm(string.format(
-                "当前: %s \r\n \r\n开启后 EPUB/漫画分卷直接下载原文件(.epub/.cbz)交 KOReader 原生引擎渲染：兼容性最好(原生目录/内链/字体), 但进度定位精度降为整卷比例, 且章节级预载/按需下载失效。关闭则走逐章管线。",
-                (settings.whole_file_mode and '[整卷原文件]' or '[逐章管线]')), function(result)
+                "当前: %s \r\n \r\n切换到: %s\r\n \r\n[流式] 漫画边看边下载, 不占空间, 对网络要求较高。\r\n[整卷] 漫画/EPUB 分卷下载原文件(.epub/.cbz)交 KOReader 原生引擎渲染：兼容性最好(原生目录/内链/字体), 占用缓存空间。",
+                (settings.reading_mode == "stream" and '[流式]' or '[整卷]'),
+                (new_mode == "stream" and '[流式]' or '[整卷]')), function(result)
                 if result then
-                    settings.whole_file_mode = not settings.whole_file_mode and true or nil
+                    settings.reading_mode = new_mode
+                    -- 同步旧键, 降级回旧版插件时行为一致
+                    settings.stream_image_view = (new_mode == "stream") and true or nil
+                    settings.whole_file_mode = (new_mode == "whole") and true or nil
                     return saveSettingsAndNotify(settings, function(data)
-                        MessageBox:notice("已切换, 下次下载生效")
+                        MessageBox:notice("已切换, 对新打开的分卷生效")
                     end)
                 end
-            end)
+            end, {
+                ok_text = "切换",
+                cancel_text = "取消"
+            })
+        end
+                }
+            },
+            {
+                {
+        text = string.format("%s 智能旋转(流式横页自动转屏) %s", Icons.FA_BOOK,
+            ((G_reader_settings and G_reader_settings:isTrue("imageviewer_rotate_auto_for_best_fit")) and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        callback = function()
+            UIManager:close(dialog)
+            local cur = G_reader_settings and G_reader_settings:isTrue("imageviewer_rotate_auto_for_best_fit")
+            G_reader_settings:saveSetting("imageviewer_rotate_auto_for_best_fit", not cur)
+            G_reader_settings:flush()
+            MessageBox:notice(cur and "已关闭, 下次打开流式分卷生效" or "已开启, 横版页面将自动旋转铺满屏幕")
         end
                 }
             },
@@ -628,29 +649,6 @@ function LibraryView:openMenu()
                     end)
                 end,
                 allow_newline = false
-            })
-        end
-                }
-            },
-            {
-                {
-        text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,
-            (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm(string.format(
-                "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
-                (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
-                if result then
-                    settings.stream_image_view = not settings.stream_image_view or nil
-                    saveSettingsAndNotify(settings, function(data)
-                        MessageBox:notice("设置成功")
-                        self:closeMenu()
-                    end)
-                end
-            end, {
-                ok_text = "切换",
-                cancel_text = "取消"
             })
         end
                 }

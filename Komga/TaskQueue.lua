@@ -54,6 +54,15 @@ function TaskQueue.listAll()
     return out
 end
 
+-- 更新运行中/排队任务的标签(下载进度实时回显到后台任务管理)
+function TaskQueue.setTaskTag(channel_name, id, tag)
+    local ch = TaskQueue.channels[channel_name]
+    local t = ch and ch.tasks[id]
+    if t then
+        t.tag = tag
+    end
+end
+
 function TaskQueue.cancel(channel_name, id)
     local ch = TaskQueue.channels[channel_name]
     if not ch then

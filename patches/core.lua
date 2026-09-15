@@ -215,6 +215,14 @@ M.install = function()
         return inst and inst.displayed_chapter
     end
     local function is_komga_epub_reading()
+        -- 整卷阅读模式: 打开的是整卷 epub(cre 原生渲染, 自带完整目录结构),
+        -- 走 KOReader 原生目录即可; 路由到分卷内部目录会按内部章节号重开,
+        -- 触发逐章下载管线把整卷重新下载一遍
+        local okB, Backend = pcall(require, "Komga/Backend")
+        if okB and Backend and Backend.getReadingMode
+            and Backend:getReadingMode() == "whole" then
+            return false
+        end
         local chapter = get_komga_displayed_chapter()
         if chapter and chapter.mediaType == "EPUB" then
             return true

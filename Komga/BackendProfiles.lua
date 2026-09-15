@@ -96,6 +96,24 @@ function M:setApiKey(new_api_key)
     return wrap_response(self.settings_data.data)
 end
 
+-- 阅读模式单一开关(互斥): "stream"(流式, 边看边下) | "whole"(整卷原文件)。
+-- 旧设置(stream_image_view / whole_file_mode 两个独立开关)首次读取时自动迁移:
+-- 曾开启流式 → stream; 其余(含从未设置) → whole(整卷涵盖原"逐章管线"场景)。
+-- 迁移时同步回写旧键, 保证降级回旧版插件时行为一致。
+function M:getReadingMode()
+    local data = self.settings_data.data
+    local mode = data.reading_mode
+    if mode == "stream" or mode == "whole" then
+        return mode
+    end
+    mode = (data.stream_image_view == true) and "stream" or "whole"
+    data.reading_mode = mode
+    data.stream_image_view = (mode == "stream") and true or nil
+    data.whole_file_mode = (mode == "whole") and true or nil
+    self:saveSettings()
+    return mode
+end
+
 -- Basic base64(账号:密码): 优先 luasocket 的 mime 库, 缺失时纯 Lua 兜底
 local function basic_auth_b64(data)
     local ok_mime, mime = pcall(require, "mime")

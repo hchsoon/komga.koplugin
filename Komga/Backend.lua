@@ -138,6 +138,7 @@ function M:initialize()
             servers_history = {},
             api_key = Config.DEFAULT_API_KEY,
             stream_image_view = nil,
+            reading_mode = "whole",
             disable_browser = nil
         }
         self.settings_data:flush()
@@ -694,13 +695,14 @@ function M:after_reader_chapter_show(volume)
     end
 
     if volume.isRead ~= true and NetworkMgr:isConnected() then
-        if is_epub and self:getSettings().whole_file_mode ~= true then
-            -- 逐章模式: 预下载当前卷的后几页(内部章节), 翻到时即开; 全程静默。
-            -- 整卷原文件模式下跳过: 整卷已在本地, 逐章预载无意义
-            self:preLoadEpubChapters(volume, tonumber(self:getSettings().preload_count) or 3)
+        local mode = self:getReadingMode()
+        if mode == "stream" then
+            -- 流式: EPUB 仍按内部章节预载(翻到即开); 漫画由流式查看器自带页面预取
+            if is_epub then
+                self:preLoadEpubChapters(volume, tonumber(self:getSettings().preload_count) or 3)
+            end
         else
-            -- 整卷文件在本地后翻卷即开, 预下载后续整卷(文件较大, 只预下载 1 卷):
-            -- 漫画(DIVINA)与整卷原文件模式下的 EPUB
+            -- 整卷: 预下载后续整卷(文件较大, 只预下载 1 卷), 覆盖漫画与 EPUB
             local complete_count = self:getReadAheadVolumeCount(volume)
             if complete_count < 40 then
                 self:preLoadVolumes(volume, 1)

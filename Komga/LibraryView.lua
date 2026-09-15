@@ -452,8 +452,8 @@ function LibraryView:resumeAndOpenVolume(volume, server_data)
         local tp = loc and loc.locations and loc.locations.totalProgression
         local prog_in_ch = loc and loc.locations and loc.locations.progression
         local href = loc and loc.href
-        if Backend:getSettings().whole_file_mode == true then
-            -- 整卷原文件模式: 打开的就是整卷 epub, 续读交给 KOReader 原生
+        if Backend:getReadingMode() == "whole" then
+            -- 整卷模式: 打开的就是整卷 epub, 续读交给 KOReader 原生
             -- (doc sidecar 自带上次位置)。不做内部章节重定位——那会错改
             -- volume.number, 导致缓存键与整卷下载按章节号错位、反复重下。
             -- 注意必须用 Backend:getSettings(): 这里的 self 是 LibraryView,
@@ -620,7 +620,7 @@ function LibraryView:openVolumeShortcut(book_cache_id, number, lnk_path)
         self.volume_reading_index = number
         self.volume_pages = volume.pages
         self.volume_bookId = volume.bookId
-        local is_stream = Backend:getSettings().stream_image_view == true
+        local is_stream = Backend:getReadingMode() == "stream"
         if NetworkMgr:isConnected() then
             if is_stream then
                 self:persistComicServerProgress(volume)
@@ -634,7 +634,7 @@ function LibraryView:openVolumeShortcut(book_cache_id, number, lnk_path)
         self:refreshVolumeShortcutProgress(book_cache_id, number, lnk_path)
     end
 
-    if Backend:getSettings().stream_image_view == true and volume.mediaType ~= "EPUB" then
+    if Backend:getReadingMode() == "stream" and volume.mediaType ~= "EPUB" then
         local bookinfo = KomgaModel:new(book_cache_id):getSeries() -- Komga Series
         if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
             MessageBox:notice("书籍数据缺失")
@@ -927,7 +927,7 @@ function LibraryView:loadAndRenderChapter(chapter)
         return
     end
     self._downloading_chapters[dl_key] = true
-    local is_whole_download = Backend:getSettings().whole_file_mode == true
+    local is_whole_download = Backend:getReadingMode() == "whole"
         or chapter.mediaType ~= "EPUB"
     if is_whole_download then
         Backend:show_notice(string.format("正在下载分卷: %s …",
@@ -935,10 +935,22 @@ function LibraryView:loadAndRenderChapter(chapter)
     end
     -- fork 前关库: 子进程经 getDB 用自有连接写库, 主线程按需懒重开
     Backend:closeDbManager()
-    TaskQueue.getChannel("download", 1):push(function()
-        return Backend:downloadVolume(chapter)
+    -- 整卷下载: 子进程把 (已下载, 总字节) 写进状态文件, 进度对话框每秒轮询;
+    -- 失败自动重试(max_retries), 重试经 .part 断点续传, 不整卷重来
+    local state_path = H.getTempDirectory() .. "/komga_dl_" .. tostring(chapter.bookId) .. ".state"
+    local task_id = TaskQueue.getChannel("download", 1):push(function()
+        return Backend:downloadVolume(chapter, nil, function(got, total)
+            local f = io.open(state_path, "w")
+            if f then
+                f:write(tostring(got) .. " " .. tostring(total or 0))
+                f:close()
+            end
+        end)
     end, function(ok, resp, err)
         self._downloading_chapters[dl_key] = nil
+        pcall(function()
+            require("Komga/DownloadProgress").finish()
+        end)
         -- 子进程可能已补写 epub_chapter 行, 失效 ProgressSync 的 href 映射缓存
         pcall(function()
             require("Komga/ProgressSync").invalidateEpubHrefMap(chapter.book_cache_id)
@@ -960,7 +972,22 @@ function LibraryView:loadAndRenderChapter(chapter)
         end, function(err_msg)
             Backend:show_notice("章节下载失败" .. (H.is_str(err_msg) and (": " .. err_msg) or ""))
         end)
-    end, {timeout = 900, tag = "chapter_download"})
+    end, {timeout = 900, tag = "下载分卷: " .. tostring(chapter.title or chapter.number),
+        max_retries = 2, retry_delay = 3})
+    -- 整卷下载显示进度对话框(可隐藏/取消; 取消后 .part 保留, 重试断点续传)
+    if is_whole_download then
+        local DownloadProgress = require("Komga/DownloadProgress")
+        DownloadProgress.start{
+            key = dl_key,
+            title = (H.is_str(chapter.title) and chapter.title) or tostring(chapter.number),
+            state_path = state_path,
+            channel = "download",
+            task_id = task_id,
+            on_cancelled = function()
+                self._downloading_chapters[dl_key] = nil
+            end,
+        }
+    end
 end
 
 -- 跨卷续读: 当前卷翻到末尾时问服务器"同系列下一本书"(Komga /books/:id/next),

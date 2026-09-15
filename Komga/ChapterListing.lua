@@ -160,7 +160,7 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
         items_per_page = items_per_page,
         items_font_size = items_font_size,
         title = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
-            Backend:getSettings().stream_image_view == true) and "[流式]" or "")
+            Backend:getReadingMode() == "stream") and "[流式]" or "")
     }
     if not hide then
         UIManager:show(chapter_listing)
@@ -183,7 +183,7 @@ function ChapterListing:onMenuChoice(item)
     end
     local chapter = Backend:getVolumeInfoCache(book_cache_id, number)
 
-    if Backend:getSettings().stream_image_view == true and chapter.mediaType ~= "EPUB" then
+    if Backend:getReadingMode() == "stream" and chapter.mediaType ~= "EPUB" then
         local on_return_callback = function()
             self:gotoLastReadChapter()
         end

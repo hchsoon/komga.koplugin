@@ -124,7 +124,7 @@ function M:getCacheVolumeFilePath(volume)
 
     -- 整卷原文件模式: 只认整卷缓存(epub/cbz/pdf), 不回退旧的逐章缓存
     -- (xhtml/html)——否则旧章节缓存会一直抢占命中, 整卷文件永远不下载
-    if self:getSettings().whole_file_mode == true then
+    if self:getReadingMode() == "whole" then
         for _, ext in ipairs({'epub', 'cbz', 'pdf'}) do
             local fullPath = filePath .. '.' .. ext
             if util.fileExists(fullPath) then
@@ -913,7 +913,7 @@ function M:downloadVolumeWholeFile(volume)
     return volume
 end
 
-function M:downloadVolume(volume)
+function M:downloadVolume(volume, message_dialog, on_progress)
 
     local bookCacheId = volume.book_cache_id
     local number = volume.number
@@ -926,8 +926,8 @@ function M:downloadVolume(volume)
     local status, err = pcall(function()
         -- P3-9 双轨: 非 EPUB 卷(漫画)必须走整卷下载
         -- (逐章管线对漫画必 400);
-        -- EPUB 卷按 whole_file_mode 选择整卷/逐章, 整卷失败回退逐章
-        return self:downloadVolumeAuto(volume)
+        -- EPUB 卷按阅读模式选择整卷/逐章, 整卷失败回退逐章
+        return self:downloadVolumeAuto(volume, message_dialog, on_progress)
     end)
     if not status then
         logger.err('下载章节失败：', err)
@@ -940,14 +940,14 @@ end
 -- 下载策略选择: 非 EPUB 卷(漫画 DIVINA 等)没有内部章节, 逐章管线是 EPUB 专用
 -- (对漫画调 manifest/epub 端点必然 400), 因此无论设置如何都先走整卷原文件下载;
 -- EPUB 卷按 whole_file_mode 选择整卷/逐章, 整卷失败回退逐章。
-function M:downloadVolumeAuto(volume)
-    if self:getSettings().whole_file_mode == true or volume.mediaType ~= "EPUB" then
-        local wf = self:downloadVolumeWholeFile(volume)
+function M:downloadVolumeAuto(volume, message_dialog, on_progress)
+    if self:getReadingMode() == "whole" or volume.mediaType ~= "EPUB" then
+        local wf = self:downloadVolumeWholeFile(volume, on_progress)
         if wf then
             return wf
         end
     end
-    return self:pDownloadVolume(volume)
+    return self:pDownloadVolume(volume, message_dialog)
 end
 
 -- 打点系列"最后阅读"时间(静默, 失败不影响阅读)
