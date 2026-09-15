@@ -119,9 +119,10 @@ function M:init()
                     text = self._black_bg and _("白底") or _("黑底"),
                     callback = function()
                         self._black_bg = not self._black_bg
+                        -- getSettings() 返回的是 data 表, 持久化要经 Backend:saveSettings
                         local settings = Backend:getSettings()
                         settings.stream_black_bg = self._black_bg and true or nil
-                        settings:flush()
+                        Backend:saveSettings()
                         self:update()
                     end,
                 },
