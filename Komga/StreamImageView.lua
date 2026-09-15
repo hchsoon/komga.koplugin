@@ -85,17 +85,45 @@ function M:init()
     -- ButtonTable(保留 scale/rotate/close 的 id, update() 会按 id 刷新其文案)。
     -- 不改任何手势: 点击/滑动/双指均为 KOReader 原生行为(中间点击呼出本按钮栏)。
     self._black_bg = Backend:getSettings().stream_black_bg == true
+    -- 缩放三态(参考 Artgallery 铺满/适配/原始): fit -> cover -> original 循环
+    self._scale_state = self._scale_state or "fit"
     if self.button_table and self.button_container then
         local buttons = {
             {
                 {
                     id = "scale",
-                    text = self._scale_to_fit and _("Original size") or _("Scale"),
+                    -- 按钮文案 = 按下后将切换到的模式
+                    text = (self._scale_state == "fit" and _("铺满"))
+                        or (self._scale_state == "cover" and _("原始尺寸") or _("适应")),
                     callback = function()
-                        self.scale_factor = self._scale_to_fit and 1 or 0
-                        self._scale_to_fit = not self._scale_to_fit
+                        -- 三态循环(参考 Artgallery 的 铺满/适配/原始):
+                        --   fit    整卷留白完整显示(scale_factor=0)
+                        --   cover  等比放大到铺满屏幕, 溢出裁掉, 可平移查看
+                        --   original 原始像素(1:1)
+                        local iw, ih
+                        if self.image and self.image.getWidth then
+                            iw, ih = self.image:getWidth(), self.image:getHeight()
+                        end
                         self._center_x_ratio = 0.5
                         self._center_y_ratio = 0.5
+                        if self._scale_state == "fit" and iw and ih and iw > 0 and ih > 0 then
+                            -- 铺满 = max(屏宽/图宽, 屏高/图高); 旋转时按转后方向取屏幕两维
+                            self._scale_state = "cover"
+                            local sw, sh = Screen:getWidth(), Screen:getHeight()
+                            if self.rotated then
+                                sw, sh = sh, sw
+                            end
+                            self._scale_to_fit = false
+                            self.scale_factor = math.max(sw / iw, sh / ih)
+                        elseif self._scale_state == "cover" then
+                            self._scale_state = "original"
+                            self._scale_to_fit = false
+                            self.scale_factor = 1
+                        else
+                            self._scale_state = "fit"
+                            self._scale_to_fit = true
+                            self.scale_factor = 0
+                        end
                         self:update()
                     end,
                 },
