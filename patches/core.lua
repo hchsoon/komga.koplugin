@@ -215,14 +215,6 @@ M.install = function()
         return inst and inst.displayed_chapter
     end
     local function is_komga_epub_reading()
-        -- 整卷阅读模式: 打开的是整卷 epub(cre 原生渲染, 自带完整目录结构),
-        -- 走 KOReader 原生目录即可; 路由到分卷内部目录会按内部章节号重开,
-        -- 触发逐章下载管线把整卷重新下载一遍
-        local okB, Backend = pcall(require, "Komga/Backend")
-        if okB and Backend and Backend.getReadingMode
-            and Backend:getReadingMode() == "whole" then
-            return false
-        end
         local chapter = get_komga_displayed_chapter()
         if chapter and chapter.mediaType == "EPUB" then
             return true
@@ -251,6 +243,14 @@ M.install = function()
     end
     function ReaderToc:onShowToc()
         if is_komga_path(nil, self.ui) then
+            -- 整卷阅读模式: 打开的是整卷原文件(.epub), cre 自带真实章节结构,
+            -- 直接走 KOReader 原生目录 —— 跳章是原生翻页, 不会触发任何下载。
+            -- 不能落到下方分支: 非 EPUB 的 komga 文件会被路由到书架(ShowKomgaToc)
+            local okB, Backend = pcall(require, "Komga/Backend")
+            if okB and Backend and Backend.getReadingMode
+                and Backend:getReadingMode() == "whole" then
+                return original_onShowToc(self)
+            end
             if is_komga_epub_reading() then
                 self.ui:handleEvent(Event:new("ShowKomgaVolumeToc"))
             else
