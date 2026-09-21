@@ -667,8 +667,9 @@ end
 function LibraryView:refreshReadVolumeShortcut(book_cache_id, number)
     self:getBrowserWidget()
     if not (H.is_str(book_cache_id) and H.is_num(number)) then
-        return
+        return false
     end
+    local changed = false
     -- 已跟踪本次阅读的快捷方式且侧车匹配时直用, 免去全目录扫描(关书路径的热点);
     -- 跨卷后路径可能指向旧卷, 校验 book_cache_id + number 不匹配则走扫描兜底
     local known = self.volume_lnk_path
@@ -680,14 +681,15 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, number)
         if H.is_tbl(props) and props.type == "volume" and props.number == number
             and ds:readSetting("book_cache_id") == book_cache_id then
             self:persistKomgaProgressToShortcut()
-            self.book_browser:refreshVolumeMetadata(nil, known, book_cache_id, number)
-            return
+            changed = self.book_browser:refreshVolumeMetadata(nil, known, book_cache_id, number) == true
+            self:afterShortcutProgressWrite(known, changed)
+            return changed
         end
     end
     local file_manager = FileManager.instance
     local dir = file_manager and file_manager.file_chooser and file_manager.file_chooser.path
     if not (H.is_str(dir) and is_komga_browser_dir_path(dir)) then
-        return
+        return false
     end
     local found
     util.findFiles(dir, function(fullpath, name)
@@ -709,7 +711,23 @@ function LibraryView:refreshReadVolumeShortcut(book_cache_id, number)
         self.volume_lnk_path = found
         -- 关闭返回时把服务器空间进度写入该快捷方式(覆盖目录打开等无快捷方式路径的场景)
         self:persistKomgaProgressToShortcut()
-        self.book_browser:refreshVolumeMetadata(nil, found, book_cache_id, number)
+        changed = self.book_browser:refreshVolumeMetadata(nil, found, book_cache_id, number) == true
+        self:afterShortcutProgressWrite(found, changed)
+    end
+    return changed
+end
+
+-- 快捷方式进度落盘后的统一收尾: 清 BookList 内存缓存条目(列表行 percent/status
+-- 的实际读取源, 不清则重绘仍显示旧值), sidecar 实际变化时再节流单次目录重绘
+function LibraryView:afterShortcutProgressWrite(lnk_path, changed)
+    pcall(function()
+        local BookList = require("ui/widget/booklist")
+        if BookList and BookList.resetBookInfoCache then
+            BookList.resetBookInfoCache(lnk_path)
+        end
+    end)
+    if changed and H.is_tbl(self.book_browser) then
+        self.book_browser:scheduleCoalescedRefresh()
     end
 end
 

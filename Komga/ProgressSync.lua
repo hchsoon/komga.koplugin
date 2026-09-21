@@ -436,6 +436,8 @@ function ProgressSync:uploadCurrentProgress()
     if not (H.is_num(vol_index) and vol_index > 0) then
         vol_index = self.volume_reading_index or chapter.number
     end
+    -- 本卷进度已变动: 记入会话脏集合, 退出阅读/翻章后按集合定向刷新快捷方式行
+    self:markSessionVolumeDirty(chapter.book_cache_id, vol_index)
     self:scheduleProgressUpload({
         name = chapter.name,
         url = chapter.url,
@@ -551,7 +553,62 @@ function ProgressSync:persistStreamComicProgress(chapter, page)
     self:stampServerFracAndPersist(chapter.bookId, page / pages)
     if H.is_num(chapter.number) then
         self:refreshReadVolumeShortcut(chapter.book_cache_id, chapter.number)
+        -- 流式的 saveVolumeProgress 在关卷时同步执行(本地已读标记已落), 与 ReaderUI
+        -- 关闭路径一样按会话脏集合定向刷新 + 系列总进度
+        self:markSessionVolumeDirty(chapter.book_cache_id, chapter.number)
+        self:refreshSessionVolumeShortcuts(chapter.book_cache_id)
     end
+end
+
+-- ===== 阅读会话内的定向行刷新(不做全量更新) =====
+
+-- 记录本会话进度有变动的卷(漫画/EPUB 翻卷上传时、关书上传时调用)。
+-- 集合按系列分组、卷号去重; 退出阅读/翻章后 refreshSessionVolumeShortcuts
+-- 按集合逐卷刷新快捷方式行, 只碰读过的卷。
+function ProgressSync:markSessionVolumeDirty(book_cache_id, number)
+    if not (H.is_str(book_cache_id) and H.is_num(number) and number > 0) then
+        return
+    end
+    self._dirty_volumes = self._dirty_volumes or {}
+    local per_series = self._dirty_volumes[book_cache_id]
+    if not per_series then
+        per_series = {}
+        self._dirty_volumes[book_cache_id] = per_series
+    end
+    per_series[number] = true
+end
+
+-- 退出阅读/翻章后: 把会话内进度有变动的卷逐卷定向刷新(重算 sidecar 的
+-- percent_finished/status + 清 BookList 内存缓存条目), 再汇总系列总进度,
+-- 最后节流单次目录重绘。不做整目录/整书架的全量更新; 集合为空时零操作。
+-- 跨卷阅读时更早读完的卷在其翻卷上传时已记入集合, 在此一并补上状态显示。
+function ProgressSync:refreshSessionVolumeShortcuts(book_cache_id)
+    if not (H.is_str(book_cache_id) and H.is_tbl(self.book_browser)) then
+        return
+    end
+    local numbers = self._dirty_volumes and self._dirty_volumes[book_cache_id]
+    if not (H.is_tbl(numbers) and next(numbers)) then
+        return
+    end
+    -- 先取走集合(翻章路径会再次进入, 避免重复刷新已处理过的卷)
+    self._dirty_volumes[book_cache_id] = nil
+    local bookinfo = KomgaModel:new(book_cache_id):getSeries()
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name)) then
+        return
+    end
+    local ok, err = pcall(function()
+        self.book_browser:refreshVolumeProgressRows(book_cache_id, numbers, bookinfo)
+    end)
+    if not ok then
+        logger.warn("[KomgaProgress] session volume row refresh failed:", H.errorHandler(err))
+        return
+    end
+    -- 任一卷 sidecar 变化都会反映进系列聚合(refreshSeriesTotalProgress 内部
+    -- 无变化自动跳过写入); 节流重绘让当前目录行显示新值
+    pcall(function()
+        self.book_browser:refreshSeriesTotalProgress(book_cache_id, bookinfo)
+    end)
+    self.book_browser:scheduleCoalescedRefresh()
 end
 
 -- ===== 分卷目录初始化: 批量同步全部分卷的服务器阅读进度 =====

@@ -1,5 +1,19 @@
 # 更新日志
 
+## 2026-09-21
+
+- 修复: 退出阅读后书架/分卷进度不更新(需手动刷新)。根因是关书路径只写 sidecar,
+  但列表行进度实际读自 BookList 内存缓存, 且系列聚合进度在关书路径从不重算;
+  现关书/翻章/流式关卷后按"会话脏卷集合"定向刷新: 逐卷重算 sidecar percent_finished/status +
+  清 BookList 缓存条目 + 汇总系列总进度 + 节流单次目录重绘, 不做全量更新
+- 修复: 跨卷阅读退出后, 已读完分卷的进度与已读状态不更新。会话内每卷进度上传时记入脏集合
+  (markSessionVolumeDirty), 退出后按集合逐卷刷新(含"关书瞬间刚读完"的卷——刷新排在延迟上传之后,
+  按 isRead 正确落为 complete/100%); 流式阅读的跨卷发生在 StreamImageView 翻页管线内(不经过
+  ReaderUI 关闭事件), 现跨卷时把离开的卷也记入脏集合, 关卷后中间卷一并刷新
+- 修复: 流式跨卷时中间卷不进阅读历史(ReadHistory 的 komga 映射补丁依赖 ReaderUI 关闭事件,
+  流式只在关卷时为最后一卷补写)——跨卷点为离开的卷即时补一条历史条目(addItem 按路径去重置顶,
+  displayed_chapter 更新前映射, 正好是该卷快捷方式)
+
 ## 2026-09-15 ~ 2026-09-19
 
 - 阅读模式整合: stream_image_view 与 whole_file_mode 合并为互斥的 reading_mode 开关(stream|whole),

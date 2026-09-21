@@ -254,12 +254,12 @@ local function init_book_browser(parent)
         if not (util.fileExists(lnk_path) and H.is_str(lnk_name) and H.is_str(book_cache_id) and
             H.is_num(number)) then
             logger.err("browser.refreshVolumeMetadata parameter error")
-            return
+            return false
         end
         local volume = KomgaModel:new(book_cache_id):getVolume(number) -- Komga Book(分卷)
         if not (H.is_tbl(volume) and H.is_num(volume.number)) then
             logger.err("browser.refreshVolumeMetadata no volume data:", book_cache_id, number)
-            return
+            return false
         end
         bookinfo = bookinfo or KomgaModel:new(book_cache_id):getSeries() -- Komga Series
         -- pages 缺失时按 0 处理, 仍写入卷级元数据, 保证点击可打开
@@ -353,7 +353,7 @@ local function init_book_browser(parent)
             custom.custom_props.authors == display_author and
             lnk_percent == percent and lnk_doc_pages == (H.is_num(pages) and pages or nil) and
             lnk_status == target_status and lnk_ds:readSetting("provider") == "komga" then
-            return
+            return false
         end
         local doc_settings = self:bind_provider(lnk_path)
         if doc_settings and doc_settings.data then
@@ -403,6 +403,7 @@ local function init_book_browser(parent)
             end
         end
         self:emitMetadataChanged(lnk_path)
+        return true
     end
 
     function book_browser:asyncDownloadVolumeCover(book_cache_id, chapter, lnk_path)
@@ -606,6 +607,24 @@ local function init_book_browser(parent)
     -- 封面落盘后的定向行刷新: 封面是异步下载的, 行的首次提取可能先于封面完成
     -- ——提取时无封面则该行 has_cover 为空且 cover_fetched='Y', CoverBrowser
     -- 以"行存在"为准不会自动重试, 封面从此不再显示。
+    -- 节流合并的目录重绘: 多个来源(封面落盘/进度落盘)在短窗口内先后触发行刷新时
+    -- 只刷一次当前目录; 纯重绘, 不做任何数据同步
+    function book_browser:scheduleCoalescedRefresh()
+        if self._row_repaint_scheduled then
+            return
+        end
+        self._row_repaint_scheduled = true
+        UIManager:scheduleIn(1.5, function()
+            self._row_repaint_scheduled = nil
+            local fm = FileManager.instance
+            if fm and fm.onRefresh then
+                pcall(function()
+                    fm:onRefresh()
+                end)
+            end
+        end)
+    end
+
     -- 这里删掉该缓存行(纯 DB DELETE, 无事件广播), 下一次绘制时重新提取一次,
     -- ShortcutDocument 会读到刚落盘的封面。重绘做节流: 多个封面在短窗口内
     -- 先后落盘时只刷一次目录。
@@ -625,18 +644,43 @@ local function init_book_browser(parent)
                 BookList.resetBookInfoCache(lnk_path)
             end
         end)
-        if not self._cover_repaint_scheduled then
-            self._cover_repaint_scheduled = true
-            UIManager:scheduleIn(1.5, function()
-                self._cover_repaint_scheduled = nil
-                local fm = FileManager.instance
-                if fm and fm.onRefresh then
+        self:scheduleCoalescedRefresh()
+    end
+
+    -- 定向刷新一组卷的快捷方式行(阅读退出/翻章后的进度落盘路径):
+    -- 逐卷重算显示元数据(refreshVolumeMetadata 内部无变化跳过写入)并清 BookList
+    -- 内存缓存条目(列表行 percent_finished/status 的实际读取源)。只碰传入的卷,
+    -- 不做整目录/整书架的全量更新; 返回是否有 sidecar 实际变化。
+    function book_browser:refreshVolumeProgressRows(book_cache_id, numbers, bookinfo)
+        if not (H.is_str(book_cache_id) and H.is_tbl(numbers)) then
+            return false
+        end
+        local volume_folder = self:ensureVolumeFolder(book_cache_id, bookinfo)
+        if not volume_folder then
+            return false
+        end
+        local model = KomgaModel:new(book_cache_id)
+        local changed = false
+        for number in pairs(numbers) do
+            local volume = H.is_num(number) and model:getVolume(number) or nil
+            if H.is_tbl(volume) and H.is_num(volume.number) then
+                local lnk_path = self:writeVolLnk(volume, volume_folder, book_cache_id)
+                if H.is_str(lnk_path) and util.fileExists(lnk_path) then
+                    if self:refreshVolumeMetadata(nil, lnk_path, book_cache_id, volume.number, bookinfo) then
+                        changed = true
+                    end
+                    -- 无论 sidecar 是否变化都清缓存条目: 行显示进度由 BookList 从
+                    -- sidecar 直读并缓存在内存, 清掉后下一次绘制一定读到最新值
                     pcall(function()
-                        fm:onRefresh()
+                        local BookList = require("ui/widget/booklist")
+                        if BookList and BookList.resetBookInfoCache then
+                            BookList.resetBookInfoCache(lnk_path)
+                        end
                     end)
                 end
-            end)
+            end
         end
+        return changed
     end
 
     function book_browser:bind_provider(file)

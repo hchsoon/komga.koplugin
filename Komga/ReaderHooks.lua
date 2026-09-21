@@ -379,6 +379,14 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     if H.is_num(vol_idx) then
                         instance:refreshReadVolumeShortcut(displayed_chapter.book_cache_id, vol_idx)
                     end
+                    -- 3) 会话脏集合定向刷新(跨卷读完的卷等)+ 系列总进度。放在 nextTick:
+                    --    排在 uploadCurrentProgress 刚排入的延迟上传之后, 关书时刚读到
+                    --    末页的卷会先在本地/服务器标已读, 再按已读状态刷新行显示
+                    UIManager:nextTick(function()
+                        if instance.refreshSessionVolumeShortcuts then
+                            instance:refreshSessionVolumeShortcuts(displayed_chapter.book_cache_id)
+                        end
+                    end)
                 end
             end
             if not self.patches_ok then

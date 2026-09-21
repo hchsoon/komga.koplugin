@@ -739,14 +739,41 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         -- self.chapter.number = current_number
         self.chapter.current_page = self.chapter_imglist_cur
         Backend:saveVolumeProgress(self.chapter)
+        local old_chapter = self.chapter
         self.chapter =  Backend:getVolumeInfoCache(self.bookinfo.cache_id,current_number)
-        -- 同步 LibraryView 的阅读状态: 进度上传用的是视图内 chapter(所以 komga
-        -- 能收到新卷进度), 而 KOReader 阅读历史映射/快捷方式 sidecar 落盘用的是
-        -- LibraryView.displayed_chapter —— 跨卷后不同步会让历史停留在旧卷
         local okLV, LibraryView = pcall(require, "Komga/LibraryView")
         local inst = okLV and LibraryView and LibraryView.instance
-        if inst and H.is_tbl(self.chapter) then
-            inst.displayed_chapter = self.chapter
+        if inst then
+            -- 跨卷: 离开的卷记入会话脏集合(服务器进度/本地已读已由上方
+            -- saveVolumeProgress 落定)。流式跨卷不经过 ReaderUI 关闭事件,
+            -- 不在这里记账的话, 关卷刷新只认最后一卷, 连跨多卷时中间卷的
+            -- 书架进度/已读状态会停留在进入前的旧值
+            if inst.markSessionVolumeDirty and H.is_tbl(old_chapter)
+                and H.is_num(old_chapter.number) then
+                inst:markSessionVolumeDirty(
+                    (H.is_str(old_chapter.book_cache_id) and old_chapter.book_cache_id)
+                        or self.bookinfo.cache_id,
+                    old_chapter.number)
+            end
+            -- 阅读历史: 流式没有 ReaderUI 关闭事件, ReadHistory 的 komga 映射补丁
+            -- 不会经过, 关卷时只为最后一卷补写。在这里为离开的卷补一条历史——
+            -- displayed_chapter 此刻仍指向旧卷, 映射即该卷的快捷方式;
+            -- addItem 按路径去重置顶, 反复跨卷不会产生重复条目
+            if inst.ensureVolumeShortcutForReading and H.is_tbl(old_chapter) then
+                pcall(function()
+                    local ReadHistory = require("readhistory")
+                    local shortcut = inst:ensureVolumeShortcutForReading()
+                    if ReadHistory and ReadHistory.addItem and type(shortcut) == "string" then
+                        ReadHistory:addItem(shortcut)
+                    end
+                end)
+            end
+            -- 同步 LibraryView 的阅读状态: 进度上传用的是视图内 chapter(所以 komga
+            -- 能收到新卷进度), 而 KOReader 阅读历史映射/快捷方式 sidecar 落盘用的是
+            -- LibraryView.displayed_chapter —— 跨卷后不同步会让历史停留在旧卷
+            if H.is_tbl(self.chapter) then
+                inst.displayed_chapter = self.chapter
+            end
         end
         local new_chapter_imglist = Backend:getVolumePageUrls(self.chapter)
 
