@@ -181,7 +181,14 @@ function LibraryView:openSeriesVolumesFolder(book_cache_id, serie_file)
         return
     end
     local chapters = model:getVolumes() -- Komga Book 列表(分卷)
-    if H.is_tbl(chapters) and #chapters > 0 then
+    -- 卷清单完整性检查: 历史同步等按需路径只落地"读过"的卷行(volume 表部分行),
+    -- 旧的"#行数>0 即视为已同步"会让这种系列首次进入只看到部分分卷快捷方式。
+    -- 行数达不到系列 booksCount 时先补拉全量卷清单再进目录;
+    -- booksCount 缺失/为 0(陈旧行)时无法判定, 保持旧行为放行。
+    local books_count = H.is_num(bookinfo.booksCount) and bookinfo.booksCount or 0
+    local volumes_complete = H.is_tbl(chapters) and #chapters > 0
+        and (books_count <= 0 or #chapters >= books_count)
+    if volumes_complete then
         self:doOpenSeriesVolumesFolder(book_cache_id, bookinfo)
         return
     end
