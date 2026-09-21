@@ -81,12 +81,60 @@ function HistorySync.shouldBackfill(existing_time, server_ts)
     return server_ts > existing_time
 end
 
--- 单条: 定位卷 → 本地已读纠偏(服务器在读证据) → sidecar 进度落盘 → 返回快捷
--- 方式路径。卷/系列不在书架时返回 nil(调用方计数跳过)
+-- 系列行是否存在(全库书架同步会建齐; 服务器新加的系列可能还没有)
+function HistorySync.seriesRowExists(series_id)
+    local db = Backend.dbManager
+    if not (db and H.is_str(series_id)) then
+        return false
+    end
+    local ok, info = pcall(function()
+        return db:getSeriesInfo(Backend:getServerPathCode(), series_id)
+    end)
+    return ok and H.is_tbl(info) and H.is_str(info.name) or false
+end
+
+-- 卷行按需落地: volume 表只在"进过该系列分卷目录"后才有行(书架全量同步不建卷),
+-- 没卷行时用 BookDto 自带字段直接 upsert 单行, 免整系列卷清单拉取; 系列行也缺失
+-- (书架同步后服务器新加)时拉单条 SeriesDto 建行。
+-- upsertSeries 的 isUpdate 必须传 true: 缺省语义是"先停用全部旧系列"的全量刷新。
+function HistorySync.materializeVolume(book)
+    local db = Backend.dbManager
+    if not (db and H.is_tbl(book) and H.is_str(book.id) and H.is_str(book.seriesId)) then
+        return false
+    end
+    if not HistorySync.seriesRowExists(book.seriesId) then
+        local ok, resp = pcall(Backend.getSeriesById, Backend, book.seriesId)
+        local dto = ok and H.is_tbl(resp) and resp.type == "SUCCESS"
+            and H.is_tbl(resp.body) and resp.body or nil
+        if not dto then
+            return false
+        end
+        local ok_series = pcall(function()
+            db:upsertSeries(Backend:getServerPathCode(), {dto},
+                Backend.settings_data.data.server_address, true)
+        end)
+        if not ok_series then
+            return false
+        end
+    end
+    local ok_volume = pcall(function()
+        db:upsertVolumes(book.seriesId, {book})
+    end)
+    return ok_volume
+end
+
+-- 单条: 定位卷(缺卷行按需落地) → 本地已读纠偏(服务器在读证据) → sidecar 进度
+-- 落盘 → 系列快捷方式补建 → 返回卷快捷方式路径。无法落地返回 nil
 function HistorySync.applyOne(lv, book)
     local owner = Backend.dbManager and Backend.dbManager:findVolumeOwnerByBookId(book.id)
     if not (H.is_tbl(owner) and H.is_str(owner.book_cache_id) and H.is_num(owner.number)) then
-        return nil
+        if not HistorySync.materializeVolume(book) then
+            return nil
+        end
+        owner = Backend.dbManager:findVolumeOwnerByBookId(book.id)
+        if not (H.is_tbl(owner) and H.is_str(owner.book_cache_id) and H.is_num(owner.number)) then
+            return nil
+        end
     end
     local book_cache_id, number = owner.book_cache_id, owner.number
     local model = KomgaModel:new(book_cache_id)
@@ -115,6 +163,11 @@ function HistorySync.applyOne(lv, book)
                 math.min(page / pages, 1), bookinfo)
         end)
     end
+    -- 系列快捷方式补建: 该系列从未打开过时书架首页没有它的 .html(系列快捷方式
+    -- 只在书架菜单点开时创建), 历史同步顺带补上(addBookShortcut 幂等, 已存在零写入)
+    pcall(function()
+        lv.book_browser:addBookShortcut(bookinfo)
+    end)
     local lnk_path = lv.book_browser:writeVolLnk(volume, volume_folder, book_cache_id)
     if not (H.is_str(lnk_path) and util.fileExists(lnk_path)) then
         return nil

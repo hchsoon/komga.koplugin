@@ -447,6 +447,17 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if not H.is_str(file) then
             return
         end
+        -- komga 快捷方式可能已被删除(书架重建/手动清理): 历史记录里点击这类
+        -- 失效条目时, 不再往下走 showReader(不存在的文件) 闪退, 移除该历史条目
+        -- 并提示; 存在的文件不受影响
+        if file:find(Paths.LNK_SUFFIX, 1, true) and is_komga_browser_path(file)
+            and not util.fileExists(file) then
+            pcall(function()
+                require("readhistory"):removeItemByPath(file)
+            end)
+            MessageBox:notice("快捷方式对应的分卷已不存在, 已移除该历史条目")
+            return true
+        end
         local function open_regular_file(path)
             local ReaderUI = require("apps/reader/readerui")
             UIManager:broadcastEvent(Event:new("SetupShowReader"))

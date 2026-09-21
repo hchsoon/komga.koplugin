@@ -103,12 +103,23 @@ function Komga:registerDocumentRegistryAuxProvider()
     function ShortcutDocument:close() end
 
     DocumentRegistry:addAuxProvider({
-        provider_name = "Komga漫画阅读",
+        provider_name = "KOReader 漫画插件",
         provider = "komga",
         document_class = ShortcutDocument,
         order = 50, -- order in OpenWith dialog
         disable_file = true,
         disable_type = false,
+        -- Reader 内(阅读器历史/最近阅读)打开 komga 快捷方式时:
+        -- filemanagerutil.openFile 对带 order 的 aux provider 会调 provider.callback,
+        -- 无 callback 则回退 ui[provider]:openFile —— ReaderUI 上从未赋值 komga 字段,
+        -- 必然报错闪退。这里显式路由到插件打开流程(与文件管理器点快捷方式同一路径)
+        callback = function(file)
+            local okLV, LibraryViewModule = pcall(require, "Komga/LibraryView")
+            local handler = okLV and LibraryViewModule and LibraryViewModule.openFileHandler
+            if handler and handler.openFile then
+                handler:openFile(file)
+            end
+        end,
     })
 end
 

@@ -60,6 +60,17 @@ function M:getRecentReadingBooks()
     end, nil, 'getRecentReadingBooks')
 end
 
+-- 单条 SeriesDto(含 metadata/booksMetadata/url), 供历史同步按需建系列行
+function M:getSeriesById(series_id)
+    if not H.is_str(series_id) then
+        return wrap_response(nil, '参数错误')
+    end
+    return self:komgaApi(function()
+        -- GET /api/v1/series/:id
+        return self.api:get("/api/v1/series/" .. series_id, nil, {timeouts = {3, 5}})
+    end, nil, 'getSeriesById')
+end
+
 function M:saveVolumeProgress(volume)
 
     if not (H.is_str(volume.name) and H.is_str(volume.url)) then
