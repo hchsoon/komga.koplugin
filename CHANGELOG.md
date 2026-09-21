@@ -13,6 +13,12 @@
 - 修复: 流式跨卷时中间卷不进阅读历史(ReadHistory 的 komga 映射补丁依赖 ReaderUI 关闭事件,
   流式只在关卷时为最后一卷补写)——跨卷点为离开的卷即时补一条历史条目(addItem 按路径去重置顶,
   displayed_chapter 更新前映射, 正好是该卷快捷方式)
+- 新增: 设置 → 缓存与维护 → "从 Komga 同步阅读历史"(手动触发)。全库按 readProgress.lastModified
+  倒序拉取在读书(过滤 completed, 条数 history_sync_limit 可配, 默认 20), 按 bookId 定位书架已有
+  系列的卷, 复用 persistServerProgressToShortcut 落盘进度, 并以服务器 lastModified 为时间戳合并进
+  KOReader 阅读历史; 安全合并只向前不后退(本地条目不旧于服务器时跳过, 避免旧时间戳把本机较新的
+  "继续阅读"置顶条目降级); 系列不在书架的卷跳过并计数提示; 纯函数(过滤/时间戳解析/合并决策)
+  有 spec 回归防线
 
 ## 2026-09-15 ~ 2026-09-19
 

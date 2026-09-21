@@ -251,6 +251,28 @@ WHERE c.bookCacheId = ? AND c.bookId = ? LIMIT 1;
     }, { book_cache_id = bookCacheId, bookId = bookId })
     return result[1]
 end
+
+-- 阅读历史同步用: 全库按 bookId 反查卷归属(bookId 全局唯一, 不限单系列)。
+-- 系列未同步/被禁用时查不到, 调用方按"不在书架"跳过。
+function Store:findVolumeOwnerByBookId(bookId)
+    if not H.is_str(bookId) then
+        dbg.log('findVolumeOwnerByBookId Incorrect input parameters')
+        return nil
+    end
+    local sql_stmt = [[
+    SELECT
+    c.bookCacheId,
+    c.number
+FROM volume AS c
+INNER JOIN series AS b ON c.bookCacheId = b.bookCacheId
+WHERE c.bookId = ? AND b.isEnabled = 1
+LIMIT 1;
+    ]]
+    local result = self:queryObjects(sql_stmt, {bookId}, {
+        { "book_cache_id" }, { "number", "number" },
+    })
+    return result[1]
+end
 function Store:getVolumeInfo(bookCacheId, number)
     if not H.is_str(bookCacheId) or not H.is_num(number) then
         dbg.log('getVolumeInfo Incorrect input parameters')

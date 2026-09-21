@@ -15,6 +15,7 @@ return {
     FA_TIMES = "\u{F00D}",
     FA_EXCHANGE = "\u{F0EC}",
     FA_HOURGLASS = "\u{231B}",
+    FA_HISTORY = "\u{F1DA}",
     FA_FOLDER = "\u{F07B}",
     FA_PLAY = "\u{F04B}",
     FA_SHARE = "\u{F064}",

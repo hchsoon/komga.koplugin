@@ -857,6 +857,42 @@ function LibraryView:openMenu()
         local rows = {
             {
                 {
+        text = Icons.FA_HISTORY .. " 从 Komga 同步阅读历史",
+        callback = function()
+            UIManager:close(dialog)
+            require("Komga/HistorySync").sync(self)
+        end
+                }
+            },
+            {
+                {
+        text = string.format("%s 历史同步条数 [%s]", Icons.FA_HISTORY,
+            tostring(settings.history_sync_limit or 20)),
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:input(nil, nil, {
+                title = "设置历史同步条数",
+                input = tostring(settings.history_sync_limit or 20),
+                description = "从 Komga 同步\"在读\"历史到本地的最大条数, 5-100。",
+                condensed = true,
+                save_callback = function(input_text)
+                    local n = tonumber(input_text)
+                    if not n or n < 5 or n > 100 then
+                        MessageBox:notice('请输入 5-100 的数字')
+                        return false
+                    end
+                    settings.history_sync_limit = math.floor(n)
+                    return saveSettingsAndNotify(settings, function(data)
+                        MessageBox:notice("历史同步条数已更新")
+                    end)
+                end,
+                allow_newline = false
+            })
+        end
+                }
+            },
+            {
+                {
         text = Icons.FA_FOLDER .. " 缓存管理",
         callback = function()
             UIManager:close(dialog)

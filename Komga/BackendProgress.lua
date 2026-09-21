@@ -49,6 +49,17 @@ function M:getSeriesVolumesReadProgress(series_id)
 
 end
 
+-- 阅读历史同步: 全库 BookDto[] 按 readProgress.lastModified 倒序(sort 走 Spring
+-- pageable 查询参数), body=合并后的 content 数组。在读/已读过滤由调用方做。
+function M:getRecentReadingBooks()
+    return self:komgaApi(function()
+        return self:fetchAllPages("/api/v1/books/list",
+            function(page)
+                return {size = 1000, page = page, sort = "readProgress.lastModified,desc"}
+            end, {fullTextSearch = ""}, {5, 8})
+    end, nil, 'getRecentReadingBooks')
+end
+
 function M:saveVolumeProgress(volume)
 
     if not (H.is_str(volume.name) and H.is_str(volume.url)) then
