@@ -272,7 +272,7 @@ end
 -- 默认页大小 20 截断), 逐页拉齐后合并为单一响应(替换 first.body.content 为
 -- 全量数组), 调用方回调无感知。
 -- build_body(page) 返回每页请求 body(通常 {size = 1000, page = page})。
-function M:fetchAllPages(path, build_body, json_body, timeouts)
+function M:fetchAllPages(path, build_body, json_body, timeouts, max_pages)
     local all_content, total_pages, page = {}, 1, 0
     local first
     while page < total_pages do
@@ -291,6 +291,11 @@ function M:fetchAllPages(path, build_body, json_body, timeouts)
         end
         total_pages = tonumber(r.body and r.body.totalPages) or 1
         page = page + 1
+        -- max_pages: 排序取前缀场景(如"最近阅读 top N")在拿够一页后停止翻页,
+        -- 不再把剩余页全部拉齐; 缺省 nil 保持全量拉齐语义
+        if max_pages and page >= max_pages then
+            total_pages = page
+        end
     end
     if first then
         first.body.content = all_content

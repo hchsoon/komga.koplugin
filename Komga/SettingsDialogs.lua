@@ -866,6 +866,20 @@ function LibraryView:openMenu()
             },
             {
                 {
+        text = string.format("%s 书架刷新后自动同步历史 %s", Icons.FA_HISTORY,
+            (settings.history_sync_auto and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        callback = function()
+            UIManager:close(dialog)
+            settings.history_sync_auto = not settings.history_sync_auto and true or nil
+            return saveSettingsAndNotify(settings, function(data)
+                MessageBox:notice("书架刷新后自动同步历史: " ..
+                    (settings.history_sync_auto and "开" or "关"))
+            end)
+        end
+                }
+            },
+            {
+                {
         text = string.format("%s 历史同步条数 [%s]", Icons.FA_HISTORY,
             tostring(settings.history_sync_limit or 20)),
         callback = function()

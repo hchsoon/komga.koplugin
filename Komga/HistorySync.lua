@@ -196,7 +196,14 @@ end
 -- 主流程: 子进程拉取 → UI 线程分块落地(每块 3 条让出主循环) → 历史合并 →
 -- 统一落盘 + 单次目录重绘 + 汇总通知
 function HistorySync.sync(lv)
-    if not (H.is_tbl(lv) and H.is_tbl(lv.book_browser)) then
+    if not H.is_tbl(lv) then
+        return
+    end
+    -- 自动同步入口(书架菜单刷新)可能先于浏览器引擎初始化, 按需建
+    if not H.is_tbl(lv.book_browser) and lv.getBrowserWidget then
+        lv:getBrowserWidget()
+    end
+    if not H.is_tbl(lv.book_browser) then
         MessageBox:notice("书架未初始化, 请先打开书架")
         return
     end
@@ -206,11 +213,13 @@ function HistorySync.sync(lv)
     end
     local settings = Backend:getSettings()
     local limit = H.is_num(settings.history_sync_limit) and settings.history_sync_limit or DEFAULT_LIMIT
+    -- 倒序取前缀: 多拉一批余量(可能含已读完/completed 被过滤), 不全库翻页
+    local max_fetch = math.min(math.max(limit * 5, 100), 1000)
     local added, skipped_local, skipped_missing = 0, 0, 0
     -- fork 前关库: 子进程只做 HTTP+JSON(与 syncAllVolumesServerProgress 同款)
     Backend:closeDbManager()
     TaskQueue.getChannel("sync", 1):push(function()
-        local ok, resp = pcall(Backend.getRecentReadingBooks, Backend)
+        local ok, resp = pcall(Backend.getRecentReadingBooks, Backend, max_fetch)
         if not (ok and H.is_tbl(resp) and resp.type == "SUCCESS") then
             return nil
         end
@@ -270,6 +279,16 @@ function HistorySync.sync(lv)
         end
         step()
     end, {timeout = 60, tag = "history_sync"})
+end
+
+-- 书架刷新后的自动同步入口: 仅当设置开启时执行(history_sync_auto, 默认关)。
+-- 手动入口(settins 菜单)直接调 sync, 不经过这里
+function HistorySync.syncIfEnabled(lv)
+    local settings = Backend:getSettings()
+    if settings.history_sync_auto ~= true then
+        return
+    end
+    HistorySync.sync(lv)
 end
 
 return HistorySync

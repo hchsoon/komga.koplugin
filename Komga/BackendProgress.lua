@@ -49,14 +49,16 @@ function M:getSeriesVolumesReadProgress(series_id)
 
 end
 
--- 阅读历史同步: 全库 BookDto[] 按 readProgress.lastModified 倒序(sort 走 Spring
--- pageable 查询参数), body=合并后的 content 数组。在读/已读过滤由调用方做。
-function M:getRecentReadingBooks()
+-- 阅读历史同步: 全库在读书按 readProgress.lastModified 倒序取前 max_fetch 条
+-- (倒序序列的前缀即最近阅读, max_pages=1 单页拿齐不再翻页; completed 过滤由
+-- 调用方做), body=合并后的 content 数组。
+function M:getRecentReadingBooks(max_fetch)
+    local size = math.min(math.max(tonumber(max_fetch) or 100, 1), 1000)
     return self:komgaApi(function()
         return self:fetchAllPages("/api/v1/books/list",
             function(page)
-                return {size = 1000, page = page, sort = "readProgress.lastModified,desc"}
-            end, {fullTextSearch = ""}, {5, 8})
+                return {size = size, page = page, sort = "readProgress.lastModified,desc"}
+            end, {fullTextSearch = ""}, {5, 8}, 1)
     end, nil, 'getRecentReadingBooks')
 end
 
