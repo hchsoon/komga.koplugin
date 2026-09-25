@@ -46,6 +46,8 @@ function LibraryView:openInstalledReadSource()
     local description = [[
         (书架与接口地址关联，设置格式符合 RFC3986，认证信息如有特殊字符需要 URL 编码)  示例:
         → 服务器版    http://192.168.1.18:10102/reader3
+        → IPv6 地址   http://[fd00::1]:25600
+        (IPv6 字面量必须带方括号, 否则端口无法正确解析)
     ]]
 
     local dialog
