@@ -117,6 +117,24 @@ local function resolve_redirect(base_url, location)
     return socket_url.absolute(base_url, location)
 end
 
+-- RFC 7230: IPv6 字面量的 Host 头必须带方括号。luasocket http 自动生成的 Host
+-- 不加括号("Host: 240e:...:2dda:10102"), Tomcat/Komga 直接 400 拒绝 —— IPv6
+-- 服务器"连得上却请求全 400"的根因; 域名/IPv4 不含冒号, 本函数零影响。
+local function set_host_header(headers, parsed)
+    if not (type(headers) == "table" and type(parsed) == "table"
+        and type(parsed.host) == "string" and parsed.host ~= "") then
+        return
+    end
+    local host_header = parsed.host
+    if host_header:find(":", 1, true) then
+        host_header = "[" .. host_header .. "]"
+    end
+    if parsed.port then
+        host_header = host_header .. ":" .. tonumber(parsed.port)
+    end
+    headers["host"] = host_header
+end
+
 local function pGetUrlContent(options)
     local ltn12 = require("ltn12")
     local socket = require("socket")
@@ -141,11 +159,18 @@ local function pGetUrlContent(options)
             return false, "Unsupported protocol"
         end
 
+        -- 浅拷贝再注入 Host: 不改调用方的 headers 表(重定向跨跳时 authority 会变)
+        local send_headers = {}
+        for k, v in pairs(headers) do
+            send_headers[k] = v
+        end
+        set_host_header(send_headers, parsed)
+
         local sink = {}
         local request = {
             url = url,
             method = method,
-            headers = headers,
+            headers = send_headers,
             sink = maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink),
             source = options.source,
             create = socketutil.tcp,
@@ -161,8 +186,12 @@ local function pGetUrlContent(options)
         end
 
         if resp_headers == nil then
-            logger.warn("No HTTP headers:", status or code or "network unreachable")
-            return false, "Network or remote server unavailable"
+            -- 响应头为空 / 连接失败场景: status 携带底层原因(luasocket 的
+            -- "closed"/"timeout"/"host not found"/"connection refused" 等), 不透传
+            -- 用户无从判断是路由/解析/拒绝哪一层
+            local reason = tostring(status or code or "network unreachable")
+            logger.warn("No HTTP headers:", reason)
+            return false, "Network or remote server unavailable (" .. reason .. ")"
         end
 
         local is_redirect = type(code) == "number" and code >= 300 and code < 400
@@ -264,6 +293,8 @@ local function pStreamToFile(options)
         for k, v in pairs(options.headers or get_default_headers()) do
             headers[k] = v
         end
+        -- 每跳按当前 URL 注入正确 Host(重定向可能换 authority)
+        set_host_header(headers, socket_url.parse(url))
         if start_offset > 0 then
             headers["Range"] = "bytes=" .. start_offset .. "-"
         end
@@ -374,6 +405,11 @@ local function pStreamToFile(options)
                 headers = resp_headers}
         end
 
+        if type(code) ~= "number" then
+            -- luasocket 连接失败: 首个返回值是错误串("closed"/"timeout"/
+            -- "host not found"/"connection refused" 等), 原样透传供定位
+            return false, "Network or remote server unavailable (" .. tostring(code) .. ")"
+        end
         return false, describe_http_error(code)
     end
 

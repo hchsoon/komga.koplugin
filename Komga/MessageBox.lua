@@ -200,9 +200,13 @@ function M:loading(message, runnable, callback, options)
 end
 
 function M:notice(msg, timeout)
-    if timeout then
-        -- 指定展示时长: 直接构造(Notice:notify 的第三参是 refresh_after, 不是时长)
+    -- 与 error/success 同构: 第二参为数字才是展示时长; 字符串是历史调用
+    -- notice('同步失败', err_msg) 的附加文本 —— 原实现原样塞进
+    -- Notification.timeout, scheduleIn 对字符串做算术直接报错(time.lua:115)
+    if type(timeout) == "number" then
         UIManager:show(Notification:new{ text = msg or '', timeout = timeout })
+    elseif type(timeout) == "string" and timeout ~= "" then
+        Notification:notify(msg .. " " .. timeout, Notification.SOURCE_ALWAYS_SHOW)
     else
         Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
     end

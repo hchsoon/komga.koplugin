@@ -324,6 +324,19 @@ function M:setEndpointUrl(new_setting_url)
         return wrap_response(nil, '参数校检错误，保存失败')
     end
 
+    -- IPv6 字面量必须带方括号(RFC3986): 不带括号时 URL 解析会在第一个冒号处
+    -- 拆坏(host 截断/端口丢失), 存进去的地址永远连不上; 入口直接拦下并给出
+    -- 正确写法。userinfo(user:pass@)可能含冒号先剥掉; 端口(:数字)也先剥掉,
+    -- 只看 host 本身是否含冒号
+    local authority_part = new_setting_url:match("^%a[%w+.-]*://([^/%s]+)")
+    if authority_part then
+        local hostport = authority_part:match("@([^@]*)$") or authority_part
+        local host_only = hostport:match("^(.*):%d+$") or hostport
+        if host_only:find(":", 1, true) and not host_only:find("[", 1, true) then
+            return wrap_response(nil, 'IPv6 地址必须带方括号, 如 http://[fd00::1]:25600')
+        end
+    end
+
     local parsed = socket_url.parse(new_setting_url)
     if not parsed then
         return wrap_response(nil, '地址不合规则，请检查')
